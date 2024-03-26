@@ -2,7 +2,12 @@ use anyhow::Result;
 use probe_rs::{
     architecture::arm::{ApAddress, DpAddress},
     probe::list::Lister,
+    core::Core,
+    config::Target,
 };
+use probe_rs_target::{BinaryFormat, CoreAccessOptions, RiscvCoreAccessOptions};
+
+use probe_rs_target::{ArmCoreAccessOptions, CoreType};
 
 fn main() -> Result<()> {
     pretty_env_logger::init();
@@ -46,6 +51,7 @@ fn main() -> Result<()> {
     const ERASEALLSTATUS: u8 = 0x08;
     const IDR: u8 = 0xFC;
 
+    /*
     for &ap in &[APP_MEM, NET_MEM, APP_CTRL, NET_CTRL] {
         println!("IDR {:?} {:x}", ap, iface.read_raw_ap_register(ap, IDR)?);
     }
@@ -56,6 +62,15 @@ fn main() -> Result<()> {
         // Wait for erase done
         while iface.read_raw_ap_register(ap, ERASEALLSTATUS)? != 0 {}
     }
+    */
+
+    let options = ArmCoreAccessOptions { ap: APP_MEM.ap, psel: 0, debug_base: None, cti_base: None };
+    let target = probe_rs::config::get_target_by_name("Cortex-M33")?;
+    let mut core_state = Core::create_state(0, CoreAccessOptions::Arm(options), &target, CoreType::Armv8m);
+
+    let mut core = core_state.attach_arm(&target, &mut iface)?;
+
+    println!("{:?}", core.status()?);
 
     Ok(())
 }

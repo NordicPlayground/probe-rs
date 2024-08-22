@@ -23,8 +23,8 @@ members = [
 exclude = ["probe-rs/tests/gpio-hal-blinky"]
 
 [workspace.dependencies]
-probe-rs-nordic = { path = "probe-rs", version = "0.23.0" }
-probe-rs-target-nordic = { path = "probe-rs-target", version = "0.23.0" }
+probe-rs-nordic = { path = "probe-rs", version = "0.23.0", registry = "nordic-artifactory" }
+probe-rs-target-nordic = { path = "probe-rs-target", version = "0.23.0", registry = "nordic-artifactory" }
 
 docsplay = "0.1.1"
 thiserror = "1.0.58"

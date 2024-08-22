@@ -14,12 +14,12 @@ use crate::{
 use super::ResolvedCoreOptions;
 
 #[derive(Debug)]
-pub(crate) struct CombinedCoreState {
-    pub(crate) core_state: CoreState,
+pub struct CombinedCoreState {
+    pub core_state: CoreState,
 
-    pub(crate) specific_state: SpecificCoreState,
+    pub specific_state: SpecificCoreState,
 
-    pub(crate) id: usize,
+    pub id: usize,
 }
 
 impl CombinedCoreState {
@@ -31,7 +31,7 @@ impl CombinedCoreState {
         self.specific_state.core_type()
     }
 
-    pub(crate) fn attach_arm<'probe>(
+    pub fn attach_arm<'probe>(
         &'probe mut self,
         target: &'probe Target,
         arm_interface: &'probe mut Box<dyn ArmProbeInterface>,
@@ -102,7 +102,7 @@ impl CombinedCoreState {
         })
     }
 
-    pub(crate) fn enable_arm_debug(
+    pub fn enable_arm_debug(
         &self,
         interface: &mut dyn ArmProbeInterface,
     ) -> Result<(), Error> {
@@ -128,7 +128,7 @@ impl CombinedCoreState {
         Ok(())
     }
 
-    pub(crate) fn arm_reset_catch_set(
+    pub fn arm_reset_catch_set(
         &self,
         interface: &mut dyn ArmProbeInterface,
     ) -> Result<(), Error> {
@@ -150,7 +150,7 @@ impl CombinedCoreState {
         Ok(())
     }
 
-    pub(crate) fn attach_riscv<'probe>(
+    pub fn attach_riscv<'probe>(
         &'probe mut self,
         target: &'probe Target,
         interface: &'probe mut RiscvCommunicationInterface,
@@ -184,7 +184,7 @@ impl CombinedCoreState {
         ))
     }
 
-    pub(crate) fn attach_xtensa<'probe>(
+    pub fn attach_xtensa<'probe>(
         &'probe mut self,
         target: &'probe Target,
         interface: &'probe mut XtensaCommunicationInterface,

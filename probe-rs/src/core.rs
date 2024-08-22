@@ -390,7 +390,7 @@ impl<'probe> Core<'probe> {
     }
 
     /// Creates a new [`CoreState`]
-    pub(crate) fn create_state(
+    pub fn create_state(
         id: usize,
         options: CoreAccessOptions,
         target: &Target,

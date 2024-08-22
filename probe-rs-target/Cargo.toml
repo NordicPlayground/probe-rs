@@ -1,5 +1,5 @@
 [package]
-name = "probe-rs-target"
+name = "probe-rs-target-nordic"
 version.workspace = true
 edition.workspace = true
 description = "Target description schema for probe-rs."
@@ -10,6 +10,10 @@ readme.workspace = true
 categories = ["embedded", "hardware-support", "development-tools::debugging"]
 keywords = ["embedded"]
 license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "probe_rs_target"
 
 [dependencies]
 jep106 = "0.2.8"

@@ -11,14 +11,15 @@ readme = "README.md"
 categories = ["embedded", "hardware-support", "development-tools::debugging"]
 keywords = ["embedded"]
 license.workspace = true
+publish.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-probe-rs = { path = "../probe-rs", version = "0.23.0", default-features = false, features = [
+probe-rs-nordic = { path = "../probe-rs", version = "0.23.0", default-features = false, features = [
     "rtt",
 ] }
-probe-rs-target = { path = "../probe-rs-target", version = "0.23.0", default-features = false }
+probe-rs-target-nordic = { path = "../probe-rs-target", version = "0.23.0", default-features = false }
 cmsis-pack = { version = "0.6.3" }
 goblin = { version = "0.8.0", default-features = false, features = [
     "elf32",

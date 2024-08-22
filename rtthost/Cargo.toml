@@ -6,9 +6,10 @@ edition.workspace = true
 license = "MIT"
 authors = ["Matti Virkkunen <mvirkkunen@gmail.com>"]
 repository.workspace = true
+publish = false
 
 [dependencies]
 pretty_env_logger = "0.5"
-probe-rs = { workspace = true }
+probe-rs-nordic = { workspace = true }
 anyhow = { workspace = true }
 clap = { version = "4", features = ["cargo", "derive"] }

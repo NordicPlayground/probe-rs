@@ -3,10 +3,11 @@ version = "0.23.0"
 edition = "2021"
 
 documentation = "https://docs.rs/probe-rs/"
-homepage = "https://github.com/probe-rs/probe-rs"
-repository = "https://github.com/probe-rs/probe-rs"
+homepage = "https://github.com/NordicPlayground/probe-rs"
+repository = "https://github.com/NordicPlayground/probe-rs"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
+publish = ["nordic-artifactory"]
 
 
 [workspace]
@@ -22,8 +23,8 @@ members = [
 exclude = ["probe-rs/tests/gpio-hal-blinky"]
 
 [workspace.dependencies]
-probe-rs = { path = "probe-rs", version = "0.23.0" }
-probe-rs-target = { path = "probe-rs-target", version = "0.23.0" }
+probe-rs-nordic = { path = "probe-rs", version = "0.23.0" }
+probe-rs-target-nordic = { path = "probe-rs-target", version = "0.23.0" }
 
 docsplay = "0.1.1"
 thiserror = "1.0.58"

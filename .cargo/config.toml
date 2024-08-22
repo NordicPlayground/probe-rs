@@ -2,3 +2,6 @@
 xtask = "run --package xtask --"
 probe-rs = "run --package probe-rs --features cli --bin probe-rs --"
 smoke-tester = "run --package smoke_tester --"
+
+[registries.nordic-artifactory]
+index = "sparse+https://eu.files.nordicsemi.com/artifactory/api/cargo/cargo/index/"

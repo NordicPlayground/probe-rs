@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.23.0"
+version = "0.23.0+nordic"
 edition = "2021"
 
 documentation = "https://docs.rs/probe-rs/"

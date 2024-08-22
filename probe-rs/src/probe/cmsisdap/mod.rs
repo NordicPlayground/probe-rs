@@ -4,8 +4,7 @@ mod tools;
 
 use crate::{
     architecture::arm::{
-        communication_interface::DapProbe,
-        communication_interface::UninitializedArmProbe,
+        communication_interface::{DapProbe, UninitializedArmProbe},
         dp::{Abort, Ctrl},
         swo::poll_interval_from_buf_size,
         ArmCommunicationInterface, ArmError, DapError, Pins, PortType, RawDapAccess, Register,
@@ -55,18 +54,19 @@ use commands::{
 };
 use probe_rs_target::ScanChainElement;
 
-use std::{fmt::Write, result::Result, time::Duration};
+use std::{fmt::Write, time::Duration};
 
 use bitvec::prelude::*;
 
 use super::common::{extract_idcodes, extract_ir_lengths, ScanChainError};
 
 /// A factory for creating [`CmsisDap`] probes.
+#[derive(Debug)]
 pub struct CmsisDapFactory;
 
-impl std::fmt::Debug for CmsisDapFactory {
+impl std::fmt::Display for CmsisDapFactory {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CmsisDap").finish()
+        f.write_str("CMSIS-DAP")
     }
 }
 
@@ -505,58 +505,41 @@ impl CmsisDap {
                 }
 
                 return Err(DapError::SwdProtocol.into());
-            } else {
-                match response.last_transfer_response.ack {
-                    Ack::Ok => {
-                        tracing::trace!("Transfer status: ACK");
-                        return Ok(response.transfers[response.transfers.len() - 1].data);
-                    }
-                    Ack::NoAck => {
-                        tracing::trace!(
-                            "Transfer status for batch item {}/{}: NACK",
-                            count,
-                            batch.len()
-                        );
-                        // TODO: Try a reset?
-                        return Err(DapError::NoAcknowledge.into());
-                    }
-                    Ack::Fault => {
-                        tracing::trace!(
-                            "Transfer status for batch item {}/{}: FAULT",
-                            count,
-                            batch.len()
-                        );
+            }
 
-                        // To avoid a potential endless recursion,
-                        // call a separate function to read the ctrl register,
-                        // which doesn't use the batch API.
-                        let ctrl = self.read_ctrl_register()?;
+            match response.last_transfer_response.ack {
+                Ack::Ok => {
+                    tracing::trace!("Transfer status: ACK");
+                    return Ok(response.transfers[response.transfers.len() - 1].data);
+                }
+                Ack::NoAck => {
+                    tracing::trace!(
+                        "Transfer status for batch item {}/{}: NACK",
+                        count,
+                        batch.len()
+                    );
+                    // TODO: Try a reset?
+                    return Err(DapError::NoAcknowledge.into());
+                }
+                Ack::Fault => {
+                    tracing::trace!(
+                        "Transfer status for batch item {}/{}: FAULT",
+                        count,
+                        batch.len()
+                    );
 
-                        tracing::trace!("Ctrl/Stat register value is: {:?}", ctrl);
+                    // To avoid a potential endless recursion,
+                    // call a separate function to read the ctrl register,
+                    // which doesn't use the batch API.
+                    let ctrl = self.read_ctrl_register()?;
 
-                        if ctrl.sticky_err() {
-                            let mut abort = Abort(0);
+                    tracing::trace!("Ctrl/Stat register value is: {:?}", ctrl);
 
-                            // Clear sticky error flags.
-                            abort.set_stkerrclr(ctrl.sticky_err());
-
-                            RawDapAccess::raw_write_register(
-                                self,
-                                PortType::DebugPort,
-                                Abort::ADDRESS,
-                                abort.into(),
-                            )?;
-                        }
-
-                        tracing::trace!("draining {:?} and retries left {:?}", count, retry);
-                        batch.drain(0..count);
-                        continue;
-                    }
-                    Ack::Wait => {
-                        tracing::trace!("wait",);
-
+                    if ctrl.sticky_err() {
                         let mut abort = Abort(0);
-                        abort.set_dapabort(true);
+
+                        // Clear sticky error flags.
+                        abort.set_stkerrclr(ctrl.sticky_err());
 
                         RawDapAccess::raw_write_register(
                             self,
@@ -564,9 +547,26 @@ impl CmsisDap {
                             Abort::ADDRESS,
                             abort.into(),
                         )?;
-
-                        return Err(DapError::WaitResponse.into());
                     }
+
+                    tracing::trace!("draining {:?} and retries left {:?}", count, retry);
+                    batch.drain(0..count);
+                    continue;
+                }
+                Ack::Wait => {
+                    tracing::trace!("wait",);
+
+                    let mut abort = Abort(0);
+                    abort.set_dapabort(true);
+
+                    RawDapAccess::raw_write_register(
+                        self,
+                        PortType::DebugPort,
+                        Abort::ADDRESS,
+                        abort.into(),
+                    )?;
+
+                    return Err(DapError::WaitResponse.into());
                 }
             }
         }
@@ -818,14 +818,15 @@ impl DebugProbe for CmsisDap {
 
     fn select_protocol(&mut self, protocol: WireProtocol) -> Result<(), DebugProbeError> {
         match protocol {
-            WireProtocol::Jtag => {
+            WireProtocol::Jtag if self.capabilities._jtag_implemented => {
                 self.protocol = Some(WireProtocol::Jtag);
                 Ok(())
             }
-            WireProtocol::Swd => {
+            WireProtocol::Swd if self.capabilities._swd_implemented => {
                 self.protocol = Some(WireProtocol::Swd);
                 Ok(())
             }
+            _ => Err(DebugProbeError::UnsupportedProtocol(protocol)),
         }
     }
 

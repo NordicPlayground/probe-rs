@@ -19,10 +19,10 @@ use crate::{
     util::rtt::RttConfig,
 };
 use anyhow::{anyhow, Result};
+use probe_rs::debug::VerifiedBreakpoint;
 use probe_rs::{
     debug::{
-        debug_info::DebugInfo, stack_frame::StackFrameInfo, ColumnType, ObjectRef,
-        VerifiedBreakpoint,
+        debug_info::DebugInfo, stack_frame::StackFrameInfo, ColumnType, ObjectRef, VariableCache,
     },
     rtt::{Rtt, ScanRegion},
     Core, CoreStatus, Error, HaltReason,
@@ -44,6 +44,7 @@ pub struct CoreData {
     pub last_known_status: CoreStatus,
     pub target_name: String,
     pub debug_info: DebugInfo,
+    pub static_variables: Option<VariableCache>,
     pub core_peripherals: Option<SvdCache>,
     pub stack_frames: Vec<probe_rs::debug::stack_frame::StackFrame>,
     pub breakpoints: Vec<session_data::ActiveBreakpoint>,
@@ -192,23 +193,22 @@ impl<'p> CoreHandle<'p> {
             return Ok(());
         };
 
-        for any_channel in target_rtt.active_channels.iter() {
-            if let Some(up_channel) = &any_channel.up_channel {
-                if any_channel.data_format == DataFormat::Defmt {
-                    // For defmt, we set the channel to be blocking when full.
-                    up_channel.set_mode(&mut self.core, ChannelMode::BlockIfFull)?;
-                }
-                debugger_rtt_channels.push(debug_rtt::DebuggerRttChannel {
-                    channel_number: up_channel.number(),
-                    // This value will eventually be set to true by a VSCode client request "rttWindowOpened"
-                    has_client_window: false,
-                });
-                debug_adapter.rtt_window(
-                    up_channel.number(),
-                    any_channel.channel_name.clone(),
-                    any_channel.data_format,
-                );
+        for up_channel in target_rtt.active_up_channels.values() {
+            let data_format = DataFormat::from(&up_channel.data_format);
+            if data_format == DataFormat::Defmt {
+                // For defmt, we set the channel to be blocking when full.
+                up_channel.set_mode(&mut self.core, ChannelMode::BlockIfFull)?;
             }
+            debugger_rtt_channels.push(debug_rtt::DebuggerRttChannel {
+                channel_number: up_channel.number(),
+                // This value will eventually be set to true by a VSCode client request "rttWindowOpened"
+                has_client_window: false,
+            });
+            debug_adapter.rtt_window(
+                up_channel.number(),
+                up_channel.channel_name.clone(),
+                data_format,
+            );
         }
 
         self.core_data.rtt_connection = Some(debug_rtt::RttConnection {
@@ -381,13 +381,27 @@ impl<'p> CoreHandle<'p> {
     /// required to resolve the values of these variables. This is used to provide the minimal
     /// memory ranges required to create a [`CoreDump`] for the current scope.
     pub(crate) fn get_memory_ranges(&mut self) -> Vec<Range<u64>> {
+        let recursion_limit = 10;
+
         let mut all_discrete_memory_ranges = Vec::new();
+
+        if let Some(static_variables) = &mut self.core_data.static_variables {
+            static_variables.recurse_deferred_variables(
+                &self.core_data.debug_info,
+                &mut self.core,
+                recursion_limit,
+                StackFrameInfo {
+                    registers: &self.core_data.stack_frames[0].registers,
+                    frame_base: self.core_data.stack_frames[0].frame_base,
+                    canonical_frame_address: self.core_data.stack_frames[0].canonical_frame_address,
+                },
+            );
+            all_discrete_memory_ranges.append(&mut static_variables.get_discrete_memory_ranges());
+        }
+
         // Expand and validate the static and local variables for each stack frame.
         for frame in self.core_data.stack_frames.iter_mut() {
             let mut variable_caches = Vec::new();
-            if let Some(static_variables) = &mut frame.static_variables {
-                variable_caches.push(static_variables);
-            }
             if let Some(local_variables) = &mut frame.local_variables {
                 variable_caches.push(local_variables);
             }
@@ -437,13 +451,13 @@ fn try_attach_rtt(
         .map_err(|error| anyhow!("Error attempting to attach to RTT: {}", error))?;
 
     tracing::info!("RTT initialized.");
-    let target = RttActiveTarget::new(rtt, elf_file, rtt_config, timestamp_offset, None)?;
+    let target = RttActiveTarget::new(rtt, elf_file, rtt_config, timestamp_offset)?;
 
     Ok(target)
 }
 
 /// Return a Vec of memory ranges that consolidate the adjacent memory ranges of the input ranges.
-/// Note: The concept of "adjacent" is calculated to include a gap of up to specicied number of bytes between ranges.
+/// Note: The concept of "adjacent" is calculated to include a gap of up to specified number of bytes between ranges.
 /// This serves to consolidate memory ranges that are separated by a small gap, but are still close enough for the purpose of the caller.
 fn consolidate_memory_ranges(
     mut discrete_memory_ranges: Vec<Range<u64>>,

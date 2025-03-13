@@ -1,6 +1,7 @@
 use super::{
     sequences::{
         atsam::AtSAM,
+        cc13xx_cc26xx::CC13xxCC26xx,
         efm32xg2::EFM32xG2,
         esp32::ESP32,
         esp32c2::ESP32C2,
@@ -85,7 +86,7 @@ impl Target {
     /// Create a new target for the given details.
     ///
     /// We suggest never using this function directly.
-    /// Use (crate::registry::Registry::get_target)[`Registry::get_target`] instead.
+    /// Use [`crate::config::registry::get_target_by_name`] instead.
     /// This will ensure that the used target is valid.
     ///
     /// The user has to make sure that all the cores have the same [`Architecture`].
@@ -186,6 +187,8 @@ impl Target {
             DebugSequence::Arm(AtSAM::create())
         } else if chip.name.starts_with("XMC4") {
             DebugSequence::Arm(XMC4000::create())
+        } else if chip.name.starts_with("CC13") || chip.name.starts_with("CC26") {
+            DebugSequence::Arm(CC13xxCC26xx::create())
         } else {
             // Default to the architecture of the first core, which is okay if
             // there is no mixed architectures.

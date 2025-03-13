@@ -377,7 +377,7 @@ fn cortex_m_reset_system(interface: &mut dyn ArmProbe) -> Result<(), ArmError> {
 
     let start = Instant::now();
 
-    while start.elapsed() < Duration::from_micros(50_0000) {
+    while start.elapsed() < Duration::from_millis(500) {
         let dhcsr = match interface.read_word_32(Dhcsr::get_mmio_address()) {
             Ok(val) => Dhcsr(val),
             // Some combinations of debug probe and target (in
@@ -448,14 +448,17 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
         }
     }
 
-    /// Prepare the target debug port for connection. This is based on the
-    /// `DebugPortSetup` function from the [ARM SVD Debug Description].
+    /// Prepare the target debug port for connection. This is based on the `DebugPortSetup` function
+    /// from the [ARM SVD Debug Description].
     ///
-    /// After this function has been executed, it should be possible to read and write registers using SWD requests.
+    /// After this function has been executed, it should be possible to read and write registers
+    /// using SWD requests.
     ///
-    /// If this function cannot read the DPIDR register, it will retry up to 5 times, and return an error if it still cannot read it.
+    /// If this function cannot read the DPIDR register, it will retry up to 5 times, and return an
+    /// error if it still cannot read it.
     ///
-    /// [ARM SVD Debug Description]: https://open-cmsis-pack.github.io/Open-CMSIS-Pack-Spec/main/html/debug_description.html#debugPortSetup
+    /// [ARM SVD Debug Description]:
+    ///     https://open-cmsis-pack.github.io/Open-CMSIS-Pack-Spec/main/html/debug_description.html#debugPortSetup
     #[doc(alias = "DebugPortSetup")]
     fn debug_port_setup(
         &self,
@@ -469,8 +472,6 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
         // There could also be chips with SWD version 2 that don't use multidrop,
         // so this will have to be changed in the future.
         let has_dormant = matches!(dp, DpAddress::Multidrop(_));
-
-        let num_retries = 5;
 
         fn alert_sequence(interface: &mut dyn DapProbe) -> Result<(), ArmError> {
             tracing::trace!("Sending Selection Alert sequence");
@@ -489,7 +490,9 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
 
         // TODO: Use atomic block
 
-        for _ in 0..num_retries {
+        let mut result = Ok(());
+        const NUM_RETRIES: usize = 5;
+        for _ in 0..NUM_RETRIES {
             // Ensure current debug interface is in reset state.
             swd_line_reset(interface, 0)?;
 
@@ -518,7 +521,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
                     interface.jtag_sequence(1, false, 0x01)?;
 
                     // Configure JTAG IR lengths in probe
-                    interface.configure_jtag()?;
+                    interface.configure_jtag(false)?;
                 }
                 Some(WireProtocol::Swd) => {
                     if has_dormant {
@@ -551,14 +554,14 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
             // End of atomic block.
 
             // SWD or JTAG should now be activated, so we can try and connect to the debug port.
-            if self.debug_port_connect(interface, dp).is_ok() {
-                return Ok(());
+            result = self.debug_port_connect(interface, dp);
+            if result.is_ok() {
+                // Successful connection, we can stop retrying.
+                break;
             }
         }
 
-        Err(ArmError::Other(anyhow::anyhow!(
-            "Failed to connect to the debug port. Please check the debug cable and target power. If SWD multi-drop is used, ensure the correct TARGETSEL value is used."
-        )))
+        result
     }
 
     /// Connect to the target debug port and power it up. This is based on the
@@ -589,7 +592,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
         let powered_down = !(ctrl.csyspwrupack() && ctrl.cdbgpwrupack());
 
         if powered_down {
-            tracing::debug!("Debug port is powered down, powering up");
+            tracing::info!("Debug port {dp:x?} is powered down, powering up");
             let mut ctrl = Ctrl(0);
             ctrl.set_cdbgpwrupreq(true);
             ctrl.set_csyspwrupreq(true);
@@ -597,7 +600,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
 
             let start = Instant::now();
             let mut timeout = true;
-            while start.elapsed() < Duration::from_micros(100_0000) {
+            while start.elapsed() < Duration::from_secs(1) {
                 let ctrl = interface.read_dp_register::<Ctrl>(dp)?;
                 if ctrl.csyspwrupack() && ctrl.cdbgpwrupack() {
                     timeout = false;
@@ -817,14 +820,25 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
     ///
     /// [ARM SVD Debug Description]: https://open-cmsis-pack.github.io/Open-CMSIS-Pack-Spec/main/html/debug_description.html#debugPortStop
     #[doc(alias = "DebugPortStop")]
-    fn debug_port_stop(&self, interface: &mut dyn DapProbe) -> Result<(), ArmError> {
+    fn debug_port_stop(&self, interface: &mut dyn DapProbe, dp: DpAddress) -> Result<(), ArmError> {
+        tracing::info!("Powering down debug port {dp:x?}");
         // Select Bank 0
         interface.raw_write_register(PortType::DebugPort, Select::ADDRESS, 0)?;
 
         // De-assert debug power request
         interface.raw_write_register(PortType::DebugPort, Ctrl::ADDRESS, 0)?;
 
-        Ok(())
+        // Wait for the power domains to go away
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(1) {
+            let ctrl = interface.raw_read_register(PortType::DebugPort, Ctrl::ADDRESS)?;
+            let ctrl = Ctrl(ctrl);
+            if !(ctrl.csyspwrupack() || ctrl.cdbgpwrupack()) {
+                return Ok(());
+            }
+        }
+
+        Err(ArmError::Timeout)
     }
 
     /// Perform a SWD line reset or enter the JTAG Run-Test-Idle state, and then try to connect to a debug port.

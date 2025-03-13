@@ -18,4 +18,5 @@ name = "probe_rs_target"
 [dependencies]
 jep106 = "0.2.8"
 serde = { version = "1", features = ["derive"] }
-base64 = "0.22.0"
+base64 = "0.22.1"
+url = { version = "2.5", features = ["serde"] }

@@ -2,7 +2,7 @@ use crate::{
     architecture::arm::{
         ap::valid_access_ports_allowlist,
         dp::{
-            Abort, Ctrl, DebugPortError, DebugPortId, DebugPortVersion, DpAccess, Select, BASEPTR0,
+            Ctrl, DebugPortError, DebugPortId, DebugPortVersion, DpAccess, Select, BASEPTR0,
             BASEPTR1, DPIDR, DPIDR1,
         },
         memory::{adi_v5_memory_interface::ADIMemoryInterface, ArmMemoryInterface, Component},
@@ -14,6 +14,7 @@ use crate::{
     CoreStatus, Error,
 };
 use jep106::JEP106Code;
+use tracing::Level;
 
 use std::{
     collections::{hash_map, BTreeSet, HashMap},
@@ -88,12 +89,30 @@ pub trait ArmProbeInterface: DapAccess + SwdSequence + SwoAccess + Send {
         &mut self,
         access_port: &FullyQualifiedApAddress,
     ) -> Result<Box<dyn ArmMemoryInterface + '_>, ArmError>;
+}
 
-    /// Reads the chip info from the romtable of given debug port.
-    fn read_chip_info_from_rom_table(
-        &mut self,
-        dp: DpAddress,
-    ) -> Result<Option<ArmChipInfo>, ArmError>;
+/// Read chip information from the ROM tables
+pub fn read_chip_info_from_rom_table(
+    probe: &mut dyn ArmProbeInterface,
+    dp: DpAddress,
+) -> Result<Option<ArmChipInfo>, ArmError> {
+    for ap in probe.access_ports(dp)? {
+        if let Ok(mut memory) = probe.memory_interface(&ap) {
+            let base_address = memory.base_address()?;
+            let component = Component::try_parse(&mut *memory, base_address)?;
+
+            if let Component::Class1RomTable(component_id, _) = component {
+                if let Some(jep106) = component_id.peripheral_id().jep106() {
+                    return Ok(Some(ArmChipInfo {
+                        manufacturer: jep106,
+                        part: component_id.peripheral_id().part(),
+                    }));
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 // TODO: Rename trait!
@@ -172,7 +191,7 @@ impl ArmDebugState for Initialized {
         self.sequence.debug_port_stop(probe, self.current_dp).ok();
 
         // Stop all intentionally-connected DPs.
-        for dp in self.dps.keys() {
+        for dp in self.dps.keys().filter(|dp| **dp != self.current_dp) {
             // Try to select the debug port we want to shut down.
             if self.sequence.debug_port_connect(probe, *dp).is_ok() {
                 self.sequence.debug_port_stop(probe, *dp).ok();
@@ -255,13 +274,6 @@ impl ArmProbeInterface for ArmCommunicationInterface<Initialized> {
         access_port_address: &FullyQualifiedApAddress,
     ) -> Result<Box<dyn ArmMemoryInterface + '_>, ArmError> {
         ArmCommunicationInterface::memory_interface(self, access_port_address)
-    }
-
-    fn read_chip_info_from_rom_table(
-        &mut self,
-        dp: DpAddress,
-    ) -> Result<Option<ArmChipInfo>, ArmError> {
-        ArmCommunicationInterface::read_chip_info_from_rom_table(self, dp)
     }
 
     fn current_debug_port(&self) -> DpAddress {
@@ -487,13 +499,19 @@ impl<'interface> ArmCommunicationInterface<Initialized> {
             }
 
             /* determine the number and type of available APs */
-            tracing::trace!("Searching valid APs");
+            tracing::info!("Searching valid APs");
 
             let ap_span = tracing::debug_span!("AP discovery").entered();
             let allowed_aps = sequence.allowed_access_ports();
             let access_ports = valid_access_ports_allowlist(self, dp, allowed_aps);
             let state = self.state.dps.get_mut(&dp).unwrap();
             state.access_ports = access_ports.into_iter().collect();
+
+            if tracing::enabled!(Level::DEBUG) {
+                for ap in &state.access_ports {
+                    tracing::debug!("Found AP: {:?}", ap);
+                }
+            }
 
             drop(ap_span);
         } else if switched_dp {
@@ -703,50 +721,6 @@ pub struct ArmChipInfo {
     ///
     /// Consider this not unique when working with targets!
     pub part: u16,
-}
-
-impl ArmCommunicationInterface<Initialized> {
-    /// Reads the chip info from the romtable of given debug port.
-    pub fn read_chip_info_from_rom_table(
-        &mut self,
-        dp: DpAddress,
-    ) -> Result<Option<ArmChipInfo>, ArmError> {
-        // Check sticky error and cleanup if necessary
-        let ctrl_reg: crate::architecture::arm::dp::Ctrl = self.read_dp_register(dp)?;
-
-        if ctrl_reg.sticky_err() {
-            tracing::trace!("AP Search faulted. Cleaning up");
-            let mut abort = Abort::default();
-            abort.set_stkerrclr(true);
-            self.write_dp_register(dp, abort)?;
-        }
-
-        let state = self.select_dp(dp)?;
-
-        for access_port in state.access_ports.clone() {
-            if let Ok(mut memory) = self.memory_interface(&access_port) {
-                let base_addr = memory.base_address()?;
-                let component = Component::try_parse(&mut *memory, base_addr)?;
-                if let Component::Class1RomTable(component_id, _) = component {
-                    if let Some(jep106) = component_id.peripheral_id().jep106() {
-                        return Ok(Some(ArmChipInfo {
-                            manufacturer: jep106,
-                            part: component_id.peripheral_id().part(),
-                        }));
-                    }
-                }
-            }
-        }
-        // tracing::info!(
-        //     "{}\n{}\n{}\n{}",
-        //     "If you are using a Nordic chip, it might be locked to debug access".yellow(),
-        //     "Run cargo flash with --nrf-recover to unlock".yellow(),
-        //     "WARNING: --nrf-recover will erase the entire code".yellow(),
-        //     "flash and UICR area of the device, in addition to the entire RAM".yellow()
-        // );
-
-        Ok(None)
-    }
 }
 
 impl std::fmt::Display for ArmChipInfo {

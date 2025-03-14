@@ -48,10 +48,7 @@ impl super::MemoryApType for AmbaAhb5Hprot {
     type CSW = CSW;
 
     fn status<P: ApAccess + ?Sized>(&mut self, probe: &mut P) -> Result<CSW, ArmError> {
-        #[allow(clippy::assertions_on_constants)]
-        const {
-            assert!(super::registers::CSW::ADDRESS == CSW::ADDRESS)
-        };
+        const { assert!(super::registers::CSW::ADDRESS == CSW::ADDRESS) };
         self.csw = probe.read_ap_register(self)?;
         Ok(self.csw)
     }
@@ -102,7 +99,7 @@ impl AccessPortType for AmbaAhb5Hprot {
 
 impl ApRegAccess<CSW> for AmbaAhb5Hprot {}
 
-crate::attached_regs_to_mem_ap!(memory_ap_regs => AmbaAhb5Hprot);
+super::attached_regs_to_mem_ap!(memory_ap_regs => AmbaAhb5Hprot);
 
 define_ap_register!(
     /// Control and Status Word register

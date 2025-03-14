@@ -5,10 +5,10 @@ use jep106::JEP106Code;
 use probe_rs::{
     architecture::{
         arm::{
-            ap::ApClass,
+            ap::{ApClass, MemoryApType},
             armv6m::Demcr,
             component::Scs,
-            dp::{DebugPortId, DebugPortVersion, MinDpSupport, DLPIDR, DPIDR, TARGETID},
+            dp::{Ctrl, DebugPortId, DebugPortVersion, MinDpSupport, DLPIDR, DPIDR, TARGETID},
             memory::{
                 romtable::{PeripheralID, RomTable},
                 Component, ComponentId, CoresightComponent, PeripheralType,
@@ -281,6 +281,11 @@ fn show_arm_info(interface: &mut dyn ArmProbeInterface, dp: DpAddress) -> Result
         let instance = dlpidr.tinstance();
 
         write!(dp_node, ", Instance: {:#04x}", instance)?;
+
+        // Read from the CTRL/STAT register, to ensure that the dpbanksel field is set to zero.
+        // This helps with error handling later, because it means the CTRL/AP register can be
+        // read in case of an error.
+        let _ = interface.read_raw_dp_register(dp, Ctrl::ADDRESS)?;
     } else {
         write!(
             dp_node,
@@ -344,6 +349,16 @@ fn handle_memory_ap(
 ) -> Result<Tree<String>, anyhow::Error> {
     let component = {
         let mut memory = interface.memory_interface(access_port)?;
+
+        // Check if the AP is accessible
+        let (interface, ap) = memory.try_as_parts()?;
+        let csw = ap.generic_status(interface)?;
+        if !csw.DeviceEn {
+            return Ok(Tree::new(
+                "Memory AP is not accessible, DeviceEn bit not set".to_string(),
+            ));
+        }
+
         let base_address = memory.base_address()?;
         let mut demcr = Demcr(memory.read_word_32(Demcr::get_mmio_address())?);
         demcr.set_dwtena(true);

@@ -37,7 +37,7 @@ impl CombinedCoreState {
         self.core_state.core_access_options.interface_idx()
     }
 
-    pub(crate) fn attach_arm<'probe>(
+    pub fn attach_arm<'probe>(
         &'probe mut self,
         target: &'probe Target,
         arm_interface: &'probe mut Box<dyn ArmProbeInterface>,
@@ -250,9 +250,9 @@ impl CoreState {
             );
         };
 
-        let dp = match options.psel {
-            0 => DpAddress::Default,
-            x => DpAddress::Multidrop(x),
+        let dp = match options.targetsel {
+            None => DpAddress::Default,
+            Some(x) => DpAddress::Multidrop(x),
         };
 
         FullyQualifiedApAddress::v1_with_dp(dp, options.ap)

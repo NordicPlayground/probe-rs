@@ -1,30 +1,27 @@
-use crate::architecture::arm::ap::AccessPort;
-use crate::architecture::arm::component::get_arm_components;
-use crate::architecture::arm::sequences::{ArmDebugSequence, DefaultArmSequence};
-use crate::architecture::arm::{ArmError, DpAddress};
-use crate::architecture::riscv::communication_interface::{RiscvDebugInterfaceState, RiscvError};
-use crate::architecture::xtensa::communication_interface::{
-    XtensaCommunicationInterface, XtensaDebugInterfaceState, XtensaError,
-};
-use crate::config::{ChipInfo, CoreExt, RegistryError, Target, TargetSelector};
-use crate::core::{Architecture, CombinedCoreState};
-use crate::probe::fake_probe::FakeProbe;
-use crate::probe::ProbeCreationError;
 use crate::{
     architecture::{
         arm::{
-            communication_interface::ArmProbeInterface, component::TraceSink,
-            memory::CoresightComponent, SwoReader,
+            communication_interface::ArmProbeInterface,
+            component::{get_arm_components, TraceSink},
+            memory::CoresightComponent,
+            sequences::{ArmDebugSequence, DefaultArmSequence},
+            ArmError, DpAddress, SwoReader,
         },
-        riscv::communication_interface::RiscvCommunicationInterface,
+        riscv::communication_interface::{
+            RiscvCommunicationInterface, RiscvDebugInterfaceState, RiscvError,
+        },
+        xtensa::communication_interface::{
+            XtensaCommunicationInterface, XtensaDebugInterfaceState, XtensaError,
+        },
     },
-    config::DebugSequence,
-};
-use crate::{
-    probe::{list::Lister, AttachMethod, DebugProbeError, Probe},
+    config::{CoreExt, DebugSequence, RegistryError, Target, TargetSelector},
+    core::{Architecture, CombinedCoreState},
+    probe::{
+        fake_probe::FakeProbe, list::Lister, AttachMethod, DebugProbeError, Probe,
+        ProbeCreationError,
+    },
     Core, CoreType, Error,
 };
-use anyhow::anyhow;
 use std::ops::DerefMut;
 use std::{fmt, sync::Arc, time::Duration};
 
@@ -83,7 +80,6 @@ impl fmt::Debug for JtagInterface {
 }
 
 // TODO: this is somewhat messy because I omitted separating the Probe out of the ARM interface.
-#[allow(clippy::large_enum_variant)]
 enum ArchitectureInterface {
     Arm(Box<dyn ArmProbeInterface + 'static>),
     Jtag(Probe, Vec<JtagInterface>),
@@ -111,10 +107,11 @@ impl ArchitectureInterface {
             ArchitectureInterface::Arm(interface) => combined_state.attach_arm(target, interface),
             ArchitectureInterface::Jtag(probe, ifaces) => {
                 let idx = combined_state.interface_idx();
+                probe.select_jtag_tap(idx)?;
                 match &mut ifaces[idx] {
                     JtagInterface::Riscv(state) => {
                         let factory = probe.try_get_riscv_interface_builder()?;
-                        let iface = factory.attach(state)?;
+                        let iface = factory.attach_auto(target, state)?;
                         combined_state.attach_riscv(target, iface)
                     }
                     JtagInterface::Xtensa(state) => {
@@ -177,12 +174,12 @@ impl Session {
         let default_core = target.default_core();
 
         let default_memory_ap = default_core.memory_ap().ok_or_else(|| {
-            Error::Other(anyhow::anyhow!(
+            Error::Other(format!(
                 "Unable to connect to core {default_core:?}, no memory AP configured"
             ))
         })?;
 
-        let default_dp = default_memory_ap.ap_address().dp;
+        let default_dp = default_memory_ap.dp();
 
         let sequence_handle = match &target.debug_sequence {
             DebugSequence::Arm(sequence) => sequence.clone(),
@@ -210,6 +207,11 @@ impl Session {
             }
         }
         probe.attach_to_unspecified()?;
+        if probe.scan_chain().iter().len() > 0 {
+            for core in &cores {
+                probe.select_jtag_tap(core.interface_idx())?;
+            }
+        }
 
         let interface = probe.try_into_arm_interface().map_err(|(_, err)| err)?;
 
@@ -220,7 +222,7 @@ impl Session {
 
         // Enable debug mode
         let unlock_res =
-            sequence_handle.debug_device_unlock(&mut *interface, default_memory_ap, &permissions);
+            sequence_handle.debug_device_unlock(&mut *interface, &default_memory_ap, &permissions);
         drop(unlock_span);
 
         match unlock_res {
@@ -246,10 +248,9 @@ impl Session {
                 let reset_hardware_deassert =
                     tracing::debug_span!("reset_hardware_deassert").entered();
 
-                let mut memory_interface = interface.memory_interface(default_memory_ap)?;
+                let mut memory_interface = interface.memory_interface(&default_memory_ap)?;
 
-                // TODO: A timeout here indicates that the reset pin is probably not properly
-                //       connected.
+                // A timeout here indicates that the reset pin is probably not properly connected.
                 if let Err(e) = sequence_handle.reset_hardware_deassert(&mut *memory_interface) {
                     if matches!(e, ArmError::Timeout) {
                         tracing::warn!("Timeout while deasserting hardware reset pin. This indicates that the reset pin is not properly connected. Please check your hardware setup.");
@@ -337,7 +338,7 @@ impl Session {
                     // Already initialised.
                     continue;
                 }
-                return Err(Error::Probe(DebugProbeError::Other(anyhow::anyhow!(
+                return Err(Error::Probe(DebugProbeError::Other(format!(
                     "{core_arch:?} core can not be mixed with a {debug_arch:?} debug module.",
                 ))));
             }
@@ -349,23 +350,15 @@ impl Session {
                     let factory = probe.try_get_riscv_interface_builder()?;
                     let mut state = factory.create_state();
                     {
-                        let mut interface = factory.attach(&mut state)?;
+                        let mut interface = factory.attach_auto(&target, &mut state)?;
                         interface.enter_debug_mode()?;
                     }
 
                     JtagInterface::Riscv(state)
                 }
-                Architecture::Xtensa => {
-                    let mut state = XtensaDebugInterfaceState::default();
-                    {
-                        let mut interface = probe.try_get_xtensa_interface(&mut state)?;
-                        interface.enter_debug_mode()?;
-                    }
-
-                    JtagInterface::Xtensa(state)
-                }
+                Architecture::Xtensa => JtagInterface::Xtensa(XtensaDebugInterfaceState::default()),
                 _ => {
-                    return Err(Error::Probe(DebugProbeError::Other(anyhow::anyhow!(
+                    return Err(Error::Probe(DebugProbeError::Other(format!(
                         "Unsupported core architecture {core_arch:?}",
                     ))));
                 }
@@ -383,18 +376,20 @@ impl Session {
 
         // Wait for the cores to be halted.
         for core_id in 0..session.cores.len() {
-            let mut core = session.core(core_id)?;
-
-            core.halt(Duration::from_millis(100))?;
+            match session.core(core_id) {
+                Ok(mut core) => {
+                    if !core.core_halted()? {
+                        core.halt(Duration::from_millis(100))?;
+                    }
+                }
+                Err(Error::CoreDisabled(i)) => tracing::debug!("Core {i} is disabled"),
+                Err(error) => return Err(error),
+            }
         }
 
         // Connect to the cores
         match session.target.debug_sequence.clone() {
-            DebugSequence::Xtensa(sequence) => {
-                for core_id in 0..session.cores.len() {
-                    sequence.on_connect(&mut session.get_xtensa_interface(core_id)?)?;
-                }
-            }
+            DebugSequence::Xtensa(_) => {}
 
             DebugSequence::Riscv(sequence) => {
                 for core_id in 0..session.cores.len() {
@@ -444,11 +439,14 @@ impl Session {
     ) -> Result<R, Error> {
         let mut resume_state = vec![];
         for (core, _) in self.list_cores() {
-            let mut c = self.core(core)?;
-            let status = c.status()?;
-            tracing::info!("Core status: {:?}", status);
-            if !status.is_halted() {
-                tracing::info!("Halting core...");
+            let mut c = match self.core(core) {
+                Err(Error::CoreDisabled(_)) => continue,
+                other => other?,
+            };
+            if c.core_halted()? {
+                tracing::info!("Core {core} already halted");
+            } else {
+                tracing::info!("Halting core {core}...");
                 resume_state.push(core);
                 c.halt(Duration::from_millis(100))?;
             }
@@ -457,7 +455,7 @@ impl Session {
         let r = f(self);
 
         for core in resume_state {
-            tracing::info!("Resuming core...");
+            tracing::debug!("Resuming core...");
             self.core(core)?.run()?;
         }
 
@@ -485,7 +483,7 @@ impl Session {
     /// It is strongly advised to never store the [Core] handle for any significant duration! Free it as fast as possible such that other stakeholders can have access to the [Core] too.
     ///
     /// The idea behind this is: You need the smallest common denominator which you can share between threads. Since you sometimes need the [Core], sometimes the [Probe] or sometimes the [Target], the [Session] is the only common ground and the only handle you should actively store in your code.
-    ///
+    //
     // By design, this is called frequently in a session, therefore we limit tracing level to "trace" to avoid spamming the logs.
     #[tracing::instrument(level = "trace", skip(self), name = "attach_to_core")]
     pub fn core(&mut self, core_index: usize) -> Result<Core<'_>, Error> {
@@ -494,7 +492,16 @@ impl Session {
             .get_mut(core_index)
             .ok_or(Error::CoreNotFound(core_index))?;
 
-        self.interfaces.attach(&self.target, combined_state)
+        match self.interfaces.attach(&self.target, combined_state) {
+            Err(Error::Xtensa(XtensaError::CoreDisabled)) => {
+                // If the core is disabled, we can't attach to it.
+                // We can't do anything about it, so we just translate
+                // and return the error.
+                // We'll retry at the next call.
+                Err(Error::CoreDisabled(core_index))
+            }
+            other => other,
+        }
     }
 
     /// Read available trace data from the specified data sink.
@@ -556,9 +563,10 @@ impl Session {
     ) -> Result<RiscvCommunicationInterface, Error> {
         let tap_idx = self.interface_idx(core_id)?;
         if let ArchitectureInterface::Jtag(probe, ifaces) = &mut self.interfaces {
+            probe.select_jtag_tap(tap_idx)?;
             if let JtagInterface::Riscv(state) = &mut ifaces[tap_idx] {
                 let factory = probe.try_get_riscv_interface_builder()?;
-                return Ok(factory.attach(state)?);
+                return Ok(factory.attach_auto(&self.target, state)?);
             }
         }
         Err(RiscvError::NoRiscvTarget.into())
@@ -571,6 +579,7 @@ impl Session {
     ) -> Result<XtensaCommunicationInterface, Error> {
         let tap_idx = self.interface_idx(core_id)?;
         if let ArchitectureInterface::Jtag(probe, ifaces) = &mut self.interfaces {
+            probe.select_jtag_tap(tap_idx)?;
             if let JtagInterface::Xtensa(state) = &mut ifaces[tap_idx] {
                 return Ok(probe.try_get_xtensa_interface(state)?);
             }
@@ -615,6 +624,18 @@ impl Session {
         Ok(())
     }
 
+    /// This function can be used to set up an application which was flashed to RAM.
+    pub fn prepare_running_on_ram(&mut self, vector_table_addr: u64) -> Result<(), crate::Error> {
+        match &self.target.debug_sequence.clone() {
+            crate::config::DebugSequence::Arm(arm) => {
+                arm.prepare_running_on_ram(vector_table_addr, self)
+            }
+            _ => Err(crate::Error::NotImplemented(
+                "ram flash non-ARM architectures",
+            )),
+        }
+    }
+
     /// Check if the connected device has a debug erase sequence defined
     pub fn has_sequence_erase_all(&self) -> bool {
         match &self.target.debug_sequence {
@@ -634,20 +655,18 @@ impl Session {
     /// Err(e) if the custom erase sequence failed
     pub fn sequence_erase_all(&mut self) -> Result<(), Error> {
         let ArchitectureInterface::Arm(ref mut interface) = self.interfaces else {
-            return Err(Error::Probe(DebugProbeError::NotImplemented {
-                function_name: "Debug Erase Sequence",
-            }));
+            return Err(Error::NotImplemented(
+                "Debug Erase Sequence is not implemented for non-ARM targets.",
+            ));
         };
 
         let DebugSequence::Arm(ref debug_sequence) = self.target.debug_sequence else {
             unreachable!("This should never happen. Please file a bug if it does.");
         };
 
-        let Some(erase_sequence) = debug_sequence.debug_erase_sequence() else {
-            return Err(Error::Probe(DebugProbeError::NotImplemented {
-                function_name: "Debug Erase Sequence",
-            }));
-        };
+        let erase_sequence = debug_sequence
+            .debug_erase_sequence()
+            .ok_or(Error::Arm(ArmError::NotImplemented("Debug Erase Sequence")))?;
 
         tracing::info!("Trying Debug Erase Sequence");
         let erase_result = erase_sequence.erase_all(interface.deref_mut());
@@ -768,37 +787,61 @@ impl Session {
     /// Clears all hardware breakpoints on all cores
     pub fn clear_all_hw_breakpoints(&mut self) -> Result<(), Error> {
         self.halted_access(|session| {
-            { 0..session.cores.len() }.try_for_each(|n| {
-                session
-                    .core(n)
-                    .and_then(|mut core| core.clear_all_hw_breakpoints())
+            { 0..session.cores.len() }.try_for_each(|core| {
+                tracing::info!("Clearing breakpoints for core {core}");
+
+                match session.core(core) {
+                    Ok(mut core) => core.clear_all_hw_breakpoints(),
+                    Err(Error::CoreDisabled(_)) => Ok(()),
+                    Err(err) => Err(err),
+                }
             })
         })
+    }
+
+    /// Resume all cores
+    pub fn resume_all_cores(&mut self) -> Result<(), Error> {
+        // Resume cores
+        for core_id in 0..self.cores.len() {
+            match self.core(core_id) {
+                Ok(mut core) => {
+                    if core.core_halted()? {
+                        core.run()?;
+                    }
+                }
+                Err(Error::CoreDisabled(i)) => tracing::debug!("Core {i} is disabled"),
+                Err(error) => return Err(error),
+            }
+        }
+
+        Ok(())
     }
 }
 
 // This test ensures that [Session] is fully [Send] + [Sync].
-static_assertions::assert_impl_all!(Session: Send);
+const _: fn() = || {
+    fn assert_impl_all<T: ?Sized + Send>() {}
 
-// TODO tiwalun: Enable again, after rework of Session::new is done.
+    assert_impl_all::<Session>();
+};
+
 impl Drop for Session {
     #[tracing::instrument(name = "session_drop", skip(self))]
     fn drop(&mut self) {
         if let Err(err) = self.clear_all_hw_breakpoints() {
             tracing::warn!(
                 "Could not clear all hardware breakpoints: {:?}",
-                anyhow!(err)
+                anyhow::anyhow!(err)
             );
         }
 
         // Call any necessary deconfiguration/shutdown hooks.
-        if let Err(err) = { 0..self.cores.len() }
-            .try_for_each(|i| self.core(i).and_then(|mut core| core.debug_core_stop()))
-        {
-            tracing::warn!(
-                "Failed to deconfigure device during shutdown: {:?}",
-                anyhow!(err)
-            );
+        if let Err(err) = { 0..self.cores.len() }.try_for_each(|core| match self.core(core) {
+            Ok(mut core) => core.debug_core_stop(),
+            Err(Error::CoreDisabled(_)) => Ok(()),
+            Err(err) => Err(err),
+        }) {
+            tracing::warn!("Failed to deconfigure device during shutdown: {:?}", err);
         }
     }
 }
@@ -811,20 +854,12 @@ impl Drop for Session {
 fn get_target_from_selector(
     target: TargetSelector,
     attach_method: AttachMethod,
-    probe: Probe,
+    mut probe: Probe,
 ) -> Result<(Probe, Target), Error> {
-    let mut probe = probe;
-
     let target = match target {
         TargetSelector::Unspecified(name) => crate::config::get_target_by_name(name)?,
         TargetSelector::Specified(target) => target,
         TargetSelector::Auto => {
-            let mut found_chip = None;
-
-            // We have no information about the target, so we must assume it's using the default DP.
-            // We cannot automatically detect DPs if SWD multi-drop is used.
-            let dp_address = DpAddress::Default;
-
             // At this point we do not know what the target is, so we cannot use the chip specific reset sequence.
             // Thus, we try just using a normal reset for target detection if we want to do so under reset.
             // This can of course fail, but target detection is a best effort, not a guarantee!
@@ -833,58 +868,16 @@ fn get_target_from_selector(
             }
             probe.attach_to_unspecified()?;
 
-            if probe.has_arm_interface() {
-                match probe.try_into_arm_interface() {
-                    Ok(interface) => {
-                        let mut interface = interface
-                            .initialize(DefaultArmSequence::create(), dp_address)
-                            .map_err(|(_probe, err)| err)?;
+            let (returned_probe, found_target) = crate::vendor::auto_determine_target(probe)?;
+            probe = returned_probe;
 
-                        // TODO:
-                        let dp = DpAddress::Default;
-
-                        let found_arm_chip = interface
-                            .read_chip_info_from_rom_table(dp)
-                            .unwrap_or_else(|e| {
-                                tracing::info!("Error during auto-detection of ARM chips: {}", e);
-                                None
-                            });
-
-                        found_chip = found_arm_chip.map(ChipInfo::from);
-
-                        probe = interface.close();
-                    }
-                    Err((returned_probe, err)) => {
-                        probe = returned_probe;
-                        tracing::debug!("Error using ARM interface: {}", err);
-                    }
-                }
-            } else {
-                tracing::debug!("No ARM interface was present. Skipping Riscv autodetect.");
+            if AttachMethod::UnderReset == attach_method {
+                // Now we can deassert reset in case we asserted it before.
+                probe.target_reset_deassert()?;
             }
 
-            if found_chip.is_none() && probe.has_riscv_interface() {
-                match probe.try_get_riscv_interface_builder() {
-                    Ok(factory) => {
-                        let mut state = factory.create_state();
-                        let mut interface = factory.attach(&mut state)?;
-                        let idcode = interface.read_idcode();
-
-                        tracing::debug!("ID Code read over JTAG: {:x?}", idcode);
-                    }
-                    Err(err) => {
-                        tracing::debug!("Error during autodetection of RISC-V chips: {}", err);
-                    }
-                }
-            } else {
-                tracing::debug!("No RISC-V interface was present. Skipping Riscv autodetect.");
-            }
-
-            // Now we can deassert reset in case we asserted it before. This is always okay.
-            probe.target_reset_deassert()?;
-
-            if let Some(chip) = found_chip {
-                crate::config::get_target_by_chip_info(chip)?
+            if let Some(target) = found_target {
+                target
             } else {
                 return Err(Error::ChipNotFound(RegistryError::ChipAutodetectFailed));
             }

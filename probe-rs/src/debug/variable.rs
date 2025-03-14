@@ -1,7 +1,6 @@
 use crate::debug::{language::ProgrammingLanguage, unit_info::UnitInfo};
 
 use super::*;
-use anyhow::anyhow;
 use gimli::{DebugInfoOffset, DwLang, UnitOffset};
 use itertools::Itertools;
 use std::ops::Range;
@@ -85,6 +84,8 @@ pub enum VariableName {
     Namespace(String),
     /// Variable with a specific name
     Named(String),
+    /// Entry of an array or similar
+    Indexed(u64),
     /// Variable with an unknown name
     #[default]
     Unknown,
@@ -100,6 +101,7 @@ impl std::fmt::Display for VariableName {
             VariableName::AnonymousNamespace => write!(f, "<anonymous_namespace>"),
             VariableName::Namespace(name) => name.fmt(f),
             VariableName::Named(name) => name.fmt(f),
+            VariableName::Indexed(index) => write!(f, "__{index}"),
             VariableName::Unknown => write!(f, "<unknown>"),
         }
     }
@@ -122,7 +124,7 @@ pub enum VariableNodeType {
     /// Use the `header_offset` and `entries_offset` as direct references for recursing the variable
     /// children.
     /// - Rule: All top level variables in a [StackFrame] are automatically deferred, i.e
-    /// [VariableName::LocalScopeRoot], [VariableName::RegistersRoot].
+    ///   [VariableName::LocalScopeRoot], [VariableName::RegistersRoot].
     DirectLookup(DebugInfoOffset, UnitOffset),
     /// Look up information from all compilation units. This is used to resolve static variables, so
     /// when [`VariableName::StaticScopeRoot`] is used.
@@ -133,7 +135,7 @@ pub enum VariableNodeType {
     ///         variable_node_type to indicate that no further recursion is possible/required. This
     ///         can be because the variable is a 'base' data type, or because there was some kind of
     ///         error in processing the current node, so we don't want to incur cascading errors.
-    /// TODO: Find code instances where we use magic values (e.g. u32::MAX) and replace with DoNotRecurse logic if appropriate.
+    // TODO: Find code instances where we use magic values (e.g. u32::MAX) and replace with DoNotRecurse logic if appropriate.
     DoNotRecurse,
     /// Unless otherwise specified, always recurse the children of every node until we get to the
     /// base data type.
@@ -467,10 +469,15 @@ pub struct Variable {
     pub parent_key: ObjectRef,
     /// The variable name refers to the name of any of the types of values described in the [VariableCache]
     pub name: VariableName,
+
+    /// Linkage name of the variable. Multiple variables with the same name could exist,
+    /// this is used to distinguish between them.
+    pub(crate) linkage_name: Option<String>,
+
     /// Use `Variable::set_value()` and `Variable::get_value()` to correctly process this `value`
     pub(super) value: VariableValue,
     /// The source location of the declaration of this variable, if available.
-    pub source_location: SourceLocation,
+    pub source_location: Option<SourceLocation>,
     /// Programming language of the defining compilation unit.
     pub language: DwLang,
 
@@ -485,9 +492,6 @@ pub struct Variable {
     pub memory_location: VariableLocation,
     /// The size of this variable in bytes.
     pub byte_size: Option<u64>,
-    /// If this is a subrange (array, vector, etc.), is the ordinal position of this variable in
-    /// that range
-    pub member_index: Option<i64>,
     /// The role of this variable.
     pub role: VariantRole,
 }
@@ -503,13 +507,13 @@ impl Variable {
             variable_key: Default::default(),
             parent_key: Default::default(),
             name: Default::default(),
+            linkage_name: None,
             value: Default::default(),
-            source_location: Default::default(),
+            source_location: None,
             type_name: Default::default(),
             variable_node_type: Default::default(),
             memory_location: Default::default(),
             byte_size: None,
-            member_index: None,
             role: Default::default(),
         }
     }
@@ -538,7 +542,8 @@ impl Variable {
 
             // If the value is invalid, then make sure we don't propagate invalid memory location
             // values.
-            self.memory_location = VariableLocation::Unavailable;
+            self.memory_location =
+                VariableLocation::Error("Failed to resolve variable value".to_string());
         }
     }
 
@@ -558,10 +563,10 @@ impl Variable {
         let valid_memory = self.memory_location.valid();
         if !valid_value || !valid_type || !valid_memory {
             // Insufficient data available.
-            Err(anyhow!(
+            Err(DebugError::Other(format!(
                 "Cannot update variable: {:?}, with supplied information (value={:?}, type={:?}, memory location={:#010x?}).",
                 self.name, self.value, self.type_name, self.memory_location
-            ).into())
+            )))
         } else {
             // We have everything we need to update the variable value.
             language::from_dwarf(self.language)
@@ -587,43 +592,45 @@ impl Variable {
             // The `value` for this `Variable` is non empty because either
             // - It is base data type for which a value was determined based on the core runtime
             // - We encountered an error somewhere, so report it to the user
-            format!("{}", self.value)
-        } else if matches!(
+            return format!("{}", self.value);
+        }
+
+        if matches!(
             self.name,
             VariableName::AnonymousNamespace | VariableName::Namespace(_)
         ) {
             // Namespaces do not have values
-            String::new()
-        } else {
-            // We need to construct a 'human readable' value using `fmt::Display` to represent the
-            // values of complex types and pointers.
-            if variable_cache.has_children(self) {
-                self.formatted_variable_value(variable_cache, 0, false)
-                    .unwrap_or_default()
-            } else if self.type_name == VariableType::Unknown || !self.memory_location.valid() {
-                if self.variable_node_type.is_deferred() {
-                    // When we will do a lazy-load of variable children, and they have not yet been
-                    // requested by the user, just display the type_name as the value
-                    self.type_name
-                        .display_name(language::from_dwarf(self.language).as_ref())
-                } else {
-                    // This condition should only be true for intermediate nodes
-                    // from DWARF. These should not show up in the final
-                    // `VariableCache`. If a user sees this error, then there is
-                    // a logic problem in the stack unwind
-                    "Error: This is a bug! Attempted to evaluate a Variable with no type or no memory location".to_string()
-                }
-            } else if matches!(self.type_name, VariableType::Struct(ref name) if name == "None") {
-                "None".to_string()
-            } else if matches!(self.type_name, VariableType::Array { count: 0, .. }) {
-                self.formatted_variable_value(variable_cache, 0, false)
-                    .unwrap_or_default()
+            return String::new();
+        }
+
+        // We need to construct a 'human readable' value using `fmt::Display` to represent the
+        // values of complex types and pointers.
+        if variable_cache.has_children(self) {
+            self.formatted_variable_value(variable_cache, 0, false)
+                .unwrap_or_default()
+        } else if self.type_name == VariableType::Unknown || !self.memory_location.valid() {
+            if self.variable_node_type.is_deferred() {
+                // When we will do a lazy-load of variable children, and they have not yet been
+                // requested by the user, just display the type_name as the value
+                self.type_name
+                    .display_name(language::from_dwarf(self.language).as_ref())
             } else {
-                format!(
-                    "Unimplemented: Get value of type {:?} of ({:?} bytes) at location {}",
-                    self.type_name, self.byte_size, self.memory_location
-                )
+                // This condition should only be true for intermediate nodes
+                // from DWARF. These should not show up in the final
+                // `VariableCache`. If a user sees this error, then there is
+                // a logic problem in the stack unwind
+                "Error: This is a bug! Attempted to evaluate a Variable with no type or no memory location".to_string()
             }
+        } else if matches!(self.type_name, VariableType::Struct(ref name) if name == "None") {
+            "None".to_string()
+        } else if matches!(self.type_name, VariableType::Array { count: 0, .. }) {
+            self.formatted_variable_value(variable_cache, 0, false)
+                .unwrap_or_default()
+        } else {
+            format!(
+                "Unimplemented: Get value of type {:?} of ({:?} bytes) at location {}",
+                self.type_name, self.byte_size, self.memory_location
+            )
         }
     }
 
@@ -682,7 +689,7 @@ impl Variable {
                 name.starts_with("__")
                     && name
                         .find(char::is_numeric)
-                        .map_or(false, |zero_based_position| zero_based_position == 2)
+                        .is_some_and(|zero_based_position| zero_based_position == 2)
             }
             // Other kind of variables are never indexed
             _ => false,

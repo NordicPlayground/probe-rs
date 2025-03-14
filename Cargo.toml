@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.24.0+nordic"
+version = "0.25.0+nordic"
 edition = "2021"
 
 documentation = "https://docs.rs/probe-rs/"
@@ -25,13 +25,14 @@ members = [
 exclude = ["probe-rs/tests/gpio-hal-blinky"]
 
 [workspace.dependencies]
-probe-rs = { path = "probe-rs", version = "0.24.0", registry = "nordic-artifactory", package = "probe-rs-nordic" }
-probe-rs-target = { path = "probe-rs-target", version = "0.24.0", registry = "nordic-artifactory", package = "probe-rs-target-nordic" }
+probe-rs = { path = "probe-rs", version = "0.25.0", registry = "nordic-artifactory", package = "probe-rs-nordic" }
+probe-rs-target = { path = "probe-rs-target", version = "0.25.0", registry = "nordic-artifactory", package = "probe-rs-target-nordic" }
 probe-rs-mi = { path = "probe-rs-mi", version = "0.1.0" }
 
 docsplay = "0.1.1"
 thiserror = "1.0.59"
 anyhow = "1.0.82"
+
 
 # Config for 'cargo dist'
 [workspace.metadata.dist]
@@ -52,7 +53,7 @@ precise-builds = true
 # The archive format to use for non-windows builds (defaults .tar.xz)
 unix-archive = ".tar.xz"
 # The installers to generate for each app
-installers = ["shell", "powershell", "homebrew"]
+ installers = ["shell", "powershell", "homebrew"]
 # Publish jobs to run in CI
 pr-run-mode = "plan"
 # A GitHub repo to push Homebrew formulas to
@@ -68,6 +69,15 @@ aarch64-unknown-linux-gnu = "buildjet-2vcpu-ubuntu-2204-arm"
 [workspace.metadata.dist.dependencies.apt]
 libudev-dev = '*'
 libudev1 = { stage = ["run"] }
+
+[workspace.metadata.release]
+shared-version = true
+tag-name = "v{{version}}"
+
+[workspace.lints.clippy]
+unnecessary_self_imports = "deny"
+enum_glob_use = "deny"
+macro_use_imports = "deny"
 
 # The profile that 'cargo dist' will build with
 [profile.dist]

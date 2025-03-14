@@ -26,15 +26,16 @@ impl SpeedInfo {
     #[allow(unused)]
     pub(crate) fn max_speed_config(&self) -> SpeedConfig {
         let khz = cmp::min(self.max_speed_hz() / 1000, 0xFFFE);
-        SpeedConfig::khz(khz.try_into().unwrap()).unwrap()
+        // khz is guaranteed to be in the range 1..=0xFFFE, so let's skip the constructor
+        SpeedConfig { raw: khz as u16 }
     }
 }
 
 /// Target communication speed setting.
 ///
 /// This determines the clock frequency of the target communication. Supported speeds for the
-/// currently selected target interface can be fetched via [`JLink::read_speeds`].
-#[derive(Debug, Copy, Clone)]
+/// currently selected target interface can be fetched via [`JLink::read_interface_speeds()`].
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub struct SpeedConfig {
     raw: u16,
 }
@@ -50,7 +51,7 @@ impl SpeedConfig {
     /// Returns `None` if the value is the invalid value `0xFFFF`. Note that this doesn't mean that
     /// every other value will be accepted by the device.
     pub(crate) fn khz(khz: u16) -> Option<Self> {
-        if khz == 0xFFFF {
+        if khz == SpeedConfig::ADAPTIVE.raw {
             None
         } else {
             Some(Self { raw: khz })
@@ -60,7 +61,7 @@ impl SpeedConfig {
 
 impl fmt::Display for SpeedConfig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.raw == Self::ADAPTIVE.raw {
+        if *self == Self::ADAPTIVE {
             f.write_str("adaptive")
         } else {
             write!(f, "{} kHz", self.raw)
@@ -71,7 +72,7 @@ impl fmt::Display for SpeedConfig {
 impl JLink {
     /// Reads the probe's communication speed information about the currently selected interface.
     ///
-    /// Supported speeds may differ between [`Interface`]s, so the right interface needs to be
+    /// Supported speeds may differ between interfaces, so the right interface needs to be
     /// selected for the returned value to make sense.
     ///
     /// This requires the probe to support [`Capability::SpeedInfo`].
@@ -80,8 +81,7 @@ impl JLink {
 
         self.write_cmd(&[Command::GetSpeeds as u8])?;
 
-        let mut buf = [0; 6];
-        self.read(&mut buf)?;
+        let buf = self.read_n::<6>()?;
 
         let base_freq_bytes = <[u8; 4]>::try_from(&buf[0..4]).unwrap();
         let min_div_bytes = <[u8; 2]>::try_from(&buf[4..6]).unwrap();
@@ -102,9 +102,11 @@ impl JLink {
     /// any API method that automatically selects an interface), the communication speed is reset to
     /// some unspecified default value.
     pub(super) fn set_interface_clock_speed(&mut self, speed: SpeedConfig) -> Result<()> {
-        if speed.raw == SpeedConfig::ADAPTIVE.raw {
+        if speed == SpeedConfig::ADAPTIVE {
             self.require_capability(Capability::AdaptiveClocking)?;
         }
+
+        tracing::info!("Selecting speed: {} Hz", speed.raw);
 
         let [low, high] = speed.raw.to_le_bytes();
         self.write_cmd(&[Command::SetSpeed as u8, low, high])?;

@@ -1,28 +1,22 @@
-use super::{
-    ap::{
-        valid_access_ports, AccessPort, ApAccess, ApClass, BaseaddrFormat, GenericAp, MemoryAp,
-        BASE, BASE2, CFG, CSW, IDR,
-    },
-    dp::{
-        Abort, Ctrl, DebugPortError, DebugPortId, DebugPortVersion, DpAccess, Select, BASEPTR0,
-        BASEPTR1, DPIDR, DPIDR1,
-    },
-    memory::{
-        adi_v5_memory_interface::{ADIMemoryInterface, ArmProbe},
-        Component,
-    },
-    sequences::{ArmDebugSequence, DefaultArmSequence},
-    ApAddress, ArmError, DapAccess, DpAddress, PortType, RawDapAccess, SwoAccess, SwoConfig,
-};
 use crate::{
-    architecture::arm::ap::DataSize,
+    architecture::arm::{
+        ap::valid_access_ports_allowlist,
+        dp::{
+            Abort, Ctrl, DebugPortError, DebugPortId, DebugPortVersion, DpAccess, Select, BASEPTR0,
+            BASEPTR1, DPIDR, DPIDR1,
+        },
+        memory::{adi_v5_memory_interface::ADIMemoryInterface, ArmMemoryInterface, Component},
+        sequences::{ArmDebugSequence, DefaultArmSequence},
+        ArmError, DapAccess, DpAddress, FullyQualifiedApAddress, PortType, RawDapAccess, SwoAccess,
+        SwoConfig,
+    },
     probe::{DebugProbe, DebugProbeError, Probe},
-    CoreStatus, Error as ProbeRsError,
+    CoreStatus, Error,
 };
 use jep106::JEP106Code;
 
 use std::{
-    collections::{hash_map, HashMap},
+    collections::{hash_map, BTreeSet, HashMap},
     fmt::Debug,
     sync::Arc,
     time::Duration,
@@ -74,32 +68,32 @@ impl RegisterParseError {
 
 /// To be implemented by debug probe drivers that support debugging ARM cores.
 pub trait ArmProbeInterface: DapAccess + SwdSequence + SwoAccess + Send {
-    /// Returns a memory interface to access the target's memory.
-    fn memory_interface(
+    /// Returns a vector of all the access ports the current debug port has.
+    ///
+    /// If the target device has multiple debug ports, this will switch the active debug port
+    /// if necessary.
+    fn access_ports(
         &mut self,
-        access_port: MemoryAp,
-    ) -> Result<Box<dyn ArmProbe + '_>, ArmError>;
+        dp: DpAddress,
+    ) -> Result<BTreeSet<FullyQualifiedApAddress>, ArmError>;
 
-    /// Returns information about a specific access port.
-    fn ap_information(&mut self, access_port: GenericAp) -> Result<&ApInformation, ArmError>;
+    /// Closes the interface and returns back the generic probe it consumed.
+    fn close(self: Box<Self>) -> Probe;
 
     /// Return the currently connected debug port.
     fn current_debug_port(&self) -> DpAddress;
 
-    /// Returns the number of access ports the debug port has.
-    ///
-    /// If the target device has multiple debug ports, this will switch the active debug port
-    /// if necessary. This will also  
-    fn num_access_ports(&mut self, dp: DpAddress) -> Result<usize, ArmError>;
+    /// Returns a memory interface to access the target's memory.
+    fn memory_interface(
+        &mut self,
+        access_port: &FullyQualifiedApAddress,
+    ) -> Result<Box<dyn ArmMemoryInterface + '_>, ArmError>;
 
     /// Reads the chip info from the romtable of given debug port.
     fn read_chip_info_from_rom_table(
         &mut self,
         dp: DpAddress,
     ) -> Result<Option<ArmChipInfo>, ArmError>;
-
-    /// Closes the interface and returns back the generic probe it consumed.
-    fn close(self: Box<Self>) -> Probe;
 }
 
 // TODO: Rename trait!
@@ -121,12 +115,12 @@ pub trait UninitializedArmProbe: SwdSequence + Debug {
         self: Box<Self>,
         sequence: Arc<dyn ArmDebugSequence>,
         dp: DpAddress,
-    ) -> Result<Box<dyn ArmProbeInterface>, (Box<dyn UninitializedArmProbe>, ProbeRsError)>;
+    ) -> Result<Box<dyn ArmProbeInterface>, (Box<dyn UninitializedArmProbe>, Error)>;
 
     fn initialize_unspecified(
         self: Box<Self>,
         dp: DpAddress,
-    ) -> Result<Box<dyn ArmProbeInterface>, (Box<dyn UninitializedArmProbe>, ProbeRsError)> {
+    ) -> Result<Box<dyn ArmProbeInterface>, (Box<dyn UninitializedArmProbe>, Error)> {
         self.initialize(DefaultArmSequence::create(), dp)
     }
 
@@ -202,7 +196,7 @@ pub(crate) struct DpState {
 
     /// Information about the APs of the target.
     /// APs are identified by a number, starting from zero.
-    pub ap_information: Vec<ApInformation>,
+    pub access_ports: BTreeSet<FullyQualifiedApAddress>,
 }
 
 impl DpState {
@@ -212,140 +206,9 @@ impl DpState {
             current_dpbanksel: 0,
             current_apsel: 0,
             current_apbanksel: 0,
-            ap_information: Vec::new(),
+            access_ports: BTreeSet::new(),
         }
     }
-}
-
-/// Information about an access port. Can be used for target discovery.
-#[derive(Clone, Debug)]
-pub enum ApInformation {
-    /// Information about a Memory AP, which allows access to target memory. See Chapter C2 in the [ARM Debug Interface Architecture Specification].
-    ///
-    /// [ARM Debug Interface Architecture Specification]: https://developer.arm.com/documentation/ihi0031/d/
-    MemoryAp(MemoryApInformation),
-    /// Information about an AP with an unknown class.
-    Other {
-        /// Zero-based port number of the access port. This is used in the debug port to select an AP.
-        address: ApAddress,
-        /// Content of the [`IDR`] register describing this AP.
-        idr: IDR,
-    },
-}
-
-impl ApInformation {
-    /// Read information about an AP from its registers.
-    ///
-    /// This reads the IDR register of the AP, and parses
-    /// further AP specific information based on its class.
-    ///
-    /// Currently, AP specific information is read for Memory APs.
-    pub(crate) fn read_from_target<P>(
-        probe: &mut P,
-        access_port: GenericAp,
-    ) -> Result<Self, ArmError>
-    where
-        P: ApAccess,
-    {
-        let idr: IDR = probe.read_ap_register(access_port)?;
-
-        if idr.CLASS == ApClass::MemAp {
-            let access_port: MemoryAp = access_port.into();
-
-            let base_register: BASE = probe.read_ap_register(access_port)?;
-
-            let mut base_address = if BaseaddrFormat::ADIv5 == base_register.Format {
-                let base2: BASE2 = probe.read_ap_register(access_port)?;
-
-                u64::from(base2.BASEADDR) << 32
-            } else {
-                0
-            };
-            base_address |= u64::from(base_register.BASEADDR << 12);
-
-            // Save old CSW value. STLink firmare caches it, which breaks things
-            // if we change it behind its back.
-            let old_csw: CSW = probe.read_ap_register(access_port)?;
-
-            // Read information about HNONSEC support and supported access widths
-            let csw = CSW::new(DataSize::U8);
-
-            probe.write_ap_register(access_port, csw)?;
-            let csw: CSW = probe.read_ap_register(access_port)?;
-
-            probe.write_ap_register(access_port, old_csw)?;
-
-            let only_32bit_data_size = csw.SIZE != DataSize::U8;
-
-            let supports_hnonsec = csw.HNONSEC == 1;
-
-            tracing::debug!("HNONSEC supported: {}", supports_hnonsec);
-
-            let device_enabled = csw.DeviceEn == 1;
-
-            tracing::debug!("Device enabled: {}", device_enabled);
-
-            let cfg: CFG = probe.read_ap_register(access_port)?;
-
-            let has_large_address_extension = cfg.LA == 1;
-            let has_large_data_extension = cfg.LD == 1;
-
-            Ok(ApInformation::MemoryAp(MemoryApInformation {
-                address: access_port.ap_address(),
-                supports_only_32bit_data_size: only_32bit_data_size,
-                debug_base_address: base_address,
-                supports_hnonsec,
-                has_large_address_extension,
-                has_large_data_extension,
-                device_enabled,
-            }))
-        } else {
-            Ok(ApInformation::Other {
-                address: access_port.ap_address(),
-                idr,
-            })
-        }
-    }
-}
-
-/// Information about a memory access port. Can be used for target discovery.
-/// Useful for detecting supported memory access of a target.
-#[derive(Debug, Clone)]
-pub struct MemoryApInformation {
-    /// Zero-based port number of the access port. This is used in the debug port to select an AP.
-    pub address: ApAddress,
-
-    /// Some Memory APs only support 32 bit wide access to data, while others
-    /// also support other widths. Based on this, 8 bit data access can either
-    /// be performed directly, or has to be done as a 32 bit access.
-    pub supports_only_32bit_data_size: bool,
-
-    /// The Debug Base Address points to either the start of a set of debug register,
-    /// or a ROM table which describes the connected debug components.
-    ///
-    /// See chapter C2.6, [ARM Debug Interface Architecture Specification].
-    ///
-    /// [ARM Debug Interface Architecture Specification]: https://developer.arm.com/documentation/ihi0031/d/
-    pub debug_base_address: u64,
-
-    /// Indicates if the HNONSEC bit in the CSW register is supported.
-    /// See section E1.5.1, [ARM Debug Interface Architecture Specification].
-    ///
-    /// [ARM Debug Interface Architecture Specification]: https://developer.arm.com/documentation/ihi0031/d/
-    ///
-    /// If HNONSEC is not supported, bit 30 in the CSW register has
-    /// to be set to 1 at all times.
-    pub supports_hnonsec: bool,
-
-    /// This AP has the large address extension present, supporting 64-bit addresses
-    pub has_large_address_extension: bool,
-
-    /// This AP has the large data extension present, supporting 64-bit data access
-    pub has_large_data_extension: bool,
-
-    /// Memory transactions can be issued through this AP. If this bit is not set,
-    /// no transactions can be issued.
-    pub device_enabled: bool,
 }
 
 /// An implementation of the communication protocol between probe and target.
@@ -389,15 +252,9 @@ pub trait DapProbe: RawDapAccess + DebugProbe {}
 impl ArmProbeInterface for ArmCommunicationInterface<Initialized> {
     fn memory_interface(
         &mut self,
-        access_port: MemoryAp,
-    ) -> Result<Box<dyn ArmProbe + '_>, ArmError> {
-        ArmCommunicationInterface::memory_interface(self, access_port)
-    }
-
-    fn ap_information(&mut self, access_port: GenericAp) -> Result<&ApInformation, ArmError> {
-        let info = ArmCommunicationInterface::ap_information(self, access_port)?;
-
-        info.ok_or_else(|| ArmError::ApDoesNotExist(access_port.ap_address()))
+        access_port_address: &FullyQualifiedApAddress,
+    ) -> Result<Box<dyn ArmMemoryInterface + '_>, ArmError> {
+        ArmCommunicationInterface::memory_interface(self, access_port_address)
     }
 
     fn read_chip_info_from_rom_table(
@@ -407,16 +264,19 @@ impl ArmProbeInterface for ArmCommunicationInterface<Initialized> {
         ArmCommunicationInterface::read_chip_info_from_rom_table(self, dp)
     }
 
-    fn num_access_ports(&mut self, dp: DpAddress) -> Result<usize, ArmError> {
-        ArmCommunicationInterface::num_access_ports(self, dp)
-    }
-
     fn current_debug_port(&self) -> DpAddress {
         self.state.current_dp
     }
 
     fn close(self: Box<Self>) -> Probe {
         ArmCommunicationInterface::close(*self)
+    }
+
+    fn access_ports(
+        &mut self,
+        dp: DpAddress,
+    ) -> Result<BTreeSet<FullyQualifiedApAddress>, ArmError> {
+        self.select_dp(dp).map(|state| state.access_ports.clone())
     }
 }
 
@@ -453,7 +313,7 @@ impl UninitializedArmProbe for ArmCommunicationInterface<Uninitialized> {
         mut self: Box<Self>,
         sequence: Arc<dyn ArmDebugSequence>,
         dp: DpAddress,
-    ) -> Result<Box<dyn ArmProbeInterface>, (Box<dyn UninitializedArmProbe>, ProbeRsError)> {
+    ) -> Result<Box<dyn ArmProbeInterface>, (Box<dyn UninitializedArmProbe>, Error)> {
         let use_overrun_detect = self.state.use_overrun_detect;
         let probe = self.probe.take().expect("ArmCommunicationInterface is in an inconsistent state. This is a bug, please report it.");
 
@@ -466,7 +326,7 @@ impl UninitializedArmProbe for ArmCommunicationInterface<Uninitialized> {
             Ok(initialized) => Ok(Box::new(initialized)),
             Err((probe, err)) => Err((
                 Box::new(ArmCommunicationInterface::new(probe, use_overrun_detect)),
-                ProbeRsError::Arm(err),
+                Error::Arm(err),
             )),
         }
     }
@@ -546,22 +406,18 @@ impl<'interface> ArmCommunicationInterface<Initialized> {
     /// Tries to obtain a memory interface which can be used to read memory from ARM targets.
     pub fn memory_interface(
         &'interface mut self,
-        access_port: MemoryAp,
-    ) -> Result<Box<dyn ArmProbe + 'interface>, ArmError> {
-        let info = self
-            .ap_information(access_port)?
-            .ok_or_else(|| ArmError::ApDoesNotExist(access_port.ap_address()))?;
-
-        match info {
-            ApInformation::MemoryAp(ap_information) => {
-                let information = ap_information.clone();
-                let adi_v5_memory_interface = ADIMemoryInterface::new(self, information)
-                    .map_err(|e| ArmError::from_access_port(e, access_port))?;
-
-                Ok(Box::new(adi_v5_memory_interface))
-            }
-            ApInformation::Other { .. } => Err(ArmError::WrongApType),
+        access_port_address: &FullyQualifiedApAddress,
+    ) -> Result<Box<dyn ArmMemoryInterface + 'interface>, ArmError> {
+        if !self
+            .select_dp(access_port_address.dp())?
+            .access_ports
+            .contains(access_port_address)
+        {
+            return Err(ArmError::ApDoesNotExist(access_port_address.clone()));
         }
+
+        let memory_interface = ADIMemoryInterface::new(self, access_port_address)?;
+        Ok(Box::new(memory_interface))
     }
 
     fn select_dp(&mut self, dp: DpAddress) -> Result<&mut DpState, ArmError> {
@@ -634,14 +490,11 @@ impl<'interface> ArmCommunicationInterface<Initialized> {
             tracing::trace!("Searching valid APs");
 
             let ap_span = tracing::debug_span!("AP discovery").entered();
-            for ap in valid_access_ports(self, dp) {
-                let ap_state = ApInformation::read_from_target(self, ap)?;
-                tracing::debug!("AP {:x?}: {:?}", ap, ap_state);
+            let allowed_aps = sequence.allowed_access_ports();
+            let access_ports = valid_access_ports_allowlist(self, dp, allowed_aps);
+            let state = self.state.dps.get_mut(&dp).unwrap();
+            state.access_ports = access_ports.into_iter().collect();
 
-                // note(unwrap): we have inserted the state above, it must exist.
-                let state = self.state.dps.get_mut(&dp).unwrap();
-                state.ap_information.push(ap_state);
-            }
             drop(ap_span);
         } else if switched_dp {
             let sequence = self.state.sequence.clone();
@@ -693,12 +546,12 @@ impl<'interface> ArmCommunicationInterface<Initialized> {
 
     fn select_ap_and_ap_bank(
         &mut self,
-        ap: ApAddress,
+        ap: &FullyQualifiedApAddress,
         ap_register_address: u8,
     ) -> Result<(), ArmError> {
-        let dp_state = self.select_dp(ap.dp)?;
+        let dp_state = self.select_dp(ap.dp())?;
 
-        let port = ap.ap;
+        let port = ap.ap_v1()?;
         let ap_bank = ap_register_address >> 4;
 
         let mut cache_changed = if dp_state.current_apsel != port {
@@ -726,42 +579,16 @@ impl<'interface> ArmCommunicationInterface<Initialized> {
             select.set_ap_bank_sel(dp_state.current_apbanksel);
             select.set_dp_bank_sel(dp_state.current_dpbanksel);
 
-            self.write_dp_register(ap.dp, select)?;
+            self.write_dp_register(ap.dp(), select)?;
         }
 
         Ok(())
-    }
-
-    /// Determine the type and additional information about an AP.
-    ///
-    /// If the AP doesn't exist, None is returned.
-    pub(crate) fn ap_information(
-        &mut self,
-        access_port: impl AccessPort,
-    ) -> Result<Option<&ApInformation>, ArmError> {
-        let addr = access_port.ap_address();
-
-        let state = self.select_dp(addr.dp)?;
-
-        Ok(state.ap_information.get(addr.ap as usize))
-    }
-
-    fn num_access_ports(&mut self, dp: DpAddress) -> Result<usize, ArmError> {
-        let state = self.select_dp(dp)?;
-
-        Ok(state.ap_information.len())
     }
 }
 
 impl FlushableArmAccess for ArmCommunicationInterface<Initialized> {
     fn flush(&mut self) -> Result<(), ArmError> {
         self.probe_mut().raw_flush()
-    }
-
-    fn get_arm_communication_interface(
-        &mut self,
-    ) -> Result<&mut ArmCommunicationInterface<Initialized>, DebugProbeError> {
-        Ok(self)
     }
 }
 
@@ -811,9 +638,9 @@ impl DapAccess for ArmCommunicationInterface<Initialized> {
 
     fn read_raw_ap_register(
         &mut self,
-        ap: ApAddress,
+        ap: &FullyQualifiedApAddress,
         address: u8,
-    ) -> std::result::Result<u32, ArmError> {
+    ) -> Result<u32, ArmError> {
         self.select_ap_and_ap_bank(ap, address)?;
 
         let result = self
@@ -825,7 +652,7 @@ impl DapAccess for ArmCommunicationInterface<Initialized> {
 
     fn read_raw_ap_register_repeated(
         &mut self,
-        ap: ApAddress,
+        ap: &FullyQualifiedApAddress,
         address: u8,
         values: &mut [u32],
     ) -> Result<(), ArmError> {
@@ -838,7 +665,7 @@ impl DapAccess for ArmCommunicationInterface<Initialized> {
 
     fn write_raw_ap_register(
         &mut self,
-        ap: ApAddress,
+        ap: &FullyQualifiedApAddress,
         address: u8,
         value: u32,
     ) -> Result<(), ArmError> {
@@ -852,7 +679,7 @@ impl DapAccess for ArmCommunicationInterface<Initialized> {
 
     fn write_raw_ap_register_repeated(
         &mut self,
-        ap: ApAddress,
+        ap: &FullyQualifiedApAddress,
         address: u8,
         values: &[u32],
     ) -> Result<(), ArmError> {
@@ -867,7 +694,7 @@ impl DapAccess for ArmCommunicationInterface<Initialized> {
 /// Information about the chip target we are currently attached to.
 /// This can be used for discovery, tho, for now it does not work optimally,
 /// as some manufacturers (e.g. ST Microelectronics) violate the spec and thus need special discovery procedures.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct ArmChipInfo {
     /// The JEP106 code of the manufacturer of this chip target.
     pub manufacturer: JEP106Code,
@@ -884,9 +711,6 @@ impl ArmCommunicationInterface<Initialized> {
         &mut self,
         dp: DpAddress,
     ) -> Result<Option<ArmChipInfo>, ArmError> {
-        // faults on some chips need to be cleaned up.
-        let aps = valid_access_ports(self, dp);
-
         // Check sticky error and cleanup if necessary
         let ctrl_reg: crate::architecture::arm::dp::Ctrl = self.read_dp_register(dp)?;
 
@@ -896,19 +720,13 @@ impl ArmCommunicationInterface<Initialized> {
             abort.set_stkerrclr(true);
             self.write_dp_register(dp, abort)?;
         }
-        for access_port in aps {
-            let idr: IDR = self.read_ap_register(access_port)?;
-            tracing::debug!("{:#x?}", idr);
 
-            if idr.CLASS == ApClass::MemAp {
-                let access_port: MemoryAp = access_port.into();
+        let state = self.select_dp(dp)?;
 
-                let baseaddr = access_port.base_address(self)?;
-
-                let mut memory = self.memory_interface(access_port)?;
-
-                let component = Component::try_parse(&mut *memory, baseaddr)?;
-
+        for access_port in state.access_ports.clone() {
+            if let Ok(mut memory) = self.memory_interface(&access_port) {
+                let base_addr = memory.base_address()?;
+                let component = Component::try_parse(&mut *memory, base_addr)?;
                 if let Component::Class1RomTable(component_id, _) = component {
                     if let Some(jep106) = component_id.peripheral_id().jep106() {
                         return Ok(Some(ArmChipInfo {
@@ -948,9 +766,4 @@ impl std::fmt::Display for ArmChipInfo {
 pub trait FlushableArmAccess {
     /// Flush all remaining commands if the target driver implements batching.
     fn flush(&mut self) -> Result<(), ArmError>;
-
-    /// Tries to get the underlying [`ArmCommunicationInterface`].
-    fn get_arm_communication_interface(
-        &mut self,
-    ) -> Result<&mut ArmCommunicationInterface<Initialized>, DebugProbeError>;
 }

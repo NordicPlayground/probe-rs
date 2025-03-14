@@ -23,6 +23,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0 # This is a workaround for cargo-release, see https://github.com/crate-ci/cargo-release/issues/625
+          # We need to manually set a token here to ensure that we can trigger the `cargo dist` workflow.
+          #
+          # By default, pushing a tag from a workflow does not trigger other workflows, which means that the release
+          # workflow isn't triggered by pushing a tag from this workflow. Manually setting a token is a workaround for
+          # this, see https://github.com/orgs/community/discussions/57484'
+          token: ${{ secrets.GH_PAT }}
 
       - name: Install libudev (linux)
         run: |
@@ -73,11 +79,15 @@ jobs:
           echo "::endgroup::"
 
           echo "::group::Tagging release using 'cargo release tag'"
-          cargo release tag --no-confirm --execute --sign-tag --tag-prefix ""
+          cargo release tag --no-confirm --execute --sign-tag --tag-prefix "" --exclude probe-rs-mi
+          # `|| true` to avoid "no package selected" errors if probe-rs-mi is not updated
+          cargo release tag --no-confirm --execute --sign-tag --package probe-rs-mi || true
           echo "::endgroup::"
 
           echo "::group::Pushing tags to remote using 'cargo release push'"
-          cargo release push --no-confirm --execute --tag-prefix ""
+          cargo release push --no-confirm --execute --tag-prefix "" --exclude probe-rs-mi
+          # `|| true` to avoid "no package selected" errors if probe-rs-mi is not updated
+          cargo release push --no-confirm --execute --package probe-rs-mi || true
           echo "::endgroup::"
         env:
           SSH_AUTH_SOCK: /tmp/ssh_agent.sock

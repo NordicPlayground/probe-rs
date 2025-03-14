@@ -1,13 +1,10 @@
+//! This example demonstrates how to do a "recover" operation (erase+unlock a locked chip) on an nRF5340 target.
+
 use anyhow::Result;
 use probe_rs::{
-    architecture::arm::{ApAddress, DpAddress},
-    config::Target,
-    core::Core,
+    architecture::arm::{DpAddress, FullyQualifiedApAddress},
     probe::list::Lister,
 };
-use probe_rs_target::{BinaryFormat, CoreAccessOptions, RiscvCoreAccessOptions};
-
-use probe_rs_target::{ArmCoreAccessOptions, CoreType};
 
 fn main() -> Result<()> {
     pretty_env_logger::init();
@@ -27,60 +24,25 @@ fn main() -> Result<()> {
         .initialize_unspecified(DpAddress::Default)
         .unwrap();
 
-    // This is an example on how to do a "recover" operation (erase+unlock a locked chip)
-    // on an nRF5340 target.
-
-    const APP_MEM: ApAddress = ApAddress {
-        ap: 0,
-        dp: DpAddress::Default,
-    };
-    const NET_MEM: ApAddress = ApAddress {
-        ap: 1,
-        dp: DpAddress::Default,
-    };
-    const APP_CTRL: ApAddress = ApAddress {
-        ap: 2,
-        dp: DpAddress::Default,
-    };
-    const NET_CTRL: ApAddress = ApAddress {
-        ap: 3,
-        dp: DpAddress::Default,
-    };
+    const APP_MEM: FullyQualifiedApAddress = FullyQualifiedApAddress::v1_with_default_dp(0);
+    const NET_MEM: FullyQualifiedApAddress = FullyQualifiedApAddress::v1_with_default_dp(1);
+    const APP_CTRL: FullyQualifiedApAddress = FullyQualifiedApAddress::v1_with_default_dp(2);
+    const NET_CTRL: FullyQualifiedApAddress = FullyQualifiedApAddress::v1_with_default_dp(3);
 
     const ERASEALL: u8 = 0x04;
     const ERASEALLSTATUS: u8 = 0x08;
     const IDR: u8 = 0xFC;
 
-    /*
-    for &ap in &[APP_MEM, NET_MEM, APP_CTRL, NET_CTRL] {
+    for ap in &[APP_MEM, NET_MEM, APP_CTRL, NET_CTRL] {
         println!("IDR {:?} {:x}", ap, iface.read_raw_ap_register(ap, IDR)?);
     }
 
-    for &ap in &[APP_CTRL, NET_CTRL] {
+    for ap in &[APP_CTRL, NET_CTRL] {
         // Start erase
         iface.write_raw_ap_register(ap, ERASEALL, 1)?;
         // Wait for erase done
         while iface.read_raw_ap_register(ap, ERASEALLSTATUS)? != 0 {}
     }
-    */
-
-    let options = ArmCoreAccessOptions {
-        ap: APP_MEM.ap,
-        psel: 0,
-        debug_base: None,
-        cti_base: None,
-    };
-    let target = probe_rs::config::get_target_by_name("Cortex-M33")?;
-    let mut core_state = Core::create_state(
-        0,
-        CoreAccessOptions::Arm(options),
-        &target,
-        CoreType::Armv8m,
-    );
-
-    let mut core = core_state.attach_arm(&target, &mut iface)?;
-
-    println!("{:?}", core.status()?);
 
     Ok(())
 }

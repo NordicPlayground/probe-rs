@@ -1,15 +1,22 @@
-
 on:
   push:
     branches: [master, staging, trying]
   pull_request:
   merge_group:
-
+  workflow_dispatch:
 
 name: Run smoke test
 
 env:
   CARGO_INCREMENTAL: 0
+
+# Cancel any currently running workflows from the same PR, branch, or
+# tag when a new workflow is triggered.
+#
+# https://stackoverflow.com/a/66336834
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
 
 jobs:
   build:
@@ -23,21 +30,28 @@ jobs:
         run: rustup target add aarch64-unknown-linux-gnu
 
       - name: Install cross
-        uses: taiki-e/install-action@v2.33.22
+        uses: taiki-e/install-action@v2.46.9
         with:
           tool: cross
 
       - name: Cache Dependencies
-        uses: Swatinem/rust-cache@v2.7.3
+        uses: Swatinem/rust-cache@v2.7.5
 
       - name: Build smoke-tester
-        run:
-          cross build --release --target aarch64-unknown-linux-gnu -p smoke_tester
+        run: cross build --release --target aarch64-unknown-linux-gnu -p smoke_tester
 
       - uses: actions/upload-artifact@v4
         with:
           name: smoke_tester
           path: target/aarch64-unknown-linux-gnu/release/smoke_tester
+
+      - name: Build probe-rs
+        run: cross build --release --target aarch64-unknown-linux-gnu -p probe-rs-tools
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: probe-rs
+          path: target/aarch64-unknown-linux-gnu/release/probe-rs
 
   test:
     runs-on: ["self-hosted", "linux", "ARM64", "${{ matrix.runner }}"]
@@ -53,6 +67,26 @@ jobs:
           name: smoke_tester
 
       - name: Run smoke-tester
-        run:  |
+        run: |
           chmod +x smoke_tester
           ./smoke_tester test --dut-definitions $SMOKE_TESTER_CONFIG --markdown-summary $GITHUB_STEP_SUMMARY
+
+  embedded-test:
+    runs-on: ["self-hosted", "linux", "ARM64", "${{ matrix.runner }}"]
+    strategy:
+      matrix:
+        runner: ["smoke-tester-2"]
+
+    needs: build
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: probe-rs
+
+      - name: Run embedded-tests
+        run: |
+          chmod +x probe-rs
+          if [ -n "$EMBEDDED_TEST_RUNNER" ]; then
+            . $EMBEDDED_TEST_RUNNER
+          fi

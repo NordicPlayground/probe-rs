@@ -4,6 +4,8 @@ use crate::{
     core::{RegisterDataType, RegisterId, RegisterRole, RegisterValue},
     CoreInterface, CoreRegister, Error,
 };
+use serde::Serialize;
+
 /// Stores the relevant information from [`crate::core::CoreRegister`] for use in debug operations,
 /// as well as additional information required during debug.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -127,8 +129,7 @@ impl DebugRegisters {
     pub fn get_address_size_bytes(&self) -> usize {
         self.get_program_counter().map_or_else(
             || 0,
-            |debug_register| (debug_register.core_register.size_in_bits() + 7) / 8,
-            //TODO: use `div_ceil(8)` when it stabilizes
+            |debug_register| debug_register.core_register.size_in_bits().div_ceil(8),
         )
     }
 

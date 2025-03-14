@@ -10,18 +10,17 @@ use super::{
 };
 use crate::{
     architecture::arm::{
-        core::armv8a_debug_regs::*, memory::adi_v5_memory_interface::ArmProbe,
-        sequences::ArmDebugSequence, ArmError,
+        core::armv8a_debug_regs::*, memory::ArmMemoryInterface, sequences::ArmDebugSequence,
+        ArmError,
     },
     core::{
         memory_mapped_registers::MemoryMappedRegister, CoreRegisters, RegisterId, RegisterValue,
     },
     error::Error,
-    memory::valid_32bit_address,
+    memory::{valid_32bit_address, MemoryNotAlignedError},
     Architecture, CoreInformation, CoreInterface, CoreRegister, CoreStatus, CoreType,
     InstructionSet, MemoryInterface,
 };
-use anyhow::Result;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -50,7 +49,7 @@ fn prep_instr_for_itr_32(instruction: u32) -> u32 {
 
 /// Interface for interacting with an ARMv8-A core
 pub struct Armv8a<'probe> {
-    memory: Box<dyn ArmProbe + 'probe>,
+    memory: Box<dyn ArmMemoryInterface + 'probe>,
 
     state: &'probe mut CortexAState,
 
@@ -65,7 +64,7 @@ pub struct Armv8a<'probe> {
 
 impl<'probe> Armv8a<'probe> {
     pub(crate) fn new(
-        mut memory: Box<dyn ArmProbe + 'probe>,
+        mut memory: Box<dyn ArmMemoryInterface + 'probe>,
         state: &'probe mut CortexAState,
         base_address: u64,
         cti_address: u64,
@@ -850,10 +849,11 @@ impl<'probe> Armv8a<'probe> {
             return Ok(());
         }
         if data.len() % 4 != 0 || address % 4 != 0 {
-            return Err(Error::MemoryNotAligned {
+            return Err(MemoryNotAlignedError {
                 address,
                 alignment: 4,
-            });
+            }
+            .into());
         }
 
         // Save x0
@@ -962,10 +962,11 @@ impl<'probe> Armv8a<'probe> {
             return Ok(());
         }
         if data.len() % 4 != 0 || address % 4 != 0 {
-            return Err(Error::MemoryNotAligned {
+            return Err(MemoryNotAlignedError {
                 address,
                 alignment: 4,
-            });
+            }
+            .into());
         }
 
         // Save x0
@@ -1023,21 +1024,20 @@ impl<'probe> Armv8a<'probe> {
     }
 }
 
-impl<'probe> CoreInterface for Armv8a<'probe> {
+impl CoreInterface for Armv8a<'_> {
     fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), Error> {
         // Wait until halted state is active again.
         let start = Instant::now();
 
-        let address = Edscr::get_mmio_address_from_base(self.base_address)?;
-
-        while start.elapsed() < timeout {
-            let edscr = Edscr(self.memory.read_word_32(address)?);
-            if edscr.halted() {
-                return Ok(());
+        while !self.core_halted()? {
+            if start.elapsed() >= timeout {
+                return Err(Error::Arm(ArmError::Timeout));
             }
+            // Wait a bit before polling again.
             std::thread::sleep(Duration::from_millis(1));
         }
-        Err(Error::Arm(ArmError::Timeout))
+
+        Ok(())
     }
 
     fn core_halted(&mut self) -> Result<bool, Error> {
@@ -1470,7 +1470,7 @@ impl<'probe> CoreInterface for Armv8a<'probe> {
     }
 }
 
-impl<'probe> MemoryInterface for Armv8a<'probe> {
+impl MemoryInterface for Armv8a<'_> {
     fn supports_native_64bit_access(&mut self) -> bool {
         self.state.is_64_bit
     }
@@ -1683,7 +1683,8 @@ impl<'probe> MemoryInterface for Armv8a<'probe> {
 mod test {
     use crate::{
         architecture::arm::{
-            ap::MemoryAp, communication_interface::SwdSequence, sequences::DefaultArmSequence,
+            ap::memory_ap::MemoryAp, communication_interface::SwdSequence,
+            sequences::DefaultArmSequence,
         },
         probe::DebugProbeError,
     };
@@ -1732,10 +1733,7 @@ mod test {
             });
         }
     }
-
-    impl ArmProbe for MockProbe {
-        fn update_core_status(&mut self, _: CoreStatus) {}
-
+    impl MemoryInterface<ArmError> for MockProbe {
         fn read_8(&mut self, _address: u64, _data: &mut [u8]) -> Result<(), ArmError> {
             todo!()
         }
@@ -1813,11 +1811,31 @@ mod test {
             Ok(())
         }
 
+        fn read_64(&mut self, _address: u64, _data: &mut [u64]) -> Result<(), ArmError> {
+            todo!()
+        }
+
+        fn write_64(&mut self, _address: u64, _data: &[u64]) -> Result<(), ArmError> {
+            todo!()
+        }
+
         fn flush(&mut self) -> Result<(), ArmError> {
             todo!()
         }
 
-        fn ap(&mut self) -> MemoryAp {
+        fn supports_8bit_transfers(&self) -> Result<bool, ArmError> {
+            Ok(false)
+        }
+
+        fn supports_native_64bit_access(&mut self) -> bool {
+            false
+        }
+    }
+
+    impl ArmMemoryInterface for MockProbe {
+        fn update_core_status(&mut self, _: CoreStatus) {}
+
+        fn ap(&mut self) -> &mut MemoryAp {
             todo!()
         }
 
@@ -1834,20 +1852,22 @@ mod test {
             })
         }
 
-        fn read_64(&mut self, _address: u64, _data: &mut [u64]) -> Result<(), ArmError> {
+        fn try_as_parts(
+            &mut self,
+        ) -> Result<
+            (
+                &mut crate::architecture::arm::ArmCommunicationInterface<
+                    crate::architecture::arm::communication_interface::Initialized,
+                >,
+                &mut MemoryAp,
+            ),
+            DebugProbeError,
+        > {
             todo!()
         }
 
-        fn write_64(&mut self, _address: u64, _data: &[u64]) -> Result<(), ArmError> {
+        fn base_address(&mut self) -> Result<u64, ArmError> {
             todo!()
-        }
-
-        fn supports_8bit_transfers(&self) -> Result<bool, ArmError> {
-            Ok(false)
-        }
-
-        fn supports_native_64bit_access(&mut self) -> bool {
-            false
         }
     }
 

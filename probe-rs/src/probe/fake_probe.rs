@@ -1,22 +1,27 @@
 #![allow(missing_docs)] // Don't require docs for test code
-use std::{cell::RefCell, collections::VecDeque, fmt::Debug, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeSet, VecDeque},
+    fmt::Debug,
+    sync::Arc,
+};
 
 use probe_rs_target::ScanChainElement;
 
 use crate::{
     architecture::arm::{
-        ap::{memory_ap::mock::MockMemoryAp, AccessPort, MemoryAp},
+        ap::memory_ap::{mock::MockMemoryAp, MemoryAp},
         armv8m::Dhcsr,
         communication_interface::{
             ArmDebugState, Initialized, SwdSequence, Uninitialized, UninitializedArmProbe,
         },
-        memory::adi_v5_memory_interface::{ADIMemoryInterface, ArmProbe},
+        memory::{adi_v5_memory_interface::ADIMemoryInterface, ArmMemoryInterface},
         sequences::ArmDebugSequence,
-        ApAddress, ArmError, ArmProbeInterface, DapAccess, DpAddress, MemoryApInformation,
-        PortType, RawDapAccess, SwoAccess,
+        ArmError, ArmProbeInterface, DapAccess, DpAddress, FullyQualifiedApAddress, PortType,
+        RawDapAccess, SwoAccess,
     },
     probe::{DebugProbe, DebugProbeError, Probe, WireProtocol},
-    Error, MemoryMappedRegister,
+    Error, MemoryInterface, MemoryMappedRegister,
 };
 
 /// This is a mock probe which can be used for mocking things in tests or for dry runs.
@@ -74,7 +79,7 @@ impl SwdSequence for &mut MockCore {
     }
 }
 
-impl ArmProbe for &mut MockCore {
+impl MemoryInterface<ArmError> for &mut MockCore {
     fn read_8(&mut self, _address: u64, _data: &mut [u8]) -> Result<(), ArmError> {
         todo!()
     }
@@ -172,8 +177,14 @@ impl ArmProbe for &mut MockCore {
     fn supports_8bit_transfers(&self) -> Result<bool, ArmError> {
         todo!()
     }
+}
 
-    fn ap(&mut self) -> MemoryAp {
+impl ArmMemoryInterface for &mut MockCore {
+    fn base_address(&mut self) -> Result<u64, ArmError> {
+        todo!()
+    }
+
+    fn ap(&mut self) -> &mut MemoryAp {
         todo!()
     }
 
@@ -186,13 +197,25 @@ impl ArmProbe for &mut MockCore {
         todo!()
     }
 
+    fn try_as_parts(
+        &mut self,
+    ) -> Result<
+        (
+            &mut crate::architecture::arm::ArmCommunicationInterface<Initialized>,
+            &mut MemoryAp,
+        ),
+        DebugProbeError,
+    > {
+        todo!()
+    }
+
     fn update_core_status(&mut self, _state: crate::CoreStatus) {}
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operation {
     ReadRawApRegister {
-        ap: ApAddress,
+        ap: FullyQualifiedApAddress,
         address: u8,
         result: u32,
     },
@@ -269,7 +292,7 @@ impl FakeProbe {
 
     fn read_raw_ap_register(
         &mut self,
-        expected_ap: ApAddress,
+        expected_ap: &FullyQualifiedApAddress,
         expected_address: u8,
     ) -> Result<u32, ArmError> {
         let operation = self.next_operation();
@@ -280,7 +303,7 @@ impl FakeProbe {
                 address,
                 result,
             }) => {
-                assert_eq!(ap, expected_ap);
+                assert_eq!(&ap, expected_ap);
                 assert_eq!(address, expected_address);
 
                 Ok(result)
@@ -319,9 +342,9 @@ impl DebugProbe for FakeProbe {
     fn scan_chain(&self) -> Result<&[ScanChainElement], DebugProbeError> {
         match &self.scan_chain {
             Some(chain) => Ok(chain),
-            None => Err(DebugProbeError::Other(anyhow::anyhow!(
-                "No scan chain set for fake probe"
-            ))),
+            None => Err(DebugProbeError::Other(
+                "No scan chain set for fake probe".to_string(),
+            )),
         }
     }
 
@@ -480,25 +503,22 @@ impl UninitializedArmProbe for FakeArmInterface<Uninitialized> {
     }
 }
 
+impl crate::architecture::arm::communication_interface::FlushableArmAccess
+    for FakeArmInterface<Initialized>
+{
+    fn flush(&mut self) -> Result<(), ArmError> {
+        todo!()
+    }
+}
+
 impl ArmProbeInterface for FakeArmInterface<Initialized> {
     fn memory_interface(
         &mut self,
-        access_port: MemoryAp,
-    ) -> Result<Box<dyn ArmProbe + '_>, ArmError> {
-        let ap_information = MemoryApInformation {
-            address: access_port.ap_address(),
-            supports_only_32bit_data_size: false,
-            debug_base_address: 0xf000_0000,
-            supports_hnonsec: false,
-            has_large_data_extension: false,
-            has_large_address_extension: false,
-            device_enabled: true,
-        };
-
+        access_port_address: &FullyQualifiedApAddress,
+    ) -> Result<Box<dyn ArmMemoryInterface + '_>, ArmError> {
         match self.probe.memory_ap {
-            MockedAp::MemoryAp(ref mut memory_ap) => {
-                let memory = ADIMemoryInterface::new(memory_ap, ap_information)
-                    .map_err(|e| ArmError::from_access_port(e, access_port))?;
+            MockedAp::MemoryAp(ref mut _memory_ap) => {
+                let memory = ADIMemoryInterface::new(self, access_port_address)?;
 
                 Ok(Box::new(memory) as _)
             }
@@ -506,15 +526,11 @@ impl ArmProbeInterface for FakeArmInterface<Initialized> {
         }
     }
 
-    fn ap_information(
+    fn access_ports(
         &mut self,
-        _access_port: crate::architecture::arm::ap::GenericAp,
-    ) -> Result<&crate::architecture::arm::ApInformation, ArmError> {
-        todo!()
-    }
-
-    fn num_access_ports(&mut self, _dp: DpAddress) -> Result<usize, ArmError> {
-        Ok(1)
+        dp: DpAddress,
+    ) -> Result<BTreeSet<FullyQualifiedApAddress>, ArmError> {
+        Ok(BTreeSet::from([FullyQualifiedApAddress::v1_with_dp(dp, 1)]))
     }
 
     fn read_chip_info_from_rom_table(
@@ -564,13 +580,17 @@ impl DapAccess for FakeArmInterface<Initialized> {
         todo!()
     }
 
-    fn read_raw_ap_register(&mut self, _ap: ApAddress, _address: u8) -> Result<u32, ArmError> {
+    fn read_raw_ap_register(
+        &mut self,
+        _ap: &FullyQualifiedApAddress,
+        _address: u8,
+    ) -> Result<u32, ArmError> {
         self.probe.read_raw_ap_register(_ap, _address)
     }
 
     fn read_raw_ap_register_repeated(
         &mut self,
-        _ap: ApAddress,
+        _ap: &FullyQualifiedApAddress,
         _address: u8,
         _values: &mut [u32],
     ) -> Result<(), ArmError> {
@@ -579,7 +599,7 @@ impl DapAccess for FakeArmInterface<Initialized> {
 
     fn write_raw_ap_register(
         &mut self,
-        _ap: ApAddress,
+        _ap: &FullyQualifiedApAddress,
         _address: u8,
         _value: u32,
     ) -> Result<(), ArmError> {
@@ -588,7 +608,7 @@ impl DapAccess for FakeArmInterface<Initialized> {
 
     fn write_raw_ap_register_repeated(
         &mut self,
-        _ap: ApAddress,
+        _ap: &FullyQualifiedApAddress,
         _address: u8,
         _values: &[u32],
     ) -> Result<(), ArmError> {
@@ -596,7 +616,7 @@ impl DapAccess for FakeArmInterface<Initialized> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "builtin-targets"))]
 mod test {
     use super::FakeProbe;
     use crate::Permissions;

@@ -440,21 +440,6 @@ impl Debugger {
             return Err(bad_config);
         }
 
-        if requested_target_session_type == TargetSessionType::AttachRequest {
-            // Since VSCode doesn't do field validation checks for relationships in launch.json request types, check it here.
-            if self.config.flashing_config.flashing_enabled
-                || self.config.flashing_config.halt_after_reset
-                || self.config.flashing_config.full_chip_erase
-                || self.config.flashing_config.restore_unwritten_bytes
-            {
-                let error = DebuggerError::Other(anyhow!(
-                                            "Please do not use any of the `flashing_enabled`, `reset_after_flashing`, halt_after_reset`, `full_chip_erase`, or `restore_unwritten_bytes` options when using `attach` request type."));
-
-                debug_adapter.send_response::<()>(launch_attach_request, Err(&error))?;
-                return Err(error);
-            }
-        }
-
         debug_adapter
             .set_console_log_level(self.config.console_log_level.unwrap_or(ConsoleLog::Console));
 
@@ -679,18 +664,26 @@ impl Debugger {
                 let mut flash_progress = progress_state.borrow_mut();
                 let mut debug_adapter = rc_debug_adapter_clone.borrow_mut();
                 match event {
-                    ProgressEvent::Initialized { flash_layout } => {
-                        flash_progress.total_page_size =
-                            flash_layout.pages().iter().map(|s| s.size() as usize).sum();
+                    ProgressEvent::Initialized { phases, .. } => {
+                        for phase_layout in phases {
+                            flash_progress.total_page_size += phase_layout
+                                .pages()
+                                .iter()
+                                .map(|s| s.size() as usize)
+                                .sum::<usize>();
 
-                        flash_progress.total_sector_size = flash_layout
-                            .sectors()
-                            .iter()
-                            .map(|s| s.size() as usize)
-                            .sum();
+                            flash_progress.total_sector_size += phase_layout
+                                .sectors()
+                                .iter()
+                                .map(|s| s.size() as usize)
+                                .sum::<usize>();
 
-                        flash_progress.total_fill_size =
-                            flash_layout.fills().iter().map(|s| s.size() as usize).sum();
+                            flash_progress.total_fill_size += phase_layout
+                                .fills()
+                                .iter()
+                                .map(|s| s.size() as usize)
+                                .sum::<usize>();
+                        }
                     }
                     ProgressEvent::StartedFilling => {
                         debug_adapter
@@ -792,7 +785,7 @@ impl Debugger {
                 if let Some(id) = progress_id {
                     let _ = debug_adapter.end_progress(id);
                 }
-                let error = DebuggerError::Other(error);
+                let error = DebuggerError::FileDownload(error);
                 debug_adapter.send_response::<()>(launch_attach_request, Err(&error))?;
                 return Err(error);
             }
@@ -988,9 +981,8 @@ mod test {
         server::configuration::{ConsoleLog, CoreConfig, FlashingConfig, SessionConfig},
         test::TestLister,
     };
-    use core::panic;
     use probe_rs::{
-        architecture::arm::ApAddress,
+        architecture::arm::FullyQualifiedApAddress,
         integration::{FakeProbe, Operation},
         probe::{
             list::Lister, DebugProbe, DebugProbeError, DebugProbeInfo, DebugProbeSelector,
@@ -1430,7 +1422,7 @@ mod test {
 
         // Indicate that the core is unlocked
         fake_probe.expect_operation(Operation::ReadRawApRegister {
-            ap: ApAddress::with_default_dp(1),
+            ap: FullyQualifiedApAddress::v1_with_default_dp(1),
             address: 0xC,
             result: 1,
         });
@@ -1493,7 +1485,7 @@ mod test {
 
         // Indicate that the core is unlocked
         fake_probe.expect_operation(Operation::ReadRawApRegister {
-            ap: ApAddress::with_default_dp(1),
+            ap: FullyQualifiedApAddress::v1_with_default_dp(1),
             address: 0xC,
             result: 1,
         });
@@ -1543,7 +1535,7 @@ mod test {
 
         // Indicate that the core is unlocked
         fake_probe.expect_operation(Operation::ReadRawApRegister {
-            ap: ApAddress::with_default_dp(1),
+            ap: FullyQualifiedApAddress::v1_with_default_dp(1),
             address: 0xC,
             result: 1,
         });
@@ -1615,7 +1607,7 @@ mod test {
 
         // Indicate that the core is unlocked
         fake_probe.expect_operation(Operation::ReadRawApRegister {
-            ap: ApAddress::with_default_dp(1),
+            ap: FullyQualifiedApAddress::v1_with_default_dp(1),
             address: 0xC,
             result: 1,
         });
@@ -1685,7 +1677,7 @@ mod test {
 
         // Indicate that the core is unlocked
         fake_probe.expect_operation(Operation::ReadRawApRegister {
-            ap: ApAddress::with_default_dp(1),
+            ap: FullyQualifiedApAddress::v1_with_default_dp(1),
             address: 0xC,
             result: 1,
         });
@@ -1775,7 +1767,7 @@ mod test {
 
         // Indicate that the core is unlocked
         fake_probe.expect_operation(Operation::ReadRawApRegister {
-            ap: ApAddress::with_default_dp(1),
+            ap: FullyQualifiedApAddress::v1_with_default_dp(1),
             address: 0xC,
             result: 1,
         });

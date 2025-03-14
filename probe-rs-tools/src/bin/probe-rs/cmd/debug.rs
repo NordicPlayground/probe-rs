@@ -15,13 +15,14 @@ use probe_rs::exception_handler_for_core;
 use probe_rs::flashing::FileDownloadError;
 use probe_rs::probe::list::Lister;
 use probe_rs::probe::DebugProbeError;
+use probe_rs::CoreDump;
 use probe_rs::CoreDumpError;
 use probe_rs::CoreInterface;
 use probe_rs::{
     debug::{debug_info::DebugInfo, registers::DebugRegisters, stack_frame::StackFrame},
     Core, CoreType, InstructionSet, MemoryInterface, RegisterValue,
 };
-use rustyline::DefaultEditor;
+use rustyline::{error::ReadlineError, DefaultEditor};
 
 use crate::{util::common_options::ProbeOptions, CoreOptions};
 
@@ -58,30 +59,22 @@ impl Cmd {
         loop {
             cli_data.print_state()?;
 
-            let readline = rl.readline(">> ");
-            match readline {
+            match rl.readline(">> ") {
                 Ok(line) => {
                     let history_entry: &str = line.as_ref();
                     rl.add_history_entry(history_entry)?;
                     let cli_state = cli.handle_line(&line, &mut cli_data)?;
 
-                    match cli_state {
-                        CliState::Continue => (),
-                        CliState::Stop => break,
+                    if cli_state == CliState::Stop {
+                        break;
                     }
                 }
-                Err(e) => {
-                    use rustyline::error::ReadlineError;
-
-                    match e {
-                        // For end of file and ctrl-c, we just quit
-                        ReadlineError::Eof | ReadlineError::Interrupted => return Ok(()),
-                        actual_error => {
-                            // Show error message and quit
-                            println!("Error handling input: {actual_error:?}");
-                            break;
-                        }
-                    }
+                // For end of file and ctrl-c, we just quit
+                Err(ReadlineError::Eof | ReadlineError::Interrupted) => return Ok(()),
+                Err(actual_error) => {
+                    // Show error message and quit
+                    println!("Error handling input: {actual_error:?}");
+                    break;
                 }
             }
         }
@@ -285,7 +278,7 @@ impl DebugCli {
                                                 println!("-> configurable priority exception has been escalated to hard fault!");
 
 
-                                                // read cfsr 
+                                                // read cfsr
                                                 let cfsr = cli_data.core.read_word_32(0xE000_ED28)?;
 
                                                 let ufsr = (cfsr >> 16) & 0xffff;
@@ -596,34 +589,26 @@ impl DebugCli {
                                 println!();
 
                                 if let Some(location) = &frame.source_location {
-                                    if location.directory.is_some() || location.file.is_some() {
-                                        print!("       ");
+                                    print!("       ");
 
-                                        if let Some(dir) = &location.directory {
-                                            print!("{}", dir.to_path().display());
-                                        }
+                                    print!("{}", location.path.to_path().display());
 
-                                        if let Some(file) = &location.file {
-                                            print!("/{file}");
+                                    if let Some(line) = location.line {
+                                        print!(":{line}");
 
-                                            if let Some(line) = location.line {
-                                                print!(":{line}");
-
-                                                if let Some(col) = location.column {
-                                                    match col {
-                                                        probe_rs::debug::ColumnType::LeftEdge => {
-                                                            print!(":1")
-                                                        }
-                                                        probe_rs::debug::ColumnType::Column(c) => {
-                                                            print!(":{c}")
-                                                        }
-                                                    }
+                                        if let Some(col) = location.column {
+                                            match col {
+                                                probe_rs::debug::ColumnType::LeftEdge => {
+                                                    print!(":1")
+                                                }
+                                                probe_rs::debug::ColumnType::Column(c) => {
+                                                    print!(":{c}")
                                                 }
                                             }
                                         }
-
-                                        println!();
                                     }
+
+                                    println!();
                                 }
                             }
 
@@ -910,7 +895,7 @@ impl DebugCli {
 
                 println!("Dumping core");
 
-                cli_data.core.dump(ranges)?.store(location)?;
+                CoreDump::dump_core(&mut cli_data.core, ranges)?.store(location)?;
 
                 println!("Done.");
 
@@ -994,7 +979,7 @@ pub struct CliData<'p> {
 }
 
 impl<'p> CliData<'p> {
-    fn new(core: Core<'p>, debug_info: Option<DebugInfo>) -> Result<CliData, CliError> {
+    fn new(core: Core<'p>, debug_info: Option<DebugInfo>) -> Result<CliData<'p>, CliError> {
         let mut cli_data = CliData {
             core,
             debug_info,
@@ -1084,6 +1069,7 @@ impl HaltedState {
     }
 }
 
+#[derive(PartialEq)]
 pub enum CliState {
     Continue,
     Stop,

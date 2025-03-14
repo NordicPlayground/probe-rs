@@ -65,41 +65,47 @@
 //!
 //! [Probe]: probe::Probe
 #![warn(missing_docs)]
-#![recursion_limit = "256"]
+#![recursion_limit = "256"] // required by bitfield!
+#![cfg_attr(probers_docsrs, feature(doc_cfg))] // Used for docs.rs
 
-#[macro_use]
-extern crate serde;
-
-/// All the interface bits for the different architectures.
 pub mod architecture;
 pub mod config;
+pub mod vendor;
 
 pub mod core;
+#[cfg(feature = "debug")]
+#[cfg_attr(probers_docsrs, doc(cfg(feature = "debug")))]
 pub mod debug;
 mod error;
 pub mod flashing;
 #[cfg(feature = "gdb-server")]
+#[cfg_attr(probers_docsrs, doc(cfg(feature = "gdb-server")))]
 pub mod gdb_server;
 pub mod integration;
 mod memory;
 pub mod probe;
 pub mod rtt;
-mod semihosting;
+pub mod semihosting;
 mod session;
 #[cfg(test)]
 mod test;
 
 pub use crate::config::{CoreType, InstructionSet, Target};
 pub use crate::core::{
-    dump::{CoreDump, CoreDumpError},
-    exception_handler_for_core, Architecture, BreakpointCause, Core, CoreInformation,
-    CoreInterface, CoreRegister, CoreRegisters, CoreState, CoreStatus, HaltReason,
-    MemoryMappedRegister, RegisterId, RegisterRole, RegisterValue, SpecificCoreState,
-    VectorCatchCondition,
+    Architecture, BreakpointCause, Core, CoreInformation, CoreInterface, CoreRegister,
+    CoreRegisters, CoreState, CoreStatus, HaltReason, MemoryMappedRegister, RegisterId,
+    RegisterRole, RegisterValue, SpecificCoreState, VectorCatchCondition,
 };
 pub use crate::error::Error;
 pub use crate::memory::MemoryInterface;
-pub use crate::semihosting::{
-    ExitErrorDetails, GetCommandLineRequest, SemihostingCommand, UnknownCommandDetails,
-};
 pub use crate::session::{Permissions, Session};
+
+#[cfg(feature = "debug")]
+pub use crate::core::dump::{CoreDump, CoreDumpError};
+
+#[cfg(feature = "debug")]
+pub use crate::debug::exception_handling::exception_handler_for_core;
+
+#[doc = include_str!("../../README.md")]
+#[cfg(doctest)]
+pub struct ReadmeDoctests;

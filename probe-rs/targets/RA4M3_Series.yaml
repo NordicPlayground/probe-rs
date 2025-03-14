@@ -1,4 +1,7 @@
 name: RA4M3 Series
+manufacturer:
+  id: 0x23
+  cc: 0x4
 generated_from_pack: true
 pack_file_release: 5.3.0
 variants:
@@ -8,23 +11,17 @@ variants:
     type: armv8m
     core_access_options: !Arm
       ap: 0
-      psel: 0
+      psel: 0x0
   memory_map:
-  - !Ram
-    name: SRAM1
-    range:
-      start: 0x20000000
-      end: 0x20020000
-    cores:
-    - main
   - !Nvm
     name: Flash
     range:
       start: 0x0
       end: 0x80000
-    is_boot_memory: true
     cores:
     - main
+    access:
+      boot: true
   - !Generic
     name: ConfigROM
     range:
@@ -37,6 +34,13 @@ variants:
     range:
       start: 0x8000000
       end: 0x8002000
+    cores:
+    - main
+  - !Ram
+    name: SRAM1
+    range:
+      start: 0x20000000
+      end: 0x20020000
     cores:
     - main
   flash_algorithms:
@@ -49,23 +53,17 @@ variants:
     type: armv8m
     core_access_options: !Arm
       ap: 0
-      psel: 0
+      psel: 0x0
   memory_map:
-  - !Ram
-    name: SRAM1
-    range:
-      start: 0x20000000
-      end: 0x20020000
-    cores:
-    - main
   - !Nvm
     name: Flash
     range:
       start: 0x0
       end: 0xc0000
-    is_boot_memory: true
     cores:
     - main
+    access:
+      boot: true
   - !Generic
     name: ConfigROM
     range:
@@ -78,6 +76,13 @@ variants:
     range:
       start: 0x8000000
       end: 0x8002000
+    cores:
+    - main
+  - !Ram
+    name: SRAM1
+    range:
+      start: 0x20000000
+      end: 0x20020000
     cores:
     - main
   flash_algorithms:
@@ -90,23 +95,17 @@ variants:
     type: armv8m
     core_access_options: !Arm
       ap: 0
-      psel: 0
+      psel: 0x0
   memory_map:
-  - !Ram
-    name: SRAM1
-    range:
-      start: 0x20000000
-      end: 0x20020000
-    cores:
-    - main
   - !Nvm
     name: Flash
     range:
       start: 0x0
       end: 0x100000
-    is_boot_memory: true
     cores:
     - main
+    access:
+      boot: true
   - !Generic
     name: ConfigROM
     range:
@@ -119,6 +118,13 @@ variants:
     range:
       start: 0x8000000
       end: 0x8002000
+    cores:
+    - main
+  - !Ram
+    name: SRAM1
+    range:
+      start: 0x20000000
+      end: 0x20020000
     cores:
     - main
   flash_algorithms:

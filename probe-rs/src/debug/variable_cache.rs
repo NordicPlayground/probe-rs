@@ -3,7 +3,6 @@ use crate::{
     debug::{stack_frame::StackFrameInfo, unit_info::UnitInfo},
     Error,
 };
-use anyhow::anyhow;
 use gimli::UnitOffset;
 use probe_rs_target::MemoryRange;
 use serde::{Serialize, Serializer};
@@ -34,6 +33,9 @@ impl Serialize for VariableCache {
             type_name: &'c VariableType,
             /// To eliminate noise, we will only show values for base data types and strings.
             value: String,
+
+            #[serde(skip_serializing_if = "Option::is_none")]
+            source_location: Option<SourceLocation>,
             /// ONLY If there are children.
             #[serde(skip_serializing_if = "Vec::is_empty")]
             children: Vec<VariableTreeNode<'c>>,
@@ -46,6 +48,7 @@ impl Serialize for VariableCache {
                 name: &root_node.name,
                 type_name: &root_node.type_name,
                 value: root_node.to_string(variable_cache),
+                source_location: root_node.source_location.clone(),
                 children: recurse_variables(variable_cache, root_node.variable_key, None),
             }
         }
@@ -84,6 +87,7 @@ impl Serialize for VariableCache {
                         // Limit arrays to 50(+1) elements
                         child_variable.type_name.inner().is_array().then_some(50),
                     ),
+                    source_location: child_variable.source_location.clone(),
                 });
             }
 
@@ -94,6 +98,7 @@ impl Serialize for VariableCache {
                     type_name: &VariableType::Unknown,
                     value: format!("... and {} more", remaining),
                     children: Vec::new(),
+                    source_location: None,
                 });
             }
 
@@ -170,10 +175,12 @@ impl VariableCache {
         &mut self,
         parent_key: ObjectRef,
         unit_info: Option<&UnitInfo>,
-    ) -> Result<Variable, Error> {
+    ) -> Result<Variable, DebugError> {
         // Validate that the parent_key exists ...
         if !self.variable_hash_map.contains_key(&parent_key) {
-            return Err(anyhow!("VariableCache: Attempted to add a new variable with non existent `parent_key`: {:?}. Please report this as a bug", parent_key).into());
+            return Err(DebugError::Other(
+                format!("VariableCache: Attempted to add a new variable with non existent `parent_key`: {:?}. Please report this as a bug", parent_key)
+            ));
         }
 
         let mut variable_to_add = Variable::new(unit_info);
@@ -191,7 +198,7 @@ impl VariableCache {
 
         match self.variable_hash_map.entry(variable_to_add.variable_key) {
             Entry::Occupied(_) => {
-                return Err(anyhow!("Attempt to insert a new `Variable`:{:?} with a duplicate cache key: {:?}. Please report this as a bug.", variable_to_add.name, variable_to_add.variable_key).into());
+                return Err(DebugError::Other(format!("Attempt to insert a new `Variable`:{:?} with a duplicate cache key: {:?}. Please report this as a bug.", variable_to_add.name, variable_to_add.variable_key)));
             }
             Entry::Vacant(entry) => {
                 entry.insert(variable_to_add.clone());
@@ -209,16 +216,16 @@ impl VariableCache {
         &mut self,
         parent_key: ObjectRef,
         cache_variable: &mut Variable,
-    ) -> Result<(), Error> {
+    ) -> Result<(), DebugError> {
         // Validate that the parent_key exists ...
         if !self.variable_hash_map.contains_key(&parent_key) {
-            return Err(anyhow!("VariableCache: Attempted to add a new variable: {} with non existent `parent_key`: {:?}. Please report this as a bug", cache_variable.name, parent_key).into());
+            return Err(DebugError::Other(format!("VariableCache: Attempted to add a new variable: {} with non existent `parent_key`: {:?}. Please report this as a bug", cache_variable.name, parent_key)));
         }
 
         cache_variable.parent_key = parent_key;
 
         if cache_variable.variable_key != ObjectRef::Invalid {
-            return Err(anyhow!("VariableCache: Attempted to add a new variable: {} with already set key: {:?}. Please report this as a bug", cache_variable.name, cache_variable.variable_key).into());
+            return Err(DebugError::Other(format!("VariableCache: Attempted to add a new variable: {} with already set key: {:?}. Please report this as a bug", cache_variable.name, cache_variable.variable_key)));
         }
 
         // The caller is telling us this is definitely a new `Variable`
@@ -235,7 +242,7 @@ impl VariableCache {
             .variable_hash_map
             .insert(cache_variable.variable_key, cache_variable.clone())
         {
-            return Err(anyhow!("Attempt to insert a new `Variable`:{:?} with a duplicate cache key: {:?}. Please report this as a bug.", cache_variable.name, old_variable.variable_key).into());
+            return Err(DebugError::Other(format!("Attempt to insert a new `Variable`:{:?} with a duplicate cache key: {:?}. Please report this as a bug.", cache_variable.name, old_variable.variable_key)));
         }
 
         Ok(())
@@ -244,7 +251,7 @@ impl VariableCache {
     /// Update a variable in the cache
     ///
     /// This function does not update the value of the variable.
-    pub fn update_variable(&mut self, cache_variable: &Variable) -> Result<(), Error> {
+    pub fn update_variable(&mut self, cache_variable: &Variable) -> Result<(), DebugError> {
         // Attempt to update an existing `Variable` in the cache
         tracing::trace!(
             "VariableCache: Update Variable, key={:?}, name={:?}",
@@ -253,7 +260,7 @@ impl VariableCache {
         );
 
         let Some(prev_entry) = self.variable_hash_map.get_mut(&cache_variable.variable_key) else {
-            return Err(anyhow!("Attempt to update an existing `Variable`:{:?} with a non-existent cache key: {:?}. Please report this as a bug.", cache_variable.name, cache_variable.variable_key).into());
+            return Err(DebugError::Other(format!("Attempt to update an existing `Variable`:{:?} with a non-existent cache key: {:?}. Please report this as a bug.", cache_variable.name, cache_variable.variable_key)));
         };
 
         if cache_variable != prev_entry {
@@ -387,7 +394,7 @@ impl VariableCache {
     pub fn remove_cache_entry(&mut self, variable_key: ObjectRef) -> Result<(), Error> {
         self.remove_cache_entry_children(variable_key)?;
         if self.variable_hash_map.remove(&variable_key).is_none() {
-            return Err(anyhow!("Failed to remove a `VariableCache` entry with key: {:?}. Please report this as a bug.", variable_key).into());
+            return Err(Error::Other(format!("Failed to remove a `VariableCache` entry with key: {:?}. Please report this as a bug.", variable_key)));
         };
         Ok(())
     }
@@ -573,10 +580,9 @@ mod test {
 
         assert_eq!(cache_variable.to_string(&c), "<unknown>");
 
-        assert_eq!(cache_variable.source_location, Default::default());
+        assert_eq!(cache_variable.source_location, None);
         assert_eq!(cache_variable.memory_location, VariableLocation::Unknown);
         assert_eq!(cache_variable.byte_size, None);
-        assert_eq!(cache_variable.member_index, None);
         assert_eq!(cache_variable.role, VariantRole::NonVariant);
     }
 

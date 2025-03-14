@@ -55,8 +55,8 @@ impl FlashPage {
 /// The description of a sector in flash.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct FlashSector {
-    address: u64,
-    size: u64,
+    pub(crate) address: u64,
+    pub(crate) size: u64,
 }
 
 impl FlashSector {
@@ -98,15 +98,23 @@ impl FlashFill {
 }
 
 /// The built layout of the data in flash.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FlashLayout {
-    sectors: Vec<FlashSector>,
-    pages: Vec<FlashPage>,
-    fills: Vec<FlashFill>,
+    pub(crate) sectors: Vec<FlashSector>,
+    pub(crate) pages: Vec<FlashPage>,
+    pub(crate) fills: Vec<FlashFill>,
     data_blocks: Vec<FlashDataBlockSpan>,
 }
 
 impl FlashLayout {
+    /// Merge another flash layout into this one.
+    pub fn merge_from(&mut self, other: FlashLayout) {
+        self.sectors.extend(other.sectors);
+        self.pages.extend(other.pages);
+        self.fills.extend(other.fills);
+        self.data_blocks.extend(other.data_blocks);
+    }
+
     /// List of sectors which are erased during flashing.
     pub fn sectors(&self) -> &[FlashSector] {
         &self.sectors
@@ -117,11 +125,6 @@ impl FlashLayout {
         &self.pages
     }
 
-    /// Mutable list of pages which are programmed during flashing.
-    pub(super) fn pages_mut(&mut self) -> &mut [FlashPage] {
-        &mut self.pages
-    }
-
     /// Get the fills of the flash layout.
     ///
     /// This is data which is not written during flashing, but has to be restored to its original value afterwards.
@@ -129,7 +132,7 @@ impl FlashLayout {
         &self.fills
     }
 
-    /// Get the datablocks of the flash layout.
+    /// Get the data blocks of the flash layout.
     ///
     /// This is the data which is written during flashing.
     pub fn data_blocks(&self) -> &[FlashDataBlockSpan] {
@@ -271,13 +274,10 @@ impl FlashBuilder {
         flash_algorithm: &FlashAlgorithm,
         include_empty_pages: bool,
     ) -> Result<FlashLayout, FlashError> {
-        let mut sectors: Vec<FlashSector> = Vec::new();
-        let mut pages: Vec<FlashPage> = Vec::new();
-        let mut fills: Vec<FlashFill> = Vec::new();
-        let mut data_blocks: Vec<FlashDataBlockSpan> = Vec::new();
+        let mut layout = FlashLayout::default();
 
         for info in flash_algorithm.iter_sectors() {
-            let range = info.base_address..info.base_address + info.size;
+            let range = info.address_range();
 
             // Ignore the sector if it's outside the NvmRegion.
             if !region.range.contains_range(&range) {
@@ -285,7 +285,7 @@ impl FlashBuilder {
             }
 
             let page = flash_algorithm.page_info(info.base_address).unwrap();
-            let page_range = page.base_address..page.base_address + page.size as u64;
+            let page_range = page.address_range();
             let sector_has_data = self.has_data_in_range(&range);
             let page_has_data = self.has_data_in_range(&page_range);
 
@@ -294,23 +294,22 @@ impl FlashBuilder {
                 continue;
             }
 
-            sectors.push(FlashSector {
+            layout.sectors.push(FlashSector {
                 address: info.base_address,
                 size: info.size,
             })
         }
 
         for info in flash_algorithm.iter_pages() {
-            let page_end = info.base_address + info.size as u64;
-            let range = info.base_address..page_end;
+            let range = info.address_range();
 
             // Ignore the page if it's outside the NvmRegion.
-            if !region.range.contains_range(&range.clone()) {
+            if !region.range.contains_range(&range) {
                 continue;
             }
 
             let sector = flash_algorithm.sector_info(info.base_address).unwrap();
-            let sector_range = sector.base_address..sector.base_address + sector.size;
+            let sector_range = sector.address_range();
             let sector_has_data = self.has_data_in_range(&sector_range);
             let page_has_data = self.has_data_in_range(&range);
 
@@ -332,47 +331,42 @@ impl FlashBuilder {
 
                 // Fill the hole between the previous data block (or page start if there are no blocks) and current block.
                 if address > fill_start_addr {
-                    fills.push(FlashFill {
+                    layout.fills.push(FlashFill {
                         address: fill_start_addr,
                         size: address - fill_start_addr,
-                        page_index: pages.len(),
+                        page_index: layout.pages.len(),
                     });
                 }
                 fill_start_addr = address + data.len() as u64;
             }
 
             // Fill the hole between the last data block (or page start if there are no blocks) and page end.
-            if fill_start_addr < page_end {
-                fills.push(FlashFill {
+            if fill_start_addr < range.end {
+                layout.fills.push(FlashFill {
                     address: fill_start_addr,
-                    size: page_end - fill_start_addr,
-                    page_index: pages.len(),
+                    size: range.end - fill_start_addr,
+                    page_index: layout.pages.len(),
                 });
             }
 
-            pages.push(page);
+            layout.pages.push(page);
         }
 
         for (address, data) in self.data_in_range(&region.range) {
-            data_blocks.push(FlashDataBlockSpan {
+            layout.data_blocks.push(FlashDataBlockSpan {
                 address,
-                size: data.len() as _,
+                size: data.len() as u64,
             });
         }
 
         // Return the finished flash layout.
-        Ok(FlashLayout {
-            sectors,
-            pages,
-            fills,
-            data_blocks,
-        })
+        Ok(layout)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use probe_rs_target::{FlashProperties, SectorDescription};
+    use probe_rs_target::{FlashProperties, MemoryAccess, SectorDescription};
 
     use super::*;
 
@@ -396,7 +390,10 @@ mod tests {
 
         let region = NvmRegion {
             name: Some("FLASH".into()),
-            is_boot_memory: true,
+            access: Some(MemoryAccess {
+                boot: true,
+                ..Default::default()
+            }),
             range: 0..1 << 16,
             cores: vec!["main".into()],
             is_alias: false,
@@ -425,7 +422,10 @@ mod tests {
 
         let region = NvmRegion {
             name: Some("FLASH".into()),
-            is_boot_memory: true,
+            access: Some(MemoryAccess {
+                boot: true,
+                ..Default::default()
+            }),
             range: 0..1 << 16,
             cores: vec!["main".into()],
             is_alias: false,

@@ -1,23 +1,56 @@
 use crate::serialize::{hex_range, hex_u_int};
-use core::ops::Range;
 use serde::{Deserialize, Serialize};
+use std::{iter::Peekable, ops::Range};
 
 /// Represents a region in non-volatile memory (e.g. flash or EEPROM).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct NvmRegion {
     /// A name to describe the region
     pub name: Option<String>,
     /// Address range of the region
     #[serde(serialize_with = "hex_range")]
     pub range: Range<u64>,
-    /// True if the chip boots from this memory
-    #[serde(default)]
-    pub is_boot_memory: bool,
     /// List of cores that can access this region
     pub cores: Vec<String>,
     /// True if the memory region is an alias of a different memory region.
     #[serde(default)]
     pub is_alias: bool,
+    /// Access permissions for the region.
+    #[serde(default)]
+    pub access: Option<MemoryAccess>,
+}
+
+impl NvmRegion {
+    /// Returns whether the region is accessible by the given core.
+    pub fn accessible_by(&self, core_name: &str) -> bool {
+        self.cores.iter().any(|c| c == core_name)
+    }
+
+    /// Returns the access permissions for the region.
+    pub fn access(&self) -> MemoryAccess {
+        self.access.unwrap_or_default()
+    }
+
+    /// Returns whether the region is readable.
+    pub fn is_readable(&self) -> bool {
+        self.access().read
+    }
+
+    /// Returns whether the region is writable.
+    pub fn is_writable(&self) -> bool {
+        self.access().write
+    }
+
+    /// Returns whether the region is executable.
+    pub fn is_executable(&self) -> bool {
+        self.access().execute
+    }
+
+    /// Returns whether the region is boot memory.
+    pub fn is_boot_memory(&self) -> bool {
+        self.access().boot
+    }
 }
 
 impl NvmRegion {
@@ -29,23 +62,175 @@ impl NvmRegion {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
+/// Represents access permissions of a region in RAM.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MemoryAccess {
+    /// True if the region is readable.
+    #[serde(default = "default_true")]
+    pub read: bool,
+    /// True if the region is writable.
+    #[serde(default = "default_true")]
+    pub write: bool,
+    /// True if the region is executable.
+    #[serde(default = "default_true")]
+    pub execute: bool,
+    /// True if the chip boots from this memory
+    #[serde(default)]
+    pub boot: bool,
+}
+
+impl Default for MemoryAccess {
+    fn default() -> Self {
+        MemoryAccess {
+            read: true,
+            write: true,
+            execute: true,
+            boot: false,
+        }
+    }
+}
+
 /// Represents a region in RAM.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RamRegion {
     /// A name to describe the region
     pub name: Option<String>,
     /// Address range of the region
     #[serde(serialize_with = "hex_range")]
     pub range: Range<u64>,
-    /// True if the chip boots from this memory
-    #[serde(default)]
-    pub is_boot_memory: bool,
     /// List of cores that can access this region
     pub cores: Vec<String>,
+    /// Access permissions for the region.
+    #[serde(default)]
+    pub access: Option<MemoryAccess>,
+}
+
+impl RamRegion {
+    /// Returns whether the region is accessible by the given core.
+    pub fn accessible_by(&self, core_name: &str) -> bool {
+        self.cores.iter().any(|c| c == core_name)
+    }
+
+    /// Returns the access permissions for the region.
+    pub fn access(&self) -> MemoryAccess {
+        self.access.unwrap_or_default()
+    }
+
+    /// Returns whether the region is readable.
+    pub fn is_readable(&self) -> bool {
+        self.access().read
+    }
+
+    /// Returns whether the region is writable.
+    pub fn is_writable(&self) -> bool {
+        self.access().write
+    }
+
+    /// Returns whether the region is executable.
+    pub fn is_executable(&self) -> bool {
+        self.access().execute
+    }
+
+    /// Returns whether the region is boot memory.
+    pub fn is_boot_memory(&self) -> bool {
+        self.access().boot
+    }
+}
+
+/// Merges adjacent regions if they have the same access permissions.
+pub trait RegionMergeIterator: Iterator {
+    /// Merge adjacent regions.
+    fn merge_consecutive(self) -> MergeConsecutive<Self>
+    where
+        Self: Sized;
+}
+
+impl<'a, I> RegionMergeIterator for I
+where
+    I: Iterator<Item = &'a RamRegion>,
+    I: Sized,
+{
+    fn merge_consecutive(self) -> MergeConsecutive<Self>
+    where
+        Self: Sized,
+    {
+        MergeConsecutive::new(self)
+    }
+}
+
+pub struct MergeConsecutive<I>
+where
+    I: Iterator,
+{
+    iter: Peekable<I>,
+}
+
+impl<I> MergeConsecutive<I>
+where
+    I: Iterator,
+{
+    fn new(iter: I) -> Self {
+        MergeConsecutive {
+            iter: iter.peekable(),
+        }
+    }
+}
+
+impl<I: Clone> Clone for MergeConsecutive<I>
+where
+    I: Iterator,
+    Peekable<I>: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            iter: self.iter.clone(),
+        }
+    }
+}
+
+impl<'iter, I> Iterator for MergeConsecutive<I>
+where
+    I: Iterator<Item = &'iter RamRegion>,
+{
+    type Item = RamRegion;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let mut region = self.iter.next()?.clone();
+        while let Some(next) = self.iter.peek() {
+            if region.range.end != next.range.start || region.access != next.access {
+                break;
+            }
+
+            let common_cores = region
+                .cores
+                .iter()
+                .filter(|core| next.cores.contains(core))
+                .cloned()
+                .collect::<Vec<_>>();
+
+            // Do not return inaccessable regions.
+            if common_cores.is_empty() {
+                break;
+            }
+
+            region.cores = common_cores;
+            region.range.end = next.range.end;
+
+            self.iter.next();
+        }
+
+        Some(region)
+    }
 }
 
 /// Represents a generic region.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GenericRegion {
     /// A name to describe the region
     pub name: Option<String>,
@@ -54,6 +239,36 @@ pub struct GenericRegion {
     pub range: Range<u64>,
     /// List of cores that can access this region
     pub cores: Vec<String>,
+    /// Access permissions for the region.
+    #[serde(default)]
+    pub access: Option<MemoryAccess>,
+}
+
+impl GenericRegion {
+    /// Returns whether the region is accessible by the given core.
+    pub fn accessible_by(&self, core_name: &str) -> bool {
+        self.cores.iter().any(|c| c == core_name)
+    }
+
+    /// Returns the access permissions for the region.
+    pub fn access(&self) -> MemoryAccess {
+        self.access.unwrap_or_default()
+    }
+
+    /// Returns whether the region is readable.
+    pub fn is_readable(&self) -> bool {
+        self.access().read
+    }
+
+    /// Returns whether the region is writable.
+    pub fn is_writable(&self) -> bool {
+        self.access().write
+    }
+
+    /// Returns whether the region is executable.
+    pub fn is_executable(&self) -> bool {
+        self.access().execute
+    }
 }
 
 /// Holds information about a specific, individual flash
@@ -64,6 +279,13 @@ pub struct SectorInfo {
     pub base_address: u64,
     /// Size of the flash sector
     pub size: u64,
+}
+
+impl SectorInfo {
+    /// Returns the address range of the sector.
+    pub fn address_range(&self) -> Range<u64> {
+        self.base_address..self.base_address + self.size
+    }
 }
 
 /// Information about a group of flash sectors, which
@@ -94,6 +316,13 @@ pub struct PageInfo {
     pub base_address: u64,
     /// Size of the page
     pub size: u32,
+}
+
+impl PageInfo {
+    /// Returns the address range of the sector.
+    pub fn address_range(&self) -> Range<u64> {
+        self.base_address..self.base_address + self.size as u64
+    }
 }
 
 /// Holds information about the entire flash.
@@ -199,6 +428,22 @@ impl MemoryRegion {
             MemoryRegion::Generic(region) => &region.cores,
             MemoryRegion::Nvm(region) => &region.cores,
         }
+    }
+
+    /// Returns `true` if the memory region is [`Ram`].
+    ///
+    /// [`Ram`]: MemoryRegion::Ram
+    #[must_use]
+    pub fn is_ram(&self) -> bool {
+        matches!(self, Self::Ram(..))
+    }
+
+    /// Returns `true` if the memory region is [`Nvm`].
+    ///
+    /// [`Nvm`]: MemoryRegion::Nvm
+    #[must_use]
+    pub fn is_nvm(&self) -> bool {
+        matches!(self, Self::Nvm(..))
     }
 }
 
@@ -345,5 +590,83 @@ mod test {
         range.align_to_32_bits();
         assert_eq!(range.start, 4);
         assert_eq!(range.end, 16);
+    }
+
+    #[test]
+    fn merge_consecutive_outputs_single_region() {
+        let regions = [RamRegion {
+            name: None,
+            range: 0..4,
+            cores: vec!["core0".to_string()],
+            access: None,
+        }];
+
+        let merged_regions: Vec<RamRegion> = regions.iter().merge_consecutive().collect();
+
+        assert_eq!(
+            merged_regions,
+            vec![RamRegion {
+                name: None,
+                range: 0..4,
+                cores: vec!["core0".to_string()],
+                access: None,
+            },]
+        );
+    }
+
+    #[test]
+    fn merge_consecutive_separates_ranges_with_different_cores() {
+        let regions = vec![
+            RamRegion {
+                name: None,
+                range: 0..4,
+                cores: vec!["core0".to_string()],
+                access: None,
+            },
+            RamRegion {
+                name: None,
+                range: 4..8,
+                cores: vec!["core1".to_string()],
+                access: None,
+            },
+            RamRegion {
+                name: None,
+                range: 8..12,
+                cores: vec!["core1".to_string()],
+                access: None,
+            },
+            RamRegion {
+                name: None,
+                range: 16..20,
+                cores: vec!["core1".to_string()],
+                access: None,
+            },
+        ];
+
+        let merged_regions: Vec<RamRegion> = regions.iter().merge_consecutive().collect();
+
+        assert_eq!(
+            merged_regions,
+            vec![
+                RamRegion {
+                    name: None,
+                    range: 0..4,
+                    cores: vec!["core0".to_string()],
+                    access: None,
+                },
+                RamRegion {
+                    name: None,
+                    range: 4..12,
+                    cores: vec!["core1".to_string()],
+                    access: None,
+                },
+                RamRegion {
+                    name: None,
+                    range: 16..20,
+                    cores: vec!["core1".to_string()],
+                    access: None,
+                },
+            ]
+        );
     }
 }

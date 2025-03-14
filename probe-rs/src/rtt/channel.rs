@@ -1,7 +1,8 @@
 use crate::rtt::Error;
-use crate::{config::MemoryRegion, Core, MemoryInterface};
+use crate::{Core, MemoryInterface};
 use std::cmp::min;
-use zerocopy_derive::{FromBytes, FromZeroes};
+use std::ffi::CStr;
+use zerocopy::{FromBytes, Immutable, KnownLayout};
 
 /// Trait for channel information shared between up and down channels.
 pub trait RttChannel {
@@ -17,7 +18,7 @@ pub trait RttChannel {
 }
 
 #[repr(C)]
-#[derive(Debug, FromZeroes, FromBytes, Copy, Clone)]
+#[derive(Debug, FromBytes, Immutable, KnownLayout, Clone)]
 pub(crate) struct RttChannelBufferInner<T> {
     standard_name_pointer: T,
     buffer_start_pointer: T,
@@ -45,7 +46,7 @@ impl<T> RttChannelBufferInner<T> {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub(crate) enum RttChannelBuffer {
     Buffer32(RttChannelBufferInner<u32>),
     Buffer64(RttChannelBufferInner<u64>),
@@ -178,11 +179,10 @@ impl RttChannelBuffer {
 pub(crate) struct Channel {
     number: usize,
     core_id: usize,
-    ptr: u64,
     name: Option<String>,
-    buffer_ptr: u64,
-    size: u64,
+    metadata_ptr: u64,
     info: RttChannelBuffer,
+    last_read_ptr: Option<u64>,
 }
 
 // Chanels must follow this data layout when reading/writing memory in order to be compatible with
@@ -202,8 +202,7 @@ impl Channel {
     pub(crate) fn from(
         core: &mut Core,
         number: usize,
-        memory_map: &[MemoryRegion],
-        ptr: u64,
+        metadata_ptr: u64,
         info: RttChannelBuffer,
     ) -> Result<Option<Channel>, Error> {
         let buffer_ptr = info.buffer_start_pointer();
@@ -212,52 +211,74 @@ impl Channel {
             return Ok(None);
         };
 
-        let name = if info.standard_name_pointer() == 0 {
-            None
-        } else {
-            read_c_string(core, memory_map, info.standard_name_pointer())?
-        };
-
-        let size = info.size_of_buffer();
-
-        Ok(Some(Channel {
+        let this = Channel {
             number,
             core_id: core.id(),
-            ptr,
-            name,
-            buffer_ptr,
-            size,
+            metadata_ptr,
+            name: read_c_string(core, info.standard_name_pointer())?,
             info,
-        }))
+            last_read_ptr: None,
+        };
+
+        // It's possible that the channel is not initialized with the magic string written last.
+        // We call read_pointers to validate that the channel pointers are in an expected range.
+        // This should at least catch most cases where the control block is partially initialized.
+        this.read_pointers(core, "")?;
+        this.mode(core)?;
+
+        Ok(Some(this))
     }
 
     /// Validate that the Core id of a request is the same as the Core id against which the Channel was created.
     pub(crate) fn validate_core_id(&self, core: &mut Core) -> Result<(), Error> {
-        if core.id() == self.core_id {
-            Ok(())
-        } else {
-            Err(Error::IncorrectCoreSpecified(self.core_id, core.id()))
+        if core.id() != self.core_id {
+            return Err(Error::IncorrectCoreSpecified(self.core_id, core.id()));
         }
+
+        Ok(())
     }
 
     pub fn name(&self) -> Option<&str> {
-        self.name.as_ref().map(|s| s.as_ref())
+        self.name.as_deref()
     }
 
     pub fn buffer_size(&self) -> usize {
-        self.size as usize
+        self.info.size_of_buffer() as usize
+    }
+
+    /// Reads the current channel mode from the target and returns its.
+    ///
+    /// See [`ChannelMode`] for more information on what the modes mean.
+    pub fn mode(&self, core: &mut Core) -> Result<ChannelMode, Error> {
+        self.validate_core_id(core)?;
+        let flags = self.info.read_flags(core, self.metadata_ptr)?;
+
+        ChannelMode::try_from(flags)
+    }
+
+    /// Changes the channel mode on the target to the specified mode.
+    ///
+    /// See [`ChannelMode`] for more information on what the modes mean.
+    pub fn set_mode(&self, core: &mut Core, mode: ChannelMode) -> Result<(), Error> {
+        self.validate_core_id(core)?;
+        let flags = self.info.read_flags(core, self.metadata_ptr)?;
+
+        let new_flags = ChannelMode::set(mode, flags);
+        self.info.write_flags(core, self.metadata_ptr, new_flags)?;
+
+        Ok(())
     }
 
     fn read_pointers(&self, core: &mut Core, channel_kind: &str) -> Result<(u64, u64), Error> {
         self.validate_core_id(core)?;
 
-        let (write, read): (u64, u64) = self.info.read_buffer_offsets(core, self.ptr)?;
+        let (write, read) = self.info.read_buffer_offsets(core, self.metadata_ptr)?;
 
         let validate = |which, value| {
-            if value >= self.size {
+            if value >= self.info.size_of_buffer() {
                 Err(Error::ControlBlockCorrupted(format!(
                     "{which} pointer is {value} while buffer size is {} for {channel_kind}channel {} ({})",
-                    self.size,
+                    self.info.size_of_buffer(),
                     self.number,
                     self.name().unwrap_or("no name"),
                 )))
@@ -298,38 +319,27 @@ impl UpChannel {
     ///
     /// See [`ChannelMode`] for more information on what the modes mean.
     pub fn mode(&self, core: &mut Core) -> Result<ChannelMode, Error> {
-        self.0.validate_core_id(core)?;
-
-        let flags = self.0.info.read_flags(core, self.0.ptr)?;
-
-        match flags & 0x3 {
-            0 => Ok(ChannelMode::NoBlockSkip),
-            1 => Ok(ChannelMode::NoBlockTrim),
-            2 => Ok(ChannelMode::BlockIfFull),
-            _ => Err(Error::ControlBlockCorrupted(String::from(
-                "The channel mode flags are invalid",
-            ))),
-        }
+        self.0.mode(core)
     }
 
     /// Changes the channel mode on the target to the specified mode.
     ///
     /// See [`ChannelMode`] for more information on what the modes mean.
     pub fn set_mode(&self, core: &mut Core, mode: ChannelMode) -> Result<(), Error> {
-        self.0.validate_core_id(core)?;
-        let flags = self.0.info.read_flags(core, self.0.ptr)?;
-
-        let new_flags = (flags & !3) | (mode as u64);
-        self.0.info.write_flags(core, self.0.ptr, new_flags)?;
-
-        Ok(())
+        self.0.set_mode(core, mode)
     }
 
-    fn read_core(&self, core: &mut Core, mut buf: &mut [u8]) -> Result<(u64, usize), Error> {
-        self.0.validate_core_id(core)?;
+    fn read_core(&mut self, core: &mut Core, mut buf: &mut [u8]) -> Result<(u64, usize), Error> {
         let (write, mut read) = self.0.read_pointers(core, "up ")?;
 
         let mut total = 0;
+
+        if let Some(ptr) = self.0.last_read_ptr {
+            // Check if the read pointer has changed since we last wrote it.
+            if read != ptr {
+                return Err(Error::ReadPointerChanged);
+            }
+        }
 
         // Read while buffer contains data and output buffer has space (maximum of two iterations)
         while !buf.is_empty() {
@@ -338,18 +348,19 @@ impl UpChannel {
                 break;
             }
 
-            core.read(self.0.buffer_ptr + read, &mut buf[..count])?;
+            core.read(self.0.info.buffer_start_pointer() + read, &mut buf[..count])?;
 
             total += count;
             read += count as u64;
 
-            if read >= self.0.size {
+            if read >= self.0.info.size_of_buffer() {
                 // Wrap around to start
                 read = 0;
             }
 
             buf = &mut buf[count..];
         }
+        self.0.last_read_ptr = Some(read);
 
         Ok((read, total))
     }
@@ -359,13 +370,14 @@ impl UpChannel {
     ///
     /// This method will not block waiting for data in the target buffer, and may read less bytes
     /// than would fit in `buf`.
-    pub fn read(&self, core: &mut Core, buf: &mut [u8]) -> Result<usize, Error> {
-        self.0.validate_core_id(core)?;
+    pub fn read(&mut self, core: &mut Core, buf: &mut [u8]) -> Result<usize, Error> {
         let (read, total) = self.read_core(core, buf)?;
 
         if total > 0 {
             // Write read pointer back to target if something was read
-            self.0.info.write_read_buffer_ptr(core, self.0.ptr, read)?;
+            self.0
+                .info
+                .write_read_buffer_ptr(core, self.0.metadata_ptr, read)?;
         }
 
         Ok(total)
@@ -376,18 +388,19 @@ impl UpChannel {
     ///
     /// The difference from [`read`](UpChannel::read) is that this does not discard the data in the
     /// buffer.
-    pub fn peek(&self, core: &mut Core, buf: &mut [u8]) -> Result<usize, Error> {
-        self.0.validate_core_id(core)?;
+    pub fn peek(&mut self, core: &mut Core, buf: &mut [u8]) -> Result<usize, Error> {
         Ok(self.read_core(core, buf)?.1)
     }
 
     /// Calculates amount of contiguous data available for reading
     fn readable_contiguous(&self, write: u64, read: u64) -> usize {
-        (if read > write {
-            self.0.size - read
+        let end = if read > write {
+            self.0.info.size_of_buffer()
         } else {
-            write - read
-        }) as usize
+            write
+        };
+
+        (end - read) as usize
     }
 }
 
@@ -400,6 +413,7 @@ impl RttChannel for UpChannel {
     fn name(&self) -> Option<&str> {
         self.0.name()
     }
+
     fn buffer_size(&self) -> usize {
         self.0.buffer_size()
     }
@@ -430,14 +444,8 @@ impl DownChannel {
     ///
     /// This method will not block waiting for space to become available in the channel buffer, and
     /// may not write all of `buf`.
-    pub fn write(&self, core: &mut Core, mut buf: &[u8]) -> Result<usize, Error> {
-        self.0.validate_core_id(core)?;
+    pub fn write(&mut self, core: &mut Core, mut buf: &[u8]) -> Result<usize, Error> {
         let (mut write, read) = self.0.read_pointers(core, "down ")?;
-
-        if self.writable_contiguous(write, read) == 0 {
-            // Buffer is full - do nothing.
-            return Ok(0);
-        }
 
         let mut total = 0;
 
@@ -448,12 +456,12 @@ impl DownChannel {
                 break;
             }
 
-            core.write_8(self.0.buffer_ptr + write, &buf[..count])?;
+            core.write(self.0.info.buffer_start_pointer() + write, &buf[..count])?;
 
             total += count;
             write += count as u64;
 
-            if write >= self.0.size {
+            if write >= self.0.info.size_of_buffer() {
                 // Wrap around to start
                 write = 0;
             }
@@ -464,7 +472,7 @@ impl DownChannel {
         // Write write pointer back to target
         self.0
             .info
-            .write_write_buffer_ptr(core, self.0.ptr, write)?;
+            .write_write_buffer_ptr(core, self.0.metadata_ptr, write)?;
 
         Ok(total)
     }
@@ -474,9 +482,9 @@ impl DownChannel {
         (if read > write {
             read - write - 1
         } else if read == 0 {
-            self.0.size - write - 1
+            self.0.info.size_of_buffer() - write - 1
         } else {
-            self.0.size - write
+            self.0.info.size_of_buffer() - write
         }) as usize
     }
 }
@@ -490,29 +498,27 @@ impl RttChannel for DownChannel {
     fn name(&self) -> Option<&str> {
         self.0.name()
     }
+
     fn buffer_size(&self) -> usize {
         self.0.buffer_size()
     }
 }
 
 /// Reads a null-terminated string from target memory. Lossy UTF-8 decoding is used.
-fn read_c_string(
-    core: &mut Core,
-    memory_map: &[MemoryRegion],
-    ptr: u64,
-) -> Result<Option<String>, Error> {
+fn read_c_string(core: &mut Core, ptr: u64) -> Result<Option<String>, Error> {
     // Find out which memory range contains the pointer
-    let range = memory_map
-        .iter()
-        .filter_map(|r| match r {
-            MemoryRegion::Nvm(r) => Some(&r.range),
-            MemoryRegion::Ram(r) => Some(&r.range),
-            _ => None,
-        })
-        .find(|r| r.contains(&ptr));
+    if ptr == 0 {
+        // If the pointer is null, return None.
+        return Ok(None);
+    }
 
-    // If the pointer is not within any valid range, return None.
-    let Some(range) = range else {
+    let Some(range) = core
+        .memory_regions()
+        .filter(|r| r.is_ram() || r.is_nvm())
+        .find_map(|r| r.contains(ptr).then_some(r.address_range()))
+    else {
+        // If the pointer is not within any valid range, return None.
+        tracing::warn!("RTT channel name points to unrecognized memory. Bad target description?");
         return Ok(None);
     };
 
@@ -520,15 +526,12 @@ fn read_c_string(
     let mut bytes = vec![0u8; min(128, (range.end - ptr) as usize)];
     core.read(ptr, bytes.as_mut())?;
 
-    let return_value = bytes
-        .iter()
-        .position(|&b| b == 0)
-        .map(|p| String::from_utf8_lossy(&bytes[..p]).into_owned());
-    tracing::debug!(
-        "probe-rs-rtt::Channel::read_c_string() result = {:?}",
-        return_value
-    );
     // If the bytes read contain a null, return the preceding part as a string, otherwise None.
+    let return_value = CStr::from_bytes_until_nul(&bytes)
+        .map(|s| s.to_string_lossy().into_owned())
+        .ok();
+
+    tracing::trace!("read_c_string() result = {:?}", return_value);
     Ok(return_value)
 }
 
@@ -547,4 +550,26 @@ pub enum ChannelMode {
     /// section, using this mode can cause the application to freeze if the buffer becomes full and
     /// is not read by the host.
     BlockIfFull = 2,
+}
+
+impl ChannelMode {
+    fn set(self, flags: u64) -> u64 {
+        (flags & !3) | (self as u64)
+    }
+}
+
+impl TryFrom<u64> for ChannelMode {
+    type Error = Error;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(ChannelMode::NoBlockSkip),
+            1 => Ok(ChannelMode::NoBlockTrim),
+            2 => Ok(ChannelMode::BlockIfFull),
+            _ => Err(Error::ControlBlockCorrupted(format!(
+                "The channel mode flags are invalid: {}",
+                value
+            ))),
+        }
+    }
 }

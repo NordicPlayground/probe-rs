@@ -2,17 +2,13 @@
 
 use super::{registers::cortex_m::*, CortexMState, Dfsr};
 use crate::{
-    architecture::arm::{
-        memory::adi_v5_memory_interface::ArmProbe, sequences::ArmDebugSequence, ArmError,
-    },
+    architecture::arm::{memory::ArmMemoryInterface, sequences::ArmDebugSequence, ArmError},
     core::{CoreRegisters, RegisterId, RegisterValue, VectorCatchCondition},
     error::Error,
-    memory::valid_32bit_address,
-    probe::DebugProbeError,
+    memory::{valid_32bit_address, CoreMemoryInterface},
     Architecture, BreakpointCause, CoreInformation, CoreInterface, CoreRegister, CoreStatus,
     CoreType, HaltReason, InstructionSet, MemoryInterface, MemoryMappedRegister,
 };
-use anyhow::Result;
 use bitfield::bitfield;
 use std::{
     mem::size_of,
@@ -295,7 +291,7 @@ impl BpCompx {
         } else if bp_val.bp_match() == 0b10 {
             Ok((bp_val.comp() << 2) | 0x2)
         } else {
-            Err(Error::Probe(DebugProbeError::Other(anyhow::anyhow!("Unsupported breakpoint comparator value {:#08x} for HW breakpoint. Breakpoint must be on half-word boundaries", bp_val.0))))
+            Err(Error::Arm(ArmError::Other(format!("Unsupported breakpoint comparator value {:#08x} for HW breakpoint. Breakpoint must be on half-word boundaries", bp_val.0) )))
         }
     }
 }
@@ -408,7 +404,7 @@ impl MemoryMappedRegister<u32> for Demcr {
 
 /// The state of a core that can be used to persist core state across calls to multiple different cores.
 pub(crate) struct Armv6m<'probe> {
-    memory: Box<dyn ArmProbe + 'probe>,
+    memory: Box<dyn ArmMemoryInterface + 'probe>,
 
     state: &'probe mut CortexMState,
 
@@ -417,7 +413,7 @@ pub(crate) struct Armv6m<'probe> {
 
 impl<'probe> Armv6m<'probe> {
     pub(crate) fn new(
-        mut memory: Box<dyn ArmProbe + 'probe>,
+        mut memory: Box<dyn ArmMemoryInterface + 'probe>,
         state: &'probe mut CortexMState,
         sequence: Arc<dyn ArmDebugSequence>,
     ) -> Result<Self, ArmError> {
@@ -461,18 +457,20 @@ impl<'probe> Armv6m<'probe> {
     }
 }
 
-impl<'probe> CoreInterface for Armv6m<'probe> {
+impl CoreInterface for Armv6m<'_> {
     fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), Error> {
         // Wait until halted state is active again.
         let start = Instant::now();
 
-        while start.elapsed() < timeout {
-            if self.core_halted()? {
-                return Ok(());
+        while !self.core_halted()? {
+            if start.elapsed() >= timeout {
+                return Err(Error::Arm(ArmError::Timeout));
             }
+            // Wait a bit before polling again.
             std::thread::sleep(Duration::from_millis(1));
         }
-        Err(Error::Arm(ArmError::Timeout))
+
+        Ok(())
     }
 
     fn core_halted(&mut self) -> Result<bool, Error> {
@@ -641,8 +639,6 @@ impl<'probe> CoreInterface for Armv6m<'probe> {
     }
 
     fn step(&mut self) -> Result<CoreInformation, Error> {
-        self.state.semihosting_command = None;
-
         // First check if we stopped on a breakpoint, because this requires special handling before we can continue.
         let breakpoint_at_pc = if matches!(
             self.state.current_state,
@@ -689,6 +685,8 @@ impl<'probe> CoreInterface for Armv6m<'probe> {
             self.enable_breakpoints(true)?;
         }
 
+        self.state.semihosting_command = None;
+
         Ok(CoreInformation {
             pc: pc_after_step.try_into()?,
         })
@@ -705,7 +703,8 @@ impl<'probe> CoreInterface for Armv6m<'probe> {
 
     fn write_core_reg(&mut self, address: RegisterId, value: RegisterValue) -> Result<(), Error> {
         if self.state.current_state.is_halted() {
-            super::cortex_m::write_core_reg(&mut *self.memory, address, value.try_into()?)
+            super::cortex_m::write_core_reg(&mut *self.memory, address, value.try_into()?)?;
+            Ok(())
         } else {
             Err(Error::Arm(ArmError::CoreNotHalted))
         }
@@ -760,7 +759,7 @@ impl<'probe> CoreInterface for Armv6m<'probe> {
         // The highest 3 bits of the address have to be zero, otherwise the breakpoint cannot
         // be set at the address.
         if addr >= 0x2000_0000 {
-            return Err(Error::Probe(DebugProbeError::Other(anyhow::anyhow!("Unsupported address {:#08x} for HW breakpoint. Breakpoint must be at address < 0x2000_0000.", addr))));
+            return Err(Error::Arm(ArmError::Other(format!("Unsupported address {:#08x} for HW breakpoint. Breakpoint must be at address < 0x2000_0000.", addr))));
         }
 
         let mut value = BpCompx(0);
@@ -907,100 +906,13 @@ impl<'probe> CoreInterface for Armv6m<'probe> {
     }
 }
 
-impl<'probe> MemoryInterface for Armv6m<'probe> {
-    fn supports_native_64bit_access(&mut self) -> bool {
-        self.memory.supports_native_64bit_access()
-    }
-    fn read_word_64(&mut self, address: u64) -> Result<u64, Error> {
-        let value = self.memory.read_word_64(address)?;
-        Ok(value)
-    }
-    fn read_word_32(&mut self, address: u64) -> Result<u32, Error> {
-        let value = self.memory.read_word_32(address)?;
-        Ok(value)
-    }
-    fn read_word_16(&mut self, address: u64) -> Result<u16, Error> {
-        let value = self.memory.read_word_16(address)?;
-        Ok(value)
-    }
-    fn read_word_8(&mut self, address: u64) -> Result<u8, Error> {
-        let value = self.memory.read_word_8(address)?;
-        Ok(value)
-    }
+impl CoreMemoryInterface for Armv6m<'_> {
+    type ErrorType = ArmError;
 
-    fn read_64(&mut self, address: u64, data: &mut [u64]) -> Result<(), Error> {
-        self.memory.read_64(address, data)?;
-        Ok(())
+    fn memory(&self) -> &dyn MemoryInterface<Self::ErrorType> {
+        self.memory.as_memory_interface()
     }
-
-    fn read_32(&mut self, address: u64, data: &mut [u32]) -> Result<(), Error> {
-        self.memory.read_32(address, data)?;
-        Ok(())
-    }
-
-    fn read_16(&mut self, address: u64, data: &mut [u16]) -> Result<(), Error> {
-        self.memory.read_16(address, data)?;
-        Ok(())
-    }
-
-    fn read_8(&mut self, address: u64, data: &mut [u8]) -> Result<(), Error> {
-        self.memory.read_8(address, data)?;
-        Ok(())
-    }
-
-    fn write_word_64(&mut self, address: u64, data: u64) -> Result<(), Error> {
-        self.memory.write_word_64(address, data)?;
-        Ok(())
-    }
-
-    fn write_word_32(&mut self, address: u64, data: u32) -> Result<(), Error> {
-        self.memory.write_word_32(address, data)?;
-        Ok(())
-    }
-
-    fn write_word_16(&mut self, address: u64, data: u16) -> Result<(), Error> {
-        self.memory.write_word_16(address, data)?;
-        Ok(())
-    }
-
-    fn write_word_8(&mut self, address: u64, data: u8) -> Result<(), Error> {
-        self.memory.write_word_8(address, data)?;
-        Ok(())
-    }
-
-    fn write_64(&mut self, address: u64, data: &[u64]) -> Result<(), Error> {
-        self.memory.write_64(address, data)?;
-        Ok(())
-    }
-
-    fn write_32(&mut self, address: u64, data: &[u32]) -> Result<(), Error> {
-        self.memory.write_32(address, data)?;
-        Ok(())
-    }
-
-    fn write_16(&mut self, address: u64, data: &[u16]) -> Result<(), Error> {
-        self.memory.write_16(address, data)?;
-        Ok(())
-    }
-
-    fn write_8(&mut self, address: u64, data: &[u8]) -> Result<(), Error> {
-        self.memory.write_8(address, data)?;
-        Ok(())
-    }
-
-    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Error> {
-        self.memory.write(address, data)?;
-        Ok(())
-    }
-
-    fn supports_8bit_transfers(&self) -> Result<bool, Error> {
-        let value = self.memory.supports_8bit_transfers()?;
-        Ok(value)
-    }
-
-    fn flush(&mut self) -> Result<(), Error> {
-        self.memory.flush()?;
-
-        Ok(())
+    fn memory_mut(&mut self) -> &mut dyn MemoryInterface<Self::ErrorType> {
+        self.memory.as_memory_interface_mut()
     }
 }

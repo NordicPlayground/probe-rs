@@ -3,7 +3,6 @@ mod report;
 mod util;
 
 use std::cmp::Reverse;
-use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
 use std::str::FromStr;
@@ -13,12 +12,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use colored::Colorize;
 use itertools::Itertools;
-use probe_rs::flashing::{BinOptions, Format, IdfOptions};
+use probe_rs::flashing::{BinOptions, Format, FormatKind, IdfOptions};
 use probe_rs::{probe::list::Lister, Target};
 use report::Report;
+use serde::Deserialize;
 use serde::Serialize;
-use serde::{de::Error, Deserialize, Deserializer};
-use serde_json::Value;
 use time::{OffsetDateTime, UtcOffset};
 
 use crate::util::logging::setup_logging;
@@ -74,6 +72,8 @@ enum Subcommand {
     Debug(cmd::debug::Cmd),
     /// Download memory to attached target
     Download(cmd::download::Cmd),
+    /// Compare memory to attached target
+    Verify(cmd::verify::Cmd),
     /// Erase all nonvolatile memory of attached target
     Erase(cmd::erase::Cmd),
     /// Flash and run an ELF program
@@ -106,15 +106,26 @@ pub(crate) struct CoreOptions {
     core: usize,
 }
 
-/// A helper function to deserialize a default [`Format`] from a string.
-fn format_from_str<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Format>, D::Error> {
-    match Value::deserialize(deserializer)? {
-        Value::String(s) => match Format::from_str(s.as_str()) {
-            Ok(format) => Ok(Some(format)),
-            Err(e) => Err(D::Error::custom(e)),
-        },
-        _ => Ok(None),
-    }
+#[derive(clap::Parser, Clone, Serialize, Deserialize, Debug, Default)]
+#[serde(default)]
+pub struct BinaryCliOptions {
+    /// The address in memory where the binary will be put at. This is only considered when `bin` is selected as the format.
+    #[clap(long, value_parser = parse_u64, help_heading = "DOWNLOAD CONFIGURATION")]
+    base_address: Option<u64>,
+    /// The number of bytes to skip at the start of the binary file. This is only considered when `bin` is selected as the format.
+    #[clap(long, value_parser = parse_u32, default_value = "0", help_heading = "DOWNLOAD CONFIGURATION")]
+    skip: u32,
+}
+
+#[derive(clap::Parser, Clone, Serialize, Deserialize, Debug, Default)]
+#[serde(default)]
+pub struct IdfCliOptions {
+    /// The idf bootloader path
+    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
+    idf_bootloader: Option<PathBuf>,
+    /// The idf partition table path
+    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
+    idf_partition_table: Option<PathBuf>,
 }
 
 #[derive(clap::Parser, Clone, Serialize, Deserialize, Debug, Default)]
@@ -129,47 +140,43 @@ pub struct FormatOptions {
         long,
         help_heading = "DOWNLOAD CONFIGURATION"
     )]
-    // TODO: remove this alias in the next release after 0.24 and release of https://github.com/probe-rs/vscode/pull/86
-    #[serde(deserialize_with = "format_from_str", alias = "format")]
-    binary_format: Option<Format>,
-    /// The address in memory where the binary will be put at. This is only considered when `bin` is selected as the format.
-    #[clap(long, value_parser = parse_u64, help_heading = "DOWNLOAD CONFIGURATION")]
-    pub base_address: Option<u64>,
-    /// The number of bytes to skip at the start of the binary file. This is only considered when `bin` is selected as the format.
-    #[clap(long, value_parser = parse_u32, default_value = "0", help_heading = "DOWNLOAD CONFIGURATION")]
-    pub skip: u32,
-    /// The idf bootloader path
-    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
-    pub idf_bootloader: Option<PathBuf>,
-    /// The idf partition table path
-    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
-    pub idf_partition_table: Option<PathBuf>,
+    binary_format: Option<FormatKind>,
+
+    #[clap(flatten)]
+    bin_options: BinaryCliOptions,
+
+    #[clap(flatten)]
+    idf_options: IdfCliOptions,
 }
 
 impl FormatOptions {
     /// If a format is provided, use it.
     /// If a target has a preferred format, we use that.
     /// Finally, if neither of the above cases are true, we default to [`Format::default()`].
-    pub fn into_format(self, target: &Target) -> anyhow::Result<Format> {
-        let format = self
-            .binary_format
-            .unwrap_or_else(|| match target.default_format {
-                probe_rs_target::BinaryFormat::Idf => Format::Idf(Default::default()),
-                probe_rs_target::BinaryFormat::Raw => Default::default(),
-            });
-        Ok(match format {
-            Format::Bin(_) => Format::Bin(BinOptions {
-                base_address: self.base_address,
-                skip: self.skip,
-            }),
-            Format::Hex => Format::Hex,
-            Format::Elf => Format::Elf,
-            Format::Idf(_) => Format::Idf(IdfOptions {
-                bootloader: self.idf_bootloader,
-                partition_table: self.idf_partition_table,
-            }),
-            Format::Uf2 => Format::Uf2,
+    pub fn to_format_kind(&self, target: &Target) -> FormatKind {
+        self.binary_format.unwrap_or_else(|| {
+            FormatKind::from_optional(target.default_format.as_deref())
+                .expect("Failed to parse a default binary format. This shouldn't happen.")
         })
+    }
+
+    /// If a format is provided, use it.
+    /// If a target has a preferred format, we use that.
+    /// Finally, if neither of the above cases are true, we default to [`Format::default()`].
+    pub fn into_format(self, target: &Target) -> Format {
+        match self.to_format_kind(target) {
+            FormatKind::Bin => Format::Bin(BinOptions {
+                base_address: self.bin_options.base_address,
+                skip: self.bin_options.skip,
+            }),
+            FormatKind::Hex => Format::Hex,
+            FormatKind::Elf => Format::Elf,
+            FormatKind::Uf2 => Format::Uf2,
+            FormatKind::Idf => Format::Idf(IdfOptions {
+                bootloader: self.idf_options.idf_bootloader,
+                partition_table: self.idf_options.idf_partition_table,
+            }),
+        }
     }
 }
 
@@ -191,7 +198,7 @@ fn default_logfile_location() -> Result<PathBuf> {
             ..Default::default()
         },
     );
-    std::fs::create_dir_all(directory).context(format!("{directory:?} could not be created"))?;
+    fs::create_dir_all(directory).context(format!("{directory:?} could not be created"))?;
 
     let log_path = directory.join(logname);
 
@@ -204,15 +211,12 @@ fn prune_logs(directory: &Path) -> Result<(), anyhow::Error> {
     // suffix.
     let mut log_files = fs::read_dir(directory)?
         .filter_map(|entry| {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                if path.extension() == Some(OsStr::new("log")) {
-                    let metadata = fs::metadata(&path).ok()?;
-                    let last_modified = metadata.created().ok()?;
-                    Some((path, last_modified))
-                } else {
-                    None
-                }
+            let entry = entry.ok()?;
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "log") {
+                let metadata = fs::metadata(&path).ok()?;
+                let last_modified = metadata.created().ok()?;
+                Some((path, last_modified))
             } else {
                 None
             }
@@ -268,7 +272,7 @@ fn main() -> Result<()> {
     if let Some(format_arg_pos) = args.iter().position(|arg| arg == "--format") {
         if let Some(format_arg) = args.get(format_arg_pos + 1) {
             if let Some(format_arg) = format_arg.to_str() {
-                if Format::from_str(format_arg).is_ok() {
+                if FormatKind::from_str(format_arg).is_ok() {
                     anyhow::bail!("--format has been renamed to --binary-format. Please use --binary-format {0} instead of --format {0}", format_arg);
                 }
             }
@@ -296,14 +300,15 @@ fn main() -> Result<()> {
     } else {
         None
     };
+    let log_path = log_path.as_deref();
 
     // the DAP server has special logging requirements. Run it before initializing logging,
     // so it can do its own special init.
     if let Subcommand::DapServer(cmd) = matches.subcommand {
-        return cmd::dap_server::run(cmd, &lister, utc_offset, log_path.as_deref());
+        return cmd::dap_server::run(cmd, &lister, utc_offset, log_path);
     }
 
-    let _logger_guard = setup_logging(log_path.as_deref(), None);
+    let _logger_guard = setup_logging(log_path, None);
 
     let mut elf = None;
     let result = match matches.subcommand {
@@ -313,7 +318,10 @@ fn main() -> Result<()> {
         Subcommand::Gdb(cmd) => cmd.run(&lister),
         Subcommand::Reset(cmd) => cmd.run(&lister),
         Subcommand::Debug(cmd) => cmd.run(&lister),
-        Subcommand::Download(cmd) => cmd.run(&lister),
+        Subcommand::Download(cmd) => {
+            elf = Some(cmd.path.clone());
+            cmd.run(&lister)
+        }
         Subcommand::Run(cmd) => {
             elf = Some(cmd.shared_options.path.clone());
             cmd.run(&lister, true, utc_offset)
@@ -321,6 +329,10 @@ fn main() -> Result<()> {
         Subcommand::Attach(cmd) => {
             elf = Some(cmd.run.shared_options.path.clone());
             cmd.run(&lister, utc_offset)
+        }
+        Subcommand::Verify(cmd) => {
+            elf = Some(cmd.path.clone());
+            cmd.run(&lister)
         }
         Subcommand::Erase(cmd) => cmd.run(&lister),
         Subcommand::Trace(cmd) => cmd.run(&lister),
@@ -334,47 +346,51 @@ fn main() -> Result<()> {
         Subcommand::Mi(cmd) => cmd.run(),
     };
 
-    compile_report(result, matches.report, elf, log_path.clone())
+    compile_report(result, matches.report, elf, log_path)
 }
 
 fn compile_report(
     result: Result<()>,
     path: Option<PathBuf>,
     elf: Option<PathBuf>,
-    log_path: Option<PathBuf>,
+    log_path: Option<&Path>,
 ) -> Result<()> {
-    if let Err(error) = result {
-        if let Some(path) = path {
-            let command = std::env::args_os();
-            let report = Report::new(command, error, elf, log_path)?;
+    let Err(error) = result else {
+        return Ok(());
+    };
 
-            report.zip(&path)?;
-            eprintln!(
-                "{}",
-                format!(
-                    "The compiled report has been written to {}.",
-                    path.display()
-                )
-                .blue()
-            );
-            eprintln!("{}", "Please upload it with your issue on Github.".blue());
-            eprintln!(
-                "{}",
-                "You can create an issue by following this URL:".blue()
-            );
-            let base = "https://github.com/probe-rs/probe-rs/issues/new";
-            let meta = format!("```json\n{}\n```", serde_json::to_string_pretty(&report)?);
-            let body = urlencoding::encode(&meta);
-            let error = format!("{:#}", report.error);
-            let title = urlencoding::encode(&error);
-            eprintln!("{base}?labels=bug&title={title}&body={body}");
-            Ok(())
-        } else {
-            Err(error)
-        }
-    } else {
-        Ok(())
-    }
+    let Some(path) = path else {
+        return Err(error);
+    };
+
+    let command = std::env::args_os();
+    let report = Report::new(command, error, elf.as_deref(), log_path)?;
+
+    report.zip(&path)?;
+
+    eprintln!(
+        "{}",
+        format!(
+            "The compiled report has been written to {}.",
+            path.display()
+        )
+        .blue()
+    );
+    eprintln!("{}", "Please upload it with your issue on Github.".blue());
+    eprintln!(
+        "{}",
+        "You can create an issue by following this URL:".blue()
+    );
+
+    let base = "https://github.com/probe-rs/probe-rs/issues/new";
+    let meta = format!("```json\n{}\n```", serde_json::to_string_pretty(&report)?);
+    let body = urlencoding::encode(&meta);
+    let error = format!("{:#}", report.error);
+    let title = urlencoding::encode(&error);
+
+    eprintln!("{base}?labels=bug&title={title}&body={body}");
+
+    Ok(())
 }
 
 #[cfg(test)]

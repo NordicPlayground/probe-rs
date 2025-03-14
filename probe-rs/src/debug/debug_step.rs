@@ -41,17 +41,15 @@ impl SteppingMode {
         core: &mut impl CoreInterface,
         debug_info: &DebugInfo,
     ) -> Result<(CoreStatus, u64), DebugError> {
-        let mut core_status = core
-            .status()
-            .map_err(|error| DebugError::Other(anyhow::anyhow!(error)))?;
+        let mut core_status = core.status()?;
         let mut program_counter = match core_status {
             CoreStatus::Halted(_) => core
                 .read_core_reg(core.program_counter().id())?
                 .try_into()?,
             _ => {
-                return Err(DebugError::Other(anyhow::anyhow!(
-                    "Core must be halted before stepping."
-                )))
+                return Err(DebugError::Other(
+                    "Core must be halted before stepping.".to_string(),
+                ))
             }
         };
         let origin_program_counter = program_counter;
@@ -118,7 +116,7 @@ impl SteppingMode {
                     debug_info
                         .get_source_location(program_counter)
                         .map(|source_location| (
-                            source_location.file,
+                            source_location.path,
                             source_location.line,
                             source_location.column
                         )),
@@ -126,7 +124,7 @@ impl SteppingMode {
                     debug_info
                         .get_source_location(target_address)
                         .map(|source_location| (
-                            source_location.file,
+                            source_location.path,
                             source_location.line,
                             source_location.column
                         )),
@@ -156,6 +154,7 @@ impl SteppingMode {
     /// - To determine valid halt points for breakpoints and stepping, we only use instructions that qualify as:
     ///   - The beginning of a statement that is neither inside the prologue, nor inside the epilogue.
     /// - Based on this, we will attempt to return the "most appropriate" address for the [`SteppingMode`], given the available information in the instruction sequence.
+    ///
     /// All data is calculated using the [`gimli::read::CompleteLineProgram`] as well as, function call data from the debug info frame section.
     ///
     /// NOTE about errors returned: Sometimes the target program_counter is at a location where the debug_info program row data does not contain valid statements
@@ -264,7 +263,7 @@ impl SteppingMode {
                             .attribute(debug_info, gimli::DW_AT_noreturn)
                             .is_some()
                         {
-                            return Err(DebugError::Other(anyhow::anyhow!(
+                            return Err(DebugError::Other(format!(
                                 "Function {:?} is marked as `noreturn`. Cannot step out of this function.",
                                 function.function_name(debug_info).as_deref().unwrap_or("<unknown>")
                             )));
@@ -361,7 +360,7 @@ fn run_to_address(
                     (core.status()?, program_counter)
                 } else {
                     // Something else is wrong.
-                    return Err(DebugError::Other(anyhow::anyhow!(
+                    return Err(DebugError::Other(format!(
                         "Unexpected error while waiting for the core to halt after stepping to {:#010X}. Forced a halt at {:#010X}. {:?}.",
                         program_counter,
                         target_address,
@@ -407,7 +406,7 @@ fn step_to_address(
             },
             // This is not a recoverable error, and will result in the debug session ending (we have no predicatable way of successfully continuing the session)
             other_status => return Err(DebugError::Other(
-                anyhow::anyhow!("Target failed to reach the destination address of a step operation: {:?}", other_status))
+                format!("Target failed to reach the destination address of a step operation: {:?}", other_status))
             ),
         }
     }

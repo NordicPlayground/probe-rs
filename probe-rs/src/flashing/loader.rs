@@ -2,7 +2,8 @@ use espflash::flasher::{FlashData, FlashSettings};
 use espflash::targets::XtalFrequency;
 use ihex::Record;
 use probe_rs_target::{
-    MemoryRange, MemoryRegion, NvmRegion, RawFlashAlgorithm, TargetDescriptionSource,
+    InstructionSet, MemoryRange, MemoryRegion, NvmRegion, RawFlashAlgorithm,
+    TargetDescriptionSource,
 };
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
@@ -15,6 +16,7 @@ use super::{
     IdfOptions,
 };
 use crate::config::DebugSequence;
+use crate::flashing::Format;
 use crate::memory::MemoryInterface;
 use crate::session::Session;
 use crate::Target;
@@ -54,8 +56,7 @@ impl FlashLoader {
                 Some(MemoryRegion::Ram(region)) => address = region.range.end,
                 _ => {
                     return Err(FlashError::NoSuitableNvm {
-                        start: range.start,
-                        end: range.end,
+                        range,
                         description_source: self.source.clone(),
                     })
                 }
@@ -83,6 +84,46 @@ impl FlashLoader {
         address: u64,
     ) -> Option<&MemoryRegion> {
         memory_map.iter().find(|region| region.contains(address))
+    }
+
+    /// Reads the image according to the file format and adds it to the loader.
+    pub fn load_image<T: Read + Seek>(
+        &mut self,
+        session: &mut Session,
+        file: &mut T,
+        format: Format,
+        image_instruction_set: Option<InstructionSet>,
+    ) -> Result<(), FileDownloadError> {
+        if let Some(instr_set) = image_instruction_set {
+            let mut target_archs = Vec::with_capacity(session.list_cores().len());
+
+            // Get a unique list of core architectures
+            for (core, _) in session.list_cores() {
+                if let Ok(set) = session.core(core).unwrap().instruction_set() {
+                    if !target_archs.contains(&set) {
+                        target_archs.push(set);
+                    }
+                }
+            }
+
+            // Is the image compatible with any of the cores?
+            if !target_archs
+                .iter()
+                .any(|target| target.is_compatible(instr_set))
+            {
+                return Err(FileDownloadError::IncompatibleImage {
+                    target: target_archs,
+                    image: instr_set,
+                });
+            }
+        }
+        match format {
+            Format::Bin(options) => self.load_bin_data(file, options),
+            Format::Elf => self.load_elf_data(file),
+            Format::Hex => self.load_hex_data(file),
+            Format::Idf(options) => self.load_idf_data(session, file, options),
+            Format::Uf2 => self.load_uf2_data(file),
+        }
     }
 
     /// Reads the data from the binary file and adds it to the loader without splitting it into flash instructions yet.
@@ -140,18 +181,14 @@ impl FlashLoader {
             XtalFrequency::_40Mhz
         };
 
-        let flash_size_result = session.halted_access(|sess| {
+        let flash_size_result = session.halted_access(|session| {
             // Figure out flash size from the memory map. We need a different bootloader for each size.
-            Ok(match sess.target().debug_sequence.clone() {
-                DebugSequence::Riscv(sequence) => {
-                    sequence.detect_flash_size(sess.get_riscv_interface()?)
-                }
-                DebugSequence::Xtensa(sequence) => {
-                    sequence.detect_flash_size(sess.get_xtensa_interface()?)
-                }
+            match session.target().debug_sequence.clone() {
+                DebugSequence::Riscv(sequence) => sequence.detect_flash_size(session),
+                DebugSequence::Xtensa(sequence) => sequence.detect_flash_size(session),
                 DebugSequence::Arm(_) => panic!("There are no ARM ESP targets."),
-            })
-        })?;
+            }
+        });
 
         let flash_size = match flash_size_result.map_err(FileDownloadError::FlashSizeDetection)? {
             Some(0x40000) => Some(espflash::flasher::FlashSize::_256Kb),
@@ -344,17 +381,12 @@ impl FlashLoader {
             .filter_map(MemoryRegion::as_nvm_region)
         {
             if region.is_alias {
-                tracing::debug!(
-                    "Skipping alias memory region {:#010X}..{:#010X}",
-                    region.range.start,
-                    region.range.end
-                );
+                tracing::debug!("Skipping alias memory region {:#010X?}", region.range);
                 continue;
             }
             tracing::debug!(
-                "    region: {:#010X}..{:#010X} ({} bytes)",
-                region.range.start,
-                region.range.end,
+                "    region: {:#010X?} ({} bytes)",
+                region.range,
                 region.range.end - region.range.start
             );
 
@@ -432,9 +464,8 @@ impl FlashLoader {
 
             for region in regions {
                 tracing::debug!(
-                    "    programming region: {:#010X}..{:#010X} ({} bytes)",
-                    region.range.start,
-                    region.range.end,
+                    "    programming region: {:#010X?} ({} bytes)",
+                    region.range,
                     region.range.end - region.range.start
                 );
 
@@ -458,9 +489,8 @@ impl FlashLoader {
             .filter_map(MemoryRegion::as_ram_region)
         {
             tracing::debug!(
-                "    region: {:#010X}..{:#010X} ({} bytes)",
-                region.range.start,
-                region.range.end,
+                "    region: {:#010X?} ({} bytes)",
+                region.range,
                 region.range.end - region.range.start
             );
 

@@ -1,5 +1,7 @@
 pub mod configure;
 
+use std::iter;
+
 use super::{CommandId, Request, SendError};
 use crate::architecture::arm::PortType;
 use scroll::{Pread, Pwrite, LE};
@@ -13,7 +15,7 @@ pub enum RW {
 /// Contains information about requested access from host debugger.
 #[allow(non_snake_case)]
 #[derive(Clone, Debug)]
-pub struct InnerTransferRequest {
+struct InnerTransferRequest {
     /// 0 = Debug PortType (DP), 1 = Access PortType (AP).
     pub APnDP: PortType,
     /// 0 = Write Register, 1 = Read Register.
@@ -98,7 +100,7 @@ impl InnerTransferResponse {
 
         let mut offset = 0;
         // Only expect response data if the transfer was successful
-        if let Ack::Ok = ack {
+        if ack == Ack::Ok {
             if req.td_timestamp_request {
                 if buffer.len() < offset + 4 {
                     return Err(SendError::NotEnoughData);
@@ -136,18 +138,37 @@ impl InnerTransferResponse {
 pub struct TransferRequest {
     /// Zero based device index of the selected JTAG device. For SWD mode the value is ignored.
     pub dap_index: u8,
-    /// Number of transfers: 1 .. 255. For each transfer a Transfer Request BYTE is sent. Depending on the request an additional Transfer Data WORD is sent.
-    pub transfer_count: u8,
-    pub transfers: Vec<InnerTransferRequest>,
+    transfers: Vec<InnerTransferRequest>,
 }
 
 impl TransferRequest {
-    pub fn new(transfers: &[InnerTransferRequest]) -> Self {
+    pub fn empty() -> Self {
         Self {
             dap_index: 0,
-            transfer_count: transfers.len() as u8,
-            transfers: transfers.into(),
+            transfers: vec![],
         }
+    }
+
+    pub fn read(port: PortType, addr: u8) -> Self {
+        let mut req = Self::empty();
+        req.add_read(port, addr);
+        req
+    }
+
+    pub fn write(port: PortType, addr: u8, data: u32) -> Self {
+        let mut req = Self::empty();
+        req.add_write(port, addr, data);
+        req
+    }
+
+    pub fn add_read(&mut self, port: PortType, addr: u8) {
+        self.transfers
+            .push(InnerTransferRequest::new(port, RW::R, addr, None));
+    }
+
+    pub fn add_write(&mut self, port: PortType, addr: u8, data: u32) {
+        self.transfers
+            .push(InnerTransferRequest::new(port, RW::W, addr, Some(data)));
     }
 }
 
@@ -162,7 +183,7 @@ impl Request for TransferRequest {
         buffer[0] = self.dap_index;
         size += 1;
 
-        buffer[1] = self.transfer_count;
+        buffer[1] = self.transfers.len() as u8;
         size += 1;
 
         for transfer in self.transfers.iter() {
@@ -172,12 +193,12 @@ impl Request for TransferRequest {
         Ok(size)
     }
 
-    fn parse_response(&self, mut buffer: &[u8]) -> Result<Self::Response, SendError> {
+    fn parse_response(&self, buffer: &[u8]) -> Result<Self::Response, SendError> {
         if buffer.len() < 2 {
             return Err(SendError::NotEnoughData);
         }
-        let transfer_count = buffer[0];
-        if transfer_count as usize > self.transfers.len() {
+        let transfer_count = buffer[0] as usize;
+        if transfer_count > self.transfers.len() {
             tracing::error!("Transfer count larger than requested number of transfers");
             return Err(SendError::UnexpectedAnswer);
         }
@@ -190,43 +211,40 @@ impl Request for TransferRequest {
                 7 => Ack::NoAck,
                 _ => Ack::NoAck,
             },
-            protocol_error: buffer[1] & 0x8 > 1,
-            value_missmatch: buffer[1] & 0x10 > 1,
+            protocol_error: buffer[1] & 0x8 != 0,
+            _value_mismatch: buffer[1] & 0x10 != 0,
         };
+        let mut buffer = &buffer[2..];
 
-        buffer = &buffer[2..];
-        let mut transfers = Vec::new();
-        let xfer_count_and_ack = (0..transfer_count).map(|i| {
-            if i + 1 == transfer_count {
-                (i as usize, last_transfer_response.ack.clone())
-            } else {
-                (i as usize, Ack::Ok)
+        let mut transfers = Vec::with_capacity(transfer_count);
+        if transfer_count > 0 {
+            let acks = iter::repeat(Ack::Ok)
+                .take(transfer_count - 1)
+                .chain(iter::once(last_transfer_response.ack))
+                .zip(self.transfers.iter());
+
+            for (ack, req) in acks {
+                let (resp, len) = InnerTransferResponse::from_bytes(req, ack, buffer)?;
+                transfers.push(resp);
+                buffer = &buffer[len..];
             }
-        });
-
-        for (i, ack) in xfer_count_and_ack {
-            let req = &self.transfers[i];
-            let (resp, len) = InnerTransferResponse::from_bytes(req, ack, buffer)?;
-            transfers.push(resp);
-            buffer = &buffer[len..];
         }
 
         Ok(TransferResponse {
-            transfer_count,
             last_transfer_response,
             transfers,
         })
     }
 }
 
-#[allow(clippy::enum_variant_names)]
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum Ack {
     /// TODO: ??????????????????????? Docs are weird?
     /// OK (for SWD protocol), OK or FAULT (for JTAG protocol),
     Ok = 1,
     Wait = 2,
     Fault = 4,
+    #[allow(clippy::enum_variant_names)]
     NoAck = 7,
 }
 
@@ -234,13 +252,11 @@ pub enum Ack {
 pub struct LastTransferResponse {
     pub ack: Ack,
     pub protocol_error: bool,
-    pub value_missmatch: bool,
+    pub _value_mismatch: bool,
 }
 
 #[derive(Debug)]
 pub struct TransferResponse {
-    /// Number of transfers: 1 .. 255 that are executed.
-    pub transfer_count: u8,
     /// Contains information about last response from target Device.
     pub last_transfer_response: LastTransferResponse,
     /// Responses to each requested transfer in `TransferRequest`. May be shorter than
@@ -252,15 +268,16 @@ pub struct TransferResponse {
 pub(crate) struct TransferBlockRequest {
     /// Zero-based device index of the selected JTAG device. For SWD mode the
     /// value is ignored.
-    dap_index: u8,
+    pub(crate) dap_index: u8,
+
     /// Number of transfers
-    transfer_count: u16,
+    pub(crate) transfer_count: u16,
 
     /// Information about requested access
-    transfer_request: InnerTransferBlockRequest,
+    pub(crate) transfer_request: InnerTransferBlockRequest,
 
     /// Register values to write for writes
-    transfer_data: Vec<u32>,
+    pub(crate) transfer_data: Vec<u32>,
 }
 
 impl Request for TransferBlockRequest {
@@ -278,7 +295,7 @@ impl Request for TransferBlockRequest {
             .expect("Buffer for CMSIS-DAP command is too small. This is a bug, please report it.");
         size += 2;
 
-        size += self.transfer_request.to_bytes(buffer, 3)?;
+        size += self.transfer_request.as_bytes(buffer, 3)?;
 
         let mut data_offset = 4;
 
@@ -365,8 +382,8 @@ impl TransferBlockRequest {
     }
 }
 
-#[derive(Debug)]
-struct InnerTransferBlockRequest {
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct InnerTransferBlockRequest {
     ap_n_dp: PortType,
     r_n_w: RW,
     a2: bool,
@@ -374,7 +391,7 @@ struct InnerTransferBlockRequest {
 }
 
 impl InnerTransferBlockRequest {
-    fn to_bytes(&self, buffer: &mut [u8], offset: usize) -> Result<usize, SendError> {
+    fn as_bytes(&self, buffer: &mut [u8], offset: usize) -> Result<usize, SendError> {
         buffer[offset] = (self.ap_n_dp as u8)
             | (self.r_n_w as u8) << 1
             | u8::from(self.a2) << 2

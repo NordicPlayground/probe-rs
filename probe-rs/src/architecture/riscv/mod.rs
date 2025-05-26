@@ -5,24 +5,24 @@ use crate::{
     core::{
         Architecture, BreakpointCause, CoreInformation, CoreRegisters, RegisterId, RegisterValue,
     },
-    memory::valid_32bit_address,
+    memory::{valid_32bit_address, CoreMemoryInterface},
     memory_mapped_bitfield_register,
     probe::DebugProbeError,
     semihosting::decode_semihosting_syscall,
+    semihosting::SemihostingCommand,
     CoreInterface, CoreRegister, CoreStatus, CoreType, Error, HaltReason, InstructionSet,
-    MemoryInterface, MemoryMappedRegister, SemihostingCommand,
+    MemoryInterface, MemoryMappedRegister,
 };
-use anyhow::{anyhow, Result};
 use bitfield::bitfield;
 use communication_interface::{AbstractCommandErrorKind, RiscvCommunicationInterface, RiscvError};
-use registers::{FP, RA, RISCV_CORE_REGSISTERS, SP};
+use registers::{FP, RA, RISCV_CORE_REGISTERS, SP};
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
 
 #[macro_use]
-pub(crate) mod registers;
+pub mod registers;
 pub use registers::PC;
 pub(crate) mod assembly;
 pub mod communication_interface;
@@ -76,8 +76,6 @@ impl<'state> Riscv32<'state> {
 
     /// Check if the current breakpoint is a semihosting call
     fn check_for_semihosting(&mut self) -> Result<Option<SemihostingCommand>, Error> {
-        let pc: u32 = self.read_core_reg(self.program_counter().id)?.try_into()?;
-
         // The Riscv Semihosting Specification, specificies the following sequence of instructions,
         // to trigger a semihosting call:
         // <https://github.com/riscv-software-src/riscv-semihosting/blob/main/riscv-semihosting-spec.adoc>
@@ -87,6 +85,13 @@ impl<'state> Riscv32<'state> {
             0x00100073, // ebreak (Break to debugger)
             0x40705013, // srai x0, x0, 7 (NOP encoding the semihosting call number 7)
         ];
+
+        // We only want to decode the semihosting command once, since answering it might change some of the registers
+        if let Some(command) = self.state.semihosting_command {
+            return Ok(Some(command));
+        }
+
+        let pc: u32 = self.read_core_reg(self.program_counter().id)?.try_into()?;
 
         // Read the actual instructions, starting at the instruction before the ebreak (PC-4)
         let mut actual_instructions = [0u32; 3];
@@ -100,28 +105,14 @@ impl<'state> Riscv32<'state> {
             actual_instructions[2]
         );
 
-        if TRAP_INSTRUCTIONS == actual_instructions {
-            // Trap sequence found -> we're semihosting
-            match self.state.semihosting_command {
-                None => {
-                    // We only want to decode the semihosting command once, since answering it might change some of the registers
-                    let a0: u32 = self
-                        .read_core_reg(self.registers().get_argument_register(0).unwrap().id())?
-                        .try_into()?;
-                    let a1: u32 = self
-                        .read_core_reg(self.registers().get_argument_register(1).unwrap().id())?
-                        .try_into()?;
-
-                    tracing::info!("Semihosting found pc={pc:#x} a0={a0:#x} a1={a1:#x}");
-                    let cmd = decode_semihosting_syscall(self, a0, a1)?;
-                    self.state.semihosting_command = Some(cmd);
-                    Ok(Some(cmd))
-                }
-                Some(command) => Ok(Some(command)),
-            }
+        let command = if TRAP_INSTRUCTIONS == actual_instructions {
+            Some(decode_semihosting_syscall(self)?)
         } else {
-            Ok(None)
-        }
+            None
+        };
+        self.state.semihosting_command = command;
+
+        Ok(command)
     }
 
     fn determine_number_of_hardware_breakpoints(&mut self) -> Result<u32, RiscvError> {
@@ -194,7 +185,7 @@ impl<'state> Riscv32<'state> {
     }
 }
 
-impl<'state> CoreInterface for Riscv32<'state> {
+impl CoreInterface for Riscv32<'_> {
     fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), crate::Error> {
         self.interface.wait_for_core_halted(timeout)?;
         self.state.pc_written = false;
@@ -202,9 +193,7 @@ impl<'state> CoreInterface for Riscv32<'state> {
     }
 
     fn core_halted(&mut self) -> Result<bool, crate::Error> {
-        let dmstatus: Dmstatus = self.interface.read_dm_register()?;
-
-        Ok(dmstatus.allhalted())
+        Ok(self.interface.core_halted()?)
     }
 
     fn status(&mut self) -> Result<crate::core::CoreStatus, crate::Error> {
@@ -245,15 +234,15 @@ impl<'state> CoreInterface for Riscv32<'state> {
         } else if status.allrunning() {
             Ok(CoreStatus::Running)
         } else {
-            Err(
-                anyhow!("Some cores are running while some are halted, this should not happen.")
-                    .into(),
-            )
+            Err(Error::Other(
+                "Some cores are running while some are halted, this should not happen.".to_string(),
+            ))
         }
     }
 
     fn halt(&mut self, timeout: Duration) -> Result<CoreInformation, Error> {
-        Ok(self.interface.halt(timeout)?)
+        self.interface.halt(timeout)?;
+        Ok(self.interface.core_info()?)
     }
 
     fn run(&mut self) -> Result<(), Error> {
@@ -551,7 +540,7 @@ impl<'state> CoreInterface for Riscv32<'state> {
     }
 
     fn registers(&self) -> &'static CoreRegisters {
-        &RISCV_CORE_REGSISTERS
+        &RISCV_CORE_REGISTERS
     }
 
     fn program_counter(&self) -> &'static CoreRegister {
@@ -627,90 +616,19 @@ impl<'state> CoreInterface for Riscv32<'state> {
     }
 
     fn debug_core_stop(&mut self) -> Result<(), Error> {
-        self.debug_on_sw_breakpoint(false)?;
+        self.interface.disable_debug_module()?;
         Ok(())
     }
 }
 
-impl MemoryInterface for Riscv32<'_> {
-    fn supports_native_64bit_access(&mut self) -> bool {
-        self.interface.supports_native_64bit_access()
-    }
+impl CoreMemoryInterface for Riscv32<'_> {
+    type ErrorType = Error;
 
-    fn read_word_64(&mut self, address: u64) -> Result<u64, crate::error::Error> {
-        self.interface.read_word_64(address)
+    fn memory(&self) -> &dyn MemoryInterface<Self::ErrorType> {
+        &self.interface
     }
-
-    fn read_word_32(&mut self, address: u64) -> Result<u32, Error> {
-        self.interface.read_word_32(address)
-    }
-
-    fn read_word_16(&mut self, address: u64) -> Result<u16, Error> {
-        self.interface.read_word_16(address)
-    }
-
-    fn read_word_8(&mut self, address: u64) -> Result<u8, Error> {
-        self.interface.read_word_8(address)
-    }
-
-    fn read_64(&mut self, address: u64, data: &mut [u64]) -> Result<(), Error> {
-        self.interface.read_64(address, data)
-    }
-
-    fn read_32(&mut self, address: u64, data: &mut [u32]) -> Result<(), Error> {
-        self.interface.read_32(address, data)
-    }
-
-    fn read_16(&mut self, address: u64, data: &mut [u16]) -> Result<(), Error> {
-        self.interface.read_16(address, data)
-    }
-
-    fn read_8(&mut self, address: u64, data: &mut [u8]) -> Result<(), Error> {
-        self.interface.read_8(address, data)
-    }
-
-    fn write_word_64(&mut self, address: u64, data: u64) -> Result<(), Error> {
-        self.interface.write_word_64(address, data)
-    }
-
-    fn write_word_32(&mut self, address: u64, data: u32) -> Result<(), Error> {
-        self.interface.write_word_32(address, data)
-    }
-
-    fn write_word_16(&mut self, address: u64, data: u16) -> Result<(), Error> {
-        self.interface.write_word_16(address, data)
-    }
-
-    fn write_word_8(&mut self, address: u64, data: u8) -> Result<(), Error> {
-        self.interface.write_word_8(address, data)
-    }
-
-    fn write_64(&mut self, address: u64, data: &[u64]) -> Result<(), Error> {
-        self.interface.write_64(address, data)
-    }
-
-    fn write_32(&mut self, address: u64, data: &[u32]) -> Result<(), Error> {
-        self.interface.write_32(address, data)
-    }
-
-    fn write_16(&mut self, address: u64, data: &[u16]) -> Result<(), Error> {
-        self.interface.write_16(address, data)
-    }
-
-    fn write_8(&mut self, address: u64, data: &[u8]) -> Result<(), Error> {
-        self.interface.write_8(address, data)
-    }
-
-    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Error> {
-        self.interface.write(address, data)
-    }
-
-    fn supports_8bit_transfers(&self) -> Result<bool, Error> {
-        self.interface.supports_8bit_transfers()
-    }
-
-    fn flush(&mut self) -> Result<(), Error> {
-        self.interface.flush()
+    fn memory_mut(&mut self) -> &mut dyn MemoryInterface<Self::ErrorType> {
+        &mut self.interface
     }
 }
 
@@ -806,24 +724,72 @@ memory_mapped_bitfield_register! {
     pub struct Dmstatus(u32);
     0x11, "dmstatus",
     impl From;
-    impebreak, _: 22;
-    allhavereset, _: 19;
-    anyhavereset, _: 18;
-    allresumeack, _: 17;
-    anyresumeack, _: 16;
-    allnonexistent, _: 15;
-    anynonexistent, _: 14;
-    allunavail, _: 13;
-    anyunavail, _: 12;
-    allrunning, _: 11;
-    anyrunning, _: 10;
-    allhalted, _: 9;
-    anyhalted, _: 8;
-    authenticated, _: 7;
-    authbusy, _: 6;
-    hasresethaltreq, _: 5;
-    confstrptrvalid, _: 4;
-    version, _: 3, 0;
+
+    /// If 1, then there is an implicit ebreak instruction
+    /// at the non-existent word immediately after the
+    /// Program Buffer. This saves the debugger from
+    /// having to write the ebreak itself, and allows the
+    /// Program Buffer to be one word smaller.
+    /// This must be 1 when progbufsize is 1.
+    pub impebreak, _: 22;
+
+    /// This field is 1 when all currently selected harts
+    /// have been reset and reset has not been acknowledged for any of them.
+    pub allhavereset, _: 19;
+
+    /// This field is 1 when at least one currently selected hart
+    /// has been reset and reset has not been acknowledged for any of them.
+    pub anyhavereset, _: 18;
+
+    /// This field is 1 when all currently selected harts
+    /// have acknowledged their last resume request.
+    pub allresumeack, _: 17;
+
+    /// This field is 1 when any currently selected hart
+    /// has acknowledged its last resume request.
+    pub anyresumeack, _: 16;
+
+    /// This field is 1 when all currently selected harts do
+    /// not exist in this platform.
+    pub allnonexistent, _: 15;
+
+    /// This field is 1 when any currently selected hart
+    /// does not exist in this platform.
+    pub anynonexistent, _: 14;
+
+    /// This field is 1 when all currently selected harts are unavailable.
+    pub allunavail, _: 13;
+
+    /// This field is 1 when any currently selected hart is unavailable.
+    pub anyunavail, _: 12;
+
+    /// This field is 1 when all currently selected harts are running.
+    pub allrunning, _: 11;
+
+    /// This field is 1 when any currently selected hart is running.
+    pub anyrunning, _: 10;
+
+    /// This field is 1 when all currently selected harts are halted.
+    pub allhalted, _: 9;
+
+    /// This field is 1 when any currently selected hart is halted.
+    pub anyhalted, _: 8;
+
+    /// If 0, authentication is required before using the DM.
+    pub authenticated, _: 7;
+
+    /// If 0, the authentication module is ready to process the next read/write to `authdata`.
+    pub authbusy, _: 6;
+
+    /// 1 if this Debug Module supports halt-on-reset functionality controllable by the
+    /// `setresethaltreq` and `clrresethaltreq` bits.
+    pub hasresethaltreq, _: 5;
+
+    /// 1 if `confstrptr0`–`confstrptr3` hold the address of the configuration string.
+    pub confstrptrvalid, _: 4;
+
+    /// Version of the debug module.
+    pub version, _: 3, 0;
 }
 
 bitfield! {

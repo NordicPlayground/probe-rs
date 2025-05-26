@@ -9,22 +9,22 @@ use super::{
 };
 use crate::cmd::dap_server::{server::core_data::CoreHandle, DebuggerError};
 use itertools::Itertools;
-use probe_rs::{
-    debug::{ObjectRef, VariableName},
-    CoreStatus, HaltReason,
-};
+use probe_rs::{CoreDump, CoreStatus, HaltReason};
+use probe_rs_debug::{ObjectRef, VariableName};
 use std::{fmt::Display, ops::Range, path::Path, str::FromStr, time::Duration};
 
 /// The handler is a function that takes a reference to the target core, and a reference to the response body.
 /// The response body is used to populate the response to the client.
 /// The handler returns a Result<[`Response`], [`DebuggerError`]>.
+///
 /// We use the [`Response`] type here, so that we can have a consistent interface for processing the result as follows:
 /// - The `command`, `success`, and `message` fields are the most commonly used fields for all the REPL commands.
 /// - The `body` field is used if we need to pass back other DAP body types, e.g. [`BreakpointEventBody`].
 /// - The remainder of the fields are unused/ignored.
-/// The majority of the REPL command results will be populated into the response body.
 ///
-/// TODO: Make this less confusing by having a different struct for this.
+/// The majority of the REPL command results will be populated into the response body.
+//
+// TODO: Make this less confusing by having a different struct for this.
 pub(crate) type ReplHandler = fn(
     target_core: &mut CoreHandle,
     command_arguments: &str,
@@ -213,7 +213,6 @@ pub(crate) static REPL_COMMANDS: &[ReplCommand<ReplHandler>] = &[
             let yaml_data = insta_yaml::serialize_value(
                 &target_core.core_data.stack_frames,
                 insta_yaml::SerializationFormat::Yaml,
-                insta_yaml::SnapshotLocation::File,
             );
 
             let response_message = if let Some(location) = write_to_file {
@@ -466,7 +465,7 @@ pub(crate) static REPL_COMMANDS: &[ReplCommand<ReplHandler>] = &[
                 range_string = range_string.trim_end_matches(", ").to_string();
                 range_string = format!("(Includes memory ranges: {range_string})");
             }
-            target_core.core.dump(ranges)?.store(location)?;
+            CoreDump::dump_core(&mut target_core.core, ranges)?.store(location)?;
 
             Ok(Response {
                 command: "dump".to_string(),

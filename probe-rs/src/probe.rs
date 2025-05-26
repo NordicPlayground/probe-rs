@@ -3,6 +3,7 @@ pub(crate) mod arm_debug_interface;
 pub(crate) mod common;
 pub(crate) mod usb_util;
 
+pub mod blackmagic;
 pub mod cmsisdap;
 pub mod espusbjtag;
 pub mod fake_probe;
@@ -22,12 +23,13 @@ use crate::architecture::riscv::communication_interface::{RiscvError, RiscvInter
 use crate::architecture::xtensa::communication_interface::{
     XtensaCommunicationInterface, XtensaDebugInterfaceState, XtensaError,
 };
-use crate::config::RegistryError;
 use crate::config::TargetSelector;
 use crate::probe::common::IdCode;
 use crate::{Error, Permissions, Session};
+use common::ScanChainError;
 use nusb::DeviceInfo;
 use probe_rs_target::ScanChainElement;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -38,7 +40,7 @@ const LOW_TARGET_VOLTAGE_WARNING_THRESHOLD: f32 = 1.4;
 
 /// The protocol that is to be used by the probe when communicating with the target.
 ///
-/// For ARM select `Swd` and for RISC-V select `Jtag`.
+/// For ARM select `Swd` or `Jtag`, for RISC-V select `Jtag`.
 #[derive(Copy, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum WireProtocol {
     /// Serial Wire Debug is ARMs proprietary standard for communicating with ARM cores.
@@ -52,8 +54,8 @@ pub enum WireProtocol {
 impl fmt::Display for WireProtocol {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            WireProtocol::Swd => write!(f, "SWD"),
-            WireProtocol::Jtag => write!(f, "JTAG"),
+            WireProtocol::Swd => f.write_str("SWD"),
+            WireProtocol::Jtag => f.write_str("JTAG"),
         }
     }
 }
@@ -92,9 +94,69 @@ impl fmt::Display for BatchCommand {
                 write!(f, "Read(port={port:?}, addr={addr})")
             }
             BatchCommand::Write(port, addr, data) => {
-                write!(f, "Write(port={port:?}, addr={addr}, data=0x{data:08x}")
+                write!(f, "Write(port={port:?}, addr={addr}, data={data:#010x})")
             }
         }
+    }
+}
+
+/// Marker trait for all probe errors.
+pub trait ProbeError: std::error::Error + Send + Sync + AnyShim {}
+
+impl std::error::Error for Box<dyn ProbeError> {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.as_ref().source()
+    }
+}
+
+/// Implementation detail to allow downcasting of probe errors.
+#[doc(hidden)]
+pub trait AnyShim: std::any::Any {
+    fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
+}
+
+impl<T> AnyShim for T
+where
+    T: ProbeError,
+{
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// A probe-specific error.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct BoxedProbeError(#[from] Box<dyn ProbeError>);
+
+impl BoxedProbeError {
+    /// Returns true if the underlying error is of type `T`.
+    pub fn is<T: ProbeError>(&self) -> bool {
+        self.0.as_ref().as_any().is::<T>()
+    }
+
+    /// Attempts to downcast the error to a specific error type.
+    pub fn downcast_ref<T: ProbeError>(&self) -> Option<&T> {
+        self.0.as_ref().as_any().downcast_ref()
+    }
+
+    /// Attempts to downcast the error to a specific error type.
+    pub fn downcast_mut<T: ProbeError>(&mut self) -> Option<&mut T> {
+        self.0.as_mut().as_any_mut().downcast_mut()
+    }
+}
+
+impl<T> From<T> for BoxedProbeError
+where
+    T: ProbeError,
+{
+    fn from(e: T) -> Self {
+        BoxedProbeError(Box::new(e))
     }
 }
 
@@ -104,16 +166,8 @@ pub enum DebugProbeError {
     /// USB Communication Error
     Usb(#[source] std::io::Error),
 
-    /// The firmware on the probe is outdated, and not supported by probe-rs.
-    ///
-    /// This error is especially prominent with ST-Links.
-    /// You can use their official updater utility to update your probe firmware.
-    // TODO: Shouldn't this be probe-specific?
-    #[ignore_extra_doc_attributes]
-    ProbeFirmwareOutdated,
-
     /// An error which is specific to the debug probe in use occurred.
-    ProbeSpecific(#[source] Box<dyn std::error::Error + Send + Sync>),
+    ProbeSpecific(#[source] BoxedProbeError),
 
     /// The debug probe could not be created.
     ProbeCouldNotBeCreated(#[from] ProbeCreationError),
@@ -133,10 +187,7 @@ pub enum DebugProbeError {
         interface_name: &'static str,
     },
 
-    /// An error occurred while working with the registry.
-    Registry(#[from] RegistryError),
-
-    /// The probe does not support he requested speed setting ({0} kHz).
+    /// The probe does not support the requested speed setting ({0} kHz).
     UnsupportedSpeed(u32),
 
     /// You need to be attached to the target to perform this action.
@@ -176,12 +227,21 @@ pub enum DebugProbeError {
         command_name: &'static str,
     },
 
-    /// Some other error occurred.
+    /// An error occurred handling the JTAG scan chain.
+    JtagScanChain(#[from] ScanChainError),
+
+    /// Some other error occurred
     #[display("{0}")]
-    Other(#[from] anyhow::Error),
+    Other(String),
 
     /// A timeout occurred during probe operation.
     Timeout,
+}
+
+impl<T: ProbeError> From<T> for DebugProbeError {
+    fn from(e: T) -> Self {
+        Self::ProbeSpecific(BoxedProbeError::from(e))
+    }
 }
 
 /// An error during probe creation occurred.
@@ -193,17 +253,28 @@ pub enum ProbeCreationError {
     /// The selected debug probe was not found.
     /// This can be due to permissions.
     NotFound,
+
     /// The selected USB device could not be opened.
     CouldNotOpen,
+
     /// An HID API occurred.
     HidApi(#[from] hidapi::HidError),
+
     /// A USB error occurred.
     Usb(#[source] std::io::Error),
+
     /// An error specific with the selected probe occurred.
-    ProbeSpecific(#[source] Box<dyn std::error::Error + Send + Sync>),
+    ProbeSpecific(#[source] BoxedProbeError),
+
     /// Something else happened.
     #[display("{0}")]
     Other(&'static str),
+}
+
+impl<T: ProbeError> From<T> for ProbeCreationError {
+    fn from(e: T) -> Self {
+        Self::ProbeSpecific(BoxedProbeError::from(e))
+    }
 }
 
 /// The Probe struct is a generic wrapper over the different
@@ -311,13 +382,14 @@ impl Probe {
             |e| match e {
                 Error::Arm(ArmError::Timeout)
                 | Error::Riscv(RiscvError::Timeout)
-                | Error::Xtensa(XtensaError::Timeout) => Error::Other(anyhow::anyhow!(
+                | Error::Xtensa(XtensaError::Timeout) => Error::Other(
                     "Timeout while attaching to target under reset. \
                     This can happen if the target is not responding to the reset sequence. \
                     Ensure the chip's reset pin is connected, or try attaching without reset \
                     (`connectUnderReset = false` for DAP Clients, or remove `connect-under-reset` \
                         option from CLI options.)."
-                )),
+                        .to_string(),
+                ),
                 e => e,
             },
         )
@@ -702,9 +774,9 @@ pub trait DebugProbe: Send + fmt::Debug {
 
     /// Try to get a J-Link interface from the debug probe.
     fn try_into_jlink(&mut self) -> Result<&mut jlink::JLink, DebugProbeError> {
-        Err(DebugProbeError::Other(anyhow::anyhow!(
-            "This probe does not support J-Link functionality."
-        )))
+        Err(DebugProbeError::Other(
+            "This probe is not a J-Link.".to_string(),
+        ))
     }
 }
 
@@ -792,7 +864,7 @@ impl DebugProbeInfo {
     ///
     /// The exact contents of the string are unstable, this is intended for human consumption only.
     pub fn probe_type(&self) -> String {
-        format!("{}", self.probe_factory)
+        self.probe_factory.to_string()
     }
 }
 
@@ -812,6 +884,9 @@ pub enum DebugProbeSelectorParseError {
 /// string has to be in the format "VID:PID:SERIALNUMBER",
 /// where the serial number is optional, and VID and PID are
 /// parsed as hexadecimal numbers.
+///
+/// If SERIALNUMBER exists (i.e. the selector contains a second color) and is empty,
+/// probe-rs will select probes that have no serial number, or where the serial number is empty.
 ///
 /// ## Example:
 ///
@@ -836,12 +911,29 @@ pub struct DebugProbeSelector {
 
 impl DebugProbeSelector {
     pub(crate) fn matches(&self, info: &DeviceInfo) -> bool {
-        info.vendor_id() == self.vendor_id
-            && info.product_id() == self.product_id
+        self.match_probe_selector(info.vendor_id(), info.product_id(), info.serial_number())
+    }
+
+    fn match_probe_selector(
+        &self,
+        vendor_id: u16,
+        product_id: u16,
+        serial_number: Option<&str>,
+    ) -> bool {
+        vendor_id == self.vendor_id
+            && product_id == self.product_id
             && self
                 .serial_number
                 .as_ref()
-                .map(|s| info.serial_number() == Some(s))
+                .map(|s| {
+                    if let Some(serial_number) = serial_number {
+                        serial_number == s
+                    } else {
+                        // Match probes without serial number when the
+                        // selector has a third, empty part ("VID:PID:")
+                        s.is_empty()
+                    }
+                })
                 .unwrap_or(true)
     }
 }
@@ -936,7 +1028,7 @@ pub trait JTAGAccess: DebugProbe {
     ///
     /// This function emulates a read by performing a write with all zeros to the DR.
     fn read_register(&mut self, address: u32, len: u32) -> Result<Vec<u8>, DebugProbeError> {
-        let data = vec![0u8; (len as usize + 7) / 8];
+        let data = vec![0u8; len.div_ceil(8) as usize];
 
         self.write_register(address, &data, len)
     }
@@ -962,6 +1054,11 @@ pub trait JTAGAccess: DebugProbe {
         len: u32,
     ) -> Result<Vec<u8>, DebugProbeError>;
 
+    /// Shift a value into the DR JTAG register
+    ///
+    /// The data shifted out of the DR register will be returned.
+    fn write_dr(&mut self, data: &[u8], len: u32) -> Result<Vec<u8>, DebugProbeError>;
+
     /// Executes a sequence of JTAG commands.
     fn write_register_batch(
         &mut self,
@@ -971,13 +1068,28 @@ pub trait JTAGAccess: DebugProbe {
         let mut results = DeferredResultSet::new();
 
         for (idx, write) in writes.iter() {
-            match self
-                .write_register(write.address, &write.data, write.len)
-                .map_err(crate::Error::Probe)
-                .and_then(|response| (write.transform)(write, response))
-            {
-                Ok(res) => results.push(idx, res),
-                Err(e) => return Err(BatchExecutionError::new(e, results)),
+            match write {
+                JtagCommand::WriteRegister(write) => {
+                    match self
+                        .write_register(write.address, &write.data, write.len)
+                        .map_err(crate::Error::Probe)
+                        .and_then(|response| (write.transform)(write, response))
+                    {
+                        Ok(res) => results.push(idx, res),
+                        Err(e) => return Err(BatchExecutionError::new(e, results)),
+                    }
+                }
+
+                JtagCommand::ShiftDr(write) => {
+                    match self
+                        .write_dr(&write.data, write.len)
+                        .map_err(crate::Error::Probe)
+                        .and_then(|response| (write.transform)(write, response))
+                    {
+                        Ok(res) => results.push(idx, res),
+                        Err(e) => return Err(BatchExecutionError::new(e, results)),
+                    }
+                }
             }
         }
 
@@ -999,6 +1111,40 @@ pub struct JtagWriteCommand {
 
     /// A function to transform the raw response into a [`CommandResult`]
     pub transform: fn(&JtagWriteCommand, Vec<u8>) -> Result<CommandResult, crate::Error>,
+}
+
+/// A low-level JTAG register write command.
+#[derive(Debug, Clone)]
+pub struct ShiftDrCommand {
+    /// The data to be written to DR.
+    pub data: Vec<u8>,
+
+    /// The number of bits in `data`
+    pub len: u32,
+
+    /// A function to transform the raw response into a [`CommandResult`]
+    pub transform: fn(&ShiftDrCommand, Vec<u8>) -> Result<CommandResult, crate::Error>,
+}
+
+/// A low-level JTAG command.
+#[derive(Debug, Clone)]
+pub enum JtagCommand {
+    /// Write a register.
+    WriteRegister(JtagWriteCommand),
+    /// Shift a value into the DR register.
+    ShiftDr(ShiftDrCommand),
+}
+
+impl From<JtagWriteCommand> for JtagCommand {
+    fn from(cmd: JtagWriteCommand) -> Self {
+        JtagCommand::WriteRegister(cmd)
+    }
+}
+
+impl From<ShiftDrCommand> for JtagCommand {
+    fn from(cmd: ShiftDrCommand) -> Self {
+        JtagCommand::ShiftDr(cmd)
+    }
 }
 
 /// Represents a Jtag Tap within the chain.
@@ -1027,7 +1173,6 @@ impl ChainParams {
 
         let mut found = false;
         for (index, tap) in chain.iter().enumerate() {
-            tracing::info!("{:?}", tap);
             if index == selected {
                 params.irlen = tap.irlen;
                 found = true;
@@ -1123,7 +1268,7 @@ impl CommandResult {
 /// can be used to skip capturing or processing certain parts of the response.
 #[derive(Default, Debug)]
 pub struct JtagCommandQueue {
-    commands: Vec<(DeferredResultIndex, JtagWriteCommand)>,
+    commands: Vec<(DeferredResultIndex, JtagCommand)>,
 }
 
 impl JtagCommandQueue {
@@ -1135,9 +1280,9 @@ impl JtagCommandQueue {
     /// Schedules a command for later execution.
     ///
     /// Returns a token value that can be used to retrieve the result of the command.
-    pub fn schedule(&mut self, command: JtagWriteCommand) -> DeferredResultIndex {
+    pub fn schedule(&mut self, command: impl Into<JtagCommand>) -> DeferredResultIndex {
         let index = DeferredResultIndex::new();
-        self.commands.push((index.clone(), command));
+        self.commands.push((index.clone(), command.into()));
         index
     }
 
@@ -1151,7 +1296,7 @@ impl JtagCommandQueue {
         self.commands.is_empty()
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &(DeferredResultIndex, JtagWriteCommand)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &(DeferredResultIndex, JtagCommand)> {
         self.commands.iter()
     }
 
@@ -1293,5 +1438,33 @@ mod test {
             selector.serial_number,
             Some("DC:DA:0C:D3:FE:D8".to_string())
         );
+    }
+
+    #[test]
+    fn missing_serial_is_none() {
+        let selector: DebugProbeSelector = "303a:1001".try_into().unwrap();
+
+        assert_eq!(selector.vendor_id, 0x303a);
+        assert_eq!(selector.product_id, 0x1001);
+        assert_eq!(selector.serial_number, None);
+
+        let matches = selector.match_probe_selector(0x303a, 0x1001, None);
+        let matches_with_serial = selector.match_probe_selector(0x303a, 0x1001, Some("serial"));
+        assert!(matches);
+        assert!(matches_with_serial);
+    }
+
+    #[test]
+    fn empty_serial_is_some() {
+        let selector: DebugProbeSelector = "303a:1001:".try_into().unwrap();
+
+        assert_eq!(selector.vendor_id, 0x303a);
+        assert_eq!(selector.product_id, 0x1001);
+        assert_eq!(selector.serial_number, Some(String::new()));
+
+        let matches = selector.match_probe_selector(0x303a, 0x1001, None);
+        let matches_with_serial = selector.match_probe_selector(0x303a, 0x1001, Some("serial"));
+        assert!(matches);
+        assert!(!matches_with_serial);
     }
 }

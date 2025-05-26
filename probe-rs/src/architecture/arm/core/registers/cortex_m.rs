@@ -1,10 +1,11 @@
 //! General Cortex-M registers present on all Cortex-M cores.
 
+use std::sync::LazyLock;
+
 use crate::{
     core::{RegisterDataType, RegisterRole, UnwindRule},
     CoreRegister, CoreRegisters, RegisterId,
 };
-use once_cell::sync::Lazy;
 
 pub(crate) const PC: CoreRegister = CoreRegister {
     roles: &[RegisterRole::Core("R15"), RegisterRole::ProgramCounter],
@@ -27,14 +28,16 @@ pub(crate) const SP: CoreRegister = CoreRegister {
     unwind_rule: UnwindRule::Preserve,
 };
 
-pub(crate) const RA: CoreRegister = CoreRegister {
+/// Return address (RA) register.
+pub const RA: CoreRegister = CoreRegister {
     roles: &[RegisterRole::Core("R14"), RegisterRole::ReturnAddress],
     id: RegisterId(14),
     data_type: RegisterDataType::UnsignedInteger(32),
     unwind_rule: UnwindRule::SpecialRule,
 };
 
-pub(crate) const XPSR: CoreRegister = CoreRegister {
+/// xPSR register, the combination of APSR, IPSR, and EPSR.
+pub const XPSR: CoreRegister = CoreRegister {
     roles: &[RegisterRole::Core("XPSR"), RegisterRole::ProcessorStatus],
     id: RegisterId(0b1_0000),
     data_type: RegisterDataType::UnsignedInteger(32),
@@ -42,7 +45,7 @@ pub(crate) const XPSR: CoreRegister = CoreRegister {
 };
 
 /// All off the Cortex-M core registers.
-pub(crate) static CORTEX_M_CORE_REGISTERS: Lazy<CoreRegisters> = Lazy::new(|| {
+pub static CORTEX_M_CORE_REGISTERS: LazyLock<CoreRegisters> = LazyLock::new(|| {
     CoreRegisters::new(
         ARM32_COMMON_REGS_SET
             .iter()
@@ -51,7 +54,8 @@ pub(crate) static CORTEX_M_CORE_REGISTERS: Lazy<CoreRegisters> = Lazy::new(|| {
     )
 });
 
-pub(crate) static CORTEX_M_WITH_FP_CORE_REGISTERS: Lazy<CoreRegisters> = Lazy::new(|| {
+/// Cortex-M registers with floating point extension.
+pub static CORTEX_M_WITH_FP_CORE_REGISTERS: LazyLock<CoreRegisters> = LazyLock::new(|| {
     CoreRegisters::new(
         ARM32_COMMON_REGS_SET
             .iter()
@@ -61,7 +65,7 @@ pub(crate) static CORTEX_M_WITH_FP_CORE_REGISTERS: Lazy<CoreRegisters> = Lazy::n
     )
 });
 
-pub(super) static ARM32_COMMON_REGS_SET: &[CoreRegister] = &[
+pub(crate) static ARM32_COMMON_REGS_SET: &[CoreRegister] = &[
     CoreRegister {
         roles: &[
             RegisterRole::Core("R0"),

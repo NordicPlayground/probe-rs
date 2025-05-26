@@ -1,9 +1,15 @@
 //! The different ARM core implementations with all constants and custom handling.
 
+use serde::{Deserialize, Serialize};
+
 use crate::{
     core::{BreakpointCause, RegisterValue},
-    memory_mapped_bitfield_register, CoreStatus, HaltReason, SemihostingCommand,
+    memory_mapped_bitfield_register,
+    semihosting::SemihostingCommand,
+    CoreStatus, HaltReason,
 };
+
+use super::memory::ArmMemoryInterface;
 
 pub mod armv6m;
 pub mod armv7a;
@@ -14,9 +20,8 @@ pub mod armv8m;
 pub(crate) mod armv7a_debug_regs;
 pub(crate) mod armv8a_debug_regs;
 pub(crate) mod cortex_m;
-pub(crate) mod exception_handling;
 pub(crate) mod instructions;
-pub(crate) mod registers;
+pub mod registers;
 
 /// Core information data which is downloaded from the target, represents its state and can be used for debugging.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -204,10 +209,7 @@ impl CortexAState {
 /// It will reflect the core status to the probe/memory interface if
 /// the status has changed, and will replace `current_status` with
 /// `new_status`.
-pub fn update_core_status<
-    P: super::memory::adi_v5_memory_interface::ArmProbe + ?Sized,
-    T: core::ops::DerefMut<Target = P>,
->(
+pub fn update_core_status<P: ArmMemoryInterface + ?Sized, T: core::ops::DerefMut<Target = P>>(
     probe: &mut T,
     current_status: &mut CoreStatus,
     new_status: CoreStatus,

@@ -7,8 +7,8 @@ use super::{
     },
     registers::{
         aarch32::{
-            AARCH32_CORE_REGSISTERS, AARCH32_WITH_FP_16_CORE_REGSISTERS,
-            AARCH32_WITH_FP_32_CORE_REGSISTERS,
+            AARCH32_CORE_REGISTERS, AARCH32_WITH_FP_16_CORE_REGISTERS,
+            AARCH32_WITH_FP_32_CORE_REGISTERS,
         },
         cortex_m::{FP, PC, RA, SP},
     },
@@ -16,8 +16,8 @@ use super::{
 };
 use crate::{
     architecture::arm::{
-        core::armv7a_debug_regs::*, memory::adi_v5_memory_interface::ArmProbe,
-        sequences::ArmDebugSequence, ArmError,
+        core::armv7a_debug_regs::*, memory::ArmMemoryInterface, sequences::ArmDebugSequence,
+        ArmError,
     },
     core::{CoreRegisters, MemoryMappedRegister, RegisterId, RegisterValue},
     error::Error,
@@ -25,7 +25,6 @@ use crate::{
     Architecture, CoreInformation, CoreInterface, CoreRegister, CoreStatus, CoreType,
     InstructionSet, MemoryInterface,
 };
-use anyhow::Result;
 use std::{
     mem::size_of,
     sync::Arc,
@@ -50,7 +49,7 @@ pub enum Armv7aError {
 
 /// Interface for interacting with an ARMv7-A core
 pub struct Armv7a<'probe> {
-    memory: Box<dyn ArmProbe + 'probe>,
+    memory: Box<dyn ArmMemoryInterface + 'probe>,
 
     state: &'probe mut CortexAState,
 
@@ -65,7 +64,7 @@ pub struct Armv7a<'probe> {
 
 impl<'probe> Armv7a<'probe> {
     pub(crate) fn new(
-        mut memory: Box<dyn ArmProbe + 'probe>,
+        mut memory: Box<dyn ArmMemoryInterface + 'probe>,
         state: &'probe mut CortexAState,
         base_address: u64,
         sequence: Arc<dyn ArmDebugSequence>,
@@ -132,9 +131,9 @@ impl<'probe> Armv7a<'probe> {
     }
 
     /// Execute an instruction
-    fn execute_instruction(&mut self, instruction: u32) -> Result<Dbgdscr, Error> {
+    fn execute_instruction(&mut self, instruction: u32) -> Result<Dbgdscr, ArmError> {
         if !self.state.current_state.is_halted() {
-            return Err(Error::Arm(ArmError::CoreNotHalted));
+            return Err(ArmError::CoreNotHalted);
         }
 
         // Enable ITR if needed
@@ -168,7 +167,7 @@ impl<'probe> Armv7a<'probe> {
 
             self.memory.write_word_32(address, dbgdrcr.into())?;
 
-            return Err(Error::Arm(Armv7aError::DataAbort.into()));
+            return Err(Armv7aError::DataAbort.into());
         }
 
         Ok(dbgdscr)
@@ -276,7 +275,7 @@ impl<'probe> Armv7a<'probe> {
         self.prepare_for_clobber(0)
     }
 
-    /// Save r<n> if needed before it gets clobbered by instruction execution
+    /// Save `r<n>` if needed before it gets clobbered by instruction execution
     fn prepare_for_clobber(&mut self, reg: usize) -> Result<(), Error> {
         if self.state.register_cache[reg].is_none() {
             // cache reg since we're going to clobber it
@@ -300,21 +299,20 @@ impl<'probe> Armv7a<'probe> {
     }
 }
 
-impl<'probe> CoreInterface for Armv7a<'probe> {
+impl CoreInterface for Armv7a<'_> {
     fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), Error> {
         // Wait until halted state is active again.
         let start = Instant::now();
 
-        let address = Dbgdscr::get_mmio_address_from_base(self.base_address)?;
-
-        while start.elapsed() < timeout {
-            let dbgdscr = Dbgdscr(self.memory.read_word_32(address)?);
-            if dbgdscr.halted() {
-                return Ok(());
+        while !self.core_halted()? {
+            if start.elapsed() >= timeout {
+                return Err(Error::Arm(ArmError::Timeout));
             }
+            // Wait a bit before polling again.
             std::thread::sleep(Duration::from_millis(1));
         }
-        Err(Error::Arm(ArmError::Timeout))
+
+        Ok(())
     }
 
     fn core_halted(&mut self) -> Result<bool, Error> {
@@ -725,9 +723,9 @@ impl<'probe> CoreInterface for Armv7a<'probe> {
 
     fn registers(&self) -> &'static CoreRegisters {
         match self.state.fp_reg_count {
-            16 => &AARCH32_WITH_FP_16_CORE_REGSISTERS,
-            32 => &AARCH32_WITH_FP_32_CORE_REGSISTERS,
-            _ => &AARCH32_CORE_REGSISTERS,
+            16 => &AARCH32_WITH_FP_16_CORE_REGISTERS,
+            32 => &AARCH32_WITH_FP_32_CORE_REGISTERS,
+            _ => &AARCH32_CORE_REGISTERS,
         }
     }
 
@@ -769,11 +767,11 @@ impl<'probe> CoreInterface for Armv7a<'probe> {
         }
     }
 
-    fn fpu_support(&mut self) -> Result<bool, crate::error::Error> {
+    fn fpu_support(&mut self) -> Result<bool, Error> {
         Ok(self.state.fp_reg_count != 0)
     }
 
-    fn floating_point_register_count(&mut self) -> Result<usize, crate::error::Error> {
+    fn floating_point_register_count(&mut self) -> Result<usize, Error> {
         Ok(self.state.fp_reg_count)
     }
 
@@ -815,12 +813,12 @@ impl<'probe> CoreInterface for Armv7a<'probe> {
     }
 }
 
-impl<'probe> MemoryInterface for Armv7a<'probe> {
+impl MemoryInterface for Armv7a<'_> {
     fn supports_native_64bit_access(&mut self) -> bool {
         false
     }
 
-    fn read_word_64(&mut self, address: u64) -> Result<u64, crate::error::Error> {
+    fn read_word_64(&mut self, address: u64) -> Result<u64, Error> {
         let mut ret: u64 = self.read_word_32(address)? as u64;
         ret |= (self.read_word_32(address + 4)? as u64) << 32;
 
@@ -867,7 +865,7 @@ impl<'probe> MemoryInterface for Armv7a<'probe> {
         Ok(data.to_le_bytes()[byte_offset as usize])
     }
 
-    fn read_64(&mut self, address: u64, data: &mut [u64]) -> Result<(), crate::error::Error> {
+    fn read_64(&mut self, address: u64, data: &mut [u64]) -> Result<(), Error> {
         for (i, word) in data.iter_mut().enumerate() {
             *word = self.read_word_64(address + ((i as u64) * 8))?;
         }
@@ -899,7 +897,7 @@ impl<'probe> MemoryInterface for Armv7a<'probe> {
         Ok(())
     }
 
-    fn write_word_64(&mut self, address: u64, data: u64) -> Result<(), crate::error::Error> {
+    fn write_word_64(&mut self, address: u64, data: u64) -> Result<(), Error> {
         let data_low = data as u32;
         let data_high = (data >> 32) as u32;
 
@@ -951,7 +949,7 @@ impl<'probe> MemoryInterface for Armv7a<'probe> {
         self.write_word_32(word_start, word)
     }
 
-    fn write_64(&mut self, address: u64, data: &[u64]) -> Result<(), crate::error::Error> {
+    fn write_64(&mut self, address: u64, data: &[u64]) -> Result<(), Error> {
         for (i, word) in data.iter().enumerate() {
             self.write_word_64(address + ((i as u64) * 8), *word)?;
         }
@@ -997,7 +995,8 @@ impl<'probe> MemoryInterface for Armv7a<'probe> {
 mod test {
     use crate::{
         architecture::arm::{
-            ap::MemoryAp, communication_interface::SwdSequence, sequences::DefaultArmSequence,
+            ap::memory_ap::MemoryAp, communication_interface::SwdSequence,
+            sequences::DefaultArmSequence,
         },
         probe::DebugProbeError,
     };
@@ -1044,9 +1043,7 @@ mod test {
         }
     }
 
-    impl ArmProbe for MockProbe {
-        fn update_core_status(&mut self, _: CoreStatus) {}
-
+    impl MemoryInterface<ArmError> for MockProbe {
         fn read_8(&mut self, _address: u64, _data: &mut [u8]) -> Result<(), ArmError> {
             todo!()
         }
@@ -1140,9 +1137,25 @@ mod test {
             todo!()
         }
 
+        fn read_64(&mut self, _address: u64, _data: &mut [u64]) -> Result<(), ArmError> {
+            todo!()
+        }
+
+        fn write_64(&mut self, _address: u64, _data: &[u64]) -> Result<(), ArmError> {
+            todo!()
+        }
+
         fn supports_8bit_transfers(&self) -> Result<bool, ArmError> {
             Ok(false)
         }
+
+        fn supports_native_64bit_access(&mut self) -> bool {
+            false
+        }
+    }
+
+    impl ArmMemoryInterface for MockProbe {
+        fn update_core_status(&mut self, _: CoreStatus) {}
 
         fn get_arm_communication_interface(
             &mut self,
@@ -1157,20 +1170,26 @@ mod test {
             })
         }
 
-        fn read_64(&mut self, _address: u64, _data: &mut [u64]) -> Result<(), ArmError> {
+        fn try_as_parts(
+            &mut self,
+        ) -> Result<
+            (
+                &mut crate::architecture::arm::ArmCommunicationInterface<
+                    crate::architecture::arm::communication_interface::Initialized,
+                >,
+                &mut MemoryAp,
+            ),
+            DebugProbeError,
+        > {
             todo!()
         }
 
-        fn write_64(&mut self, _address: u64, _data: &[u64]) -> Result<(), ArmError> {
+        fn ap(&mut self) -> &mut MemoryAp {
             todo!()
         }
 
-        fn ap(&mut self) -> MemoryAp {
+        fn base_address(&mut self) -> Result<u64, ArmError> {
             todo!()
-        }
-
-        fn supports_native_64bit_access(&mut self) -> bool {
-            false
         }
     }
 

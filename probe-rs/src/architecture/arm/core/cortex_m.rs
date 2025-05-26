@@ -1,13 +1,22 @@
 //! Common functions and data types for Cortex-M core variants
 
 use crate::{
-    architecture::arm::{memory::adi_v5_memory_interface::ArmProbe, ArmError},
+    architecture::arm::{memory::ArmMemoryInterface, ArmError},
     core::RegisterId,
     memory_mapped_bitfield_register,
     semihosting::decode_semihosting_syscall,
-    CoreInterface, Error, MemoryMappedRegister, SemihostingCommand,
+    semihosting::SemihostingCommand,
+    CoreInterface, Error, MemoryMappedRegister,
 };
 use std::time::{Duration, Instant};
+
+memory_mapped_bitfield_register! {
+    pub struct Vtor(u32);
+    0xE000_ED08, "VTOR",
+    impl From;
+    /// This fields holds bits [31:7] of the table offset.
+    pub tbloff, set_tbloff: 31, 7;
+}
 
 memory_mapped_bitfield_register! {
     pub struct Dhcsr(u32);
@@ -31,7 +40,7 @@ impl Dhcsr {
     /// C1.6.3 Debug Halting Control and Status Register, DHCSR:
     /// Debug key:
     /// Software must write 0xA05F to this field to enable write accesses to bits
-    /// [15:0], otherwise the processor ignores the write access.
+    /// `[15:0]`, otherwise the processor ignores the write access.
     pub fn enable_write(&mut self) {
         self.0 &= !(0xffff << 16);
         self.0 |= 0xa05f << 16;
@@ -143,7 +152,10 @@ impl IdPfr1 {
     }
 }
 
-pub(crate) fn read_core_reg(memory: &mut dyn ArmProbe, addr: RegisterId) -> Result<u32, Error> {
+pub(crate) fn read_core_reg(
+    memory: &mut dyn ArmMemoryInterface,
+    addr: RegisterId,
+) -> Result<u32, ArmError> {
     // Write the DCRSR value to select the register we want to read.
     let mut dcrsr_val = Dcrsr(0);
     dcrsr_val.set_regwnr(false); // Perform a read.
@@ -159,10 +171,10 @@ pub(crate) fn read_core_reg(memory: &mut dyn ArmProbe, addr: RegisterId) -> Resu
 }
 
 pub(crate) fn write_core_reg(
-    memory: &mut dyn ArmProbe,
+    memory: &mut dyn ArmMemoryInterface,
     addr: RegisterId,
     value: u32,
-) -> Result<(), Error> {
+) -> Result<(), ArmError> {
     memory.write_word_32(Dcrdr::get_mmio_address(), value)?;
 
     // write the DCRSR value to select the register we want to write.
@@ -184,8 +196,6 @@ pub(crate) fn check_for_semihosting(
     cached_command: Option<SemihostingCommand>,
     core: &mut dyn CoreInterface,
 ) -> Result<Option<SemihostingCommand>, Error> {
-    let pc: u32 = core.read_core_reg(core.program_counter().id)?.try_into()?;
-
     // The Arm Semihosting Specification, specificies that the instruction
     // "BKPT 0xAB" (encoded as 0xBEAB) triggers a semihosting call.
     // <https://github.com/ARM-software/abi-aa/blob/main/semihosting/semihosting.rst#the-semihosting-interface>
@@ -193,6 +203,13 @@ pub(crate) fn check_for_semihosting(
         // instruction encoded as little endian
         0xAB, 0xBE,
     ];
+
+    // We only want to decode the semihosting command once, since answering it might change some of the registers
+    if let Some(command) = cached_command {
+        return Ok(Some(command));
+    }
+
+    let pc: u32 = core.read_core_reg(core.program_counter().id)?.try_into()?;
 
     let mut actual_instruction = [0u8; 2];
     core.read_8(pc as u64, &mut actual_instruction)?;
@@ -204,26 +221,17 @@ pub(crate) fn check_for_semihosting(
         actual_instruction[0]
     );
 
-    if TRAP_INSTRUCTION == actual_instruction {
-        // BKPT 0xAB -> we are semihosting
-
-        Ok(Some(match cached_command {
-            None => {
-                // We only want to decode the semihosting command once, since answering it might change some of the registers
-                let r0: u32 = core.read_core_reg(RegisterId(0))?.try_into()?;
-                let r1: u32 = core.read_core_reg(RegisterId(1))?.try_into()?;
-                tracing::info!("Semihosting found pc={pc:#x} r0={r0:#x} r1={r1:#x}");
-                decode_semihosting_syscall(core, r0, r1)?
-            }
-            Some(cached_command) => cached_command,
-        }))
+    let command = if TRAP_INSTRUCTION == actual_instruction {
+        Some(decode_semihosting_syscall(core)?)
     } else {
-        Ok(None)
-    }
+        None
+    };
+
+    Ok(command)
 }
 
 fn wait_for_core_register_transfer(
-    memory: &mut dyn ArmProbe,
+    memory: &mut dyn ArmMemoryInterface,
     timeout: Duration,
 ) -> Result<(), ArmError> {
     // now we have to poll the dhcsr register, until the dhcsr.s_regrdy bit is set

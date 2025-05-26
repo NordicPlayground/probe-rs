@@ -16,10 +16,11 @@ publish.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-probe-rs = { path = "../probe-rs", version = "0.24.0", default-features = false, package = "probe-rs-nordic" }
-probe-rs-target = { path = "../probe-rs-target", version = "0.24.0", default-features = false, package = "probe-rs-target-nordic" }
-cmsis-pack = { version = "0.7.0" }
-goblin = { version = "0.8.2", default-features = false, features = [
+probe-rs = { path = "../probe-rs", version = "0.26.0", package = "probe-rs-nordic" }
+probe-rs-target = { path = "../probe-rs-target", version = "0.26.0", default-features = false, package = "probe-rs-target-nordic" }
+cmsis-pack = "0.7.0"
+jep106 = "0.2.8"
+goblin = { version = "0.9.0", default-features = false, features = [
     "elf32",
     "elf64",
     "endian_fd",
@@ -27,12 +28,18 @@ goblin = { version = "0.8.2", default-features = false, features = [
     "std",
 ] }
 scroll = "0.12.0"
-serde_yaml = "^0.9.34"
+serde_yaml = "0.9"
 log = "0.4.21"
-zip = "1.0.0"
+zip = { version = "2.0.0", default-features = false, features = [
+    "deflate64",
+    "deflate",
+    "lzma",
+    "time",
+    "zstd",
+] }
 clap = { version = "4.5", features = ["derive"] }
 colored = "2"
-anyhow = "1.0.82"
+anyhow.workspace = true
 reqwest = { version = "0.12.4", features = [
     "json",
     "rustls-tls",
@@ -44,9 +51,11 @@ tracing-subscriber = { version = "0.3.18", features = [
     "tracing-log",
 ] }
 xshell = { version = "0.2", default-features = false }
-parse_int = { version = "0.6.0" }
+parse_int = "0.6"
 
 [dev-dependencies]
-assert_cmd = "2.0.14"
-predicates = "3.1.0"
-assert_fs = "1.1.1"
+tempfile = "3.0"
+insta = { version = "1.38", default-features = false, features = ["yaml"] }
+
+[lints]
+workspace = true

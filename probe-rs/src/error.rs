@@ -2,6 +2,8 @@ use crate::architecture::arm::ArmError;
 use crate::architecture::riscv::communication_interface::RiscvError;
 use crate::architecture::xtensa::communication_interface::XtensaError;
 use crate::config::RegistryError;
+use crate::core::memory_mapped_registers::RegisterAddressOutOfBounds;
+use crate::memory::{InvalidDataLengthError, MemoryNotAlignedError};
 use crate::probe::DebugProbeError;
 
 /// The overarching error type which contains all possible errors as variants.
@@ -15,7 +17,9 @@ pub enum Error {
     Riscv(#[source] RiscvError),
     /// An Xtensa specific error occurred.
     Xtensa(#[source] XtensaError),
-    /// Core {0} does not exist
+    /// Core {0} is not enabled.
+    CoreDisabled(usize),
+    /// Core {0} does not exist.
     CoreNotFound(usize),
     /// Unable to load specification for chip
     ChipNotFound(#[from] RegistryError),
@@ -29,6 +33,10 @@ pub enum Error {
     GenericCoreError(String),
     /// Errors accessing core register: {0}
     Register(String),
+
+    /// Error calculating the address of a register
+    #[error(transparent)]
+    RegisterAddressOutOfBounds(#[from] RegisterAddressOutOfBounds),
     /// The {0} capability has not yet been implemented for this architecture.
     ///
     /// Because of the large varieties of supported architectures, it is not always possible for
@@ -38,16 +46,29 @@ pub enum Error {
     NotImplemented(&'static str),
     /// Some uncategorized error occurred.
     #[display("{0}")]
-    Other(#[from] anyhow::Error),
+    Other(String),
     /// A timeout occurred.
     // TODO: Errors below should be core specific
     Timeout,
-    /// Memory access to address {address:#X?} was not aligned to {alignment} bytes.
-    MemoryNotAligned {
-        /// The address of the register.
-        address: u64,
-        /// The required alignment in bytes (address increments).
-        alignment: usize,
+    /// Memory access to address {0.address:#X?} was not aligned to {0.alignment} bytes.
+    #[error(transparent)]
+    MemoryNotAligned(#[from] MemoryNotAlignedError),
+    /// The data buffer had an invalid length.
+    #[error(transparent)]
+    InvalidDataLength(#[from] InvalidDataLengthError),
+    /// Failed to write CPU register {register}.
+    WriteRegister {
+        /// The name of the register that was tried to be written.
+        register: String,
+        /// The source error of this error.
+        source: Box<dyn std::error::Error + 'static + Send + Sync>,
+    },
+    /// Failed to read CPU register {register}.
+    ReadRegister {
+        /// The name of the register that was tried to be read.
+        register: String,
+        /// The source error of this error.
+        source: Box<dyn std::error::Error + 'static + Send + Sync>,
     },
 }
 
@@ -55,9 +76,8 @@ impl From<ArmError> for Error {
     fn from(value: ArmError) -> Self {
         match value {
             ArmError::Timeout => Error::Timeout,
-            ArmError::MemoryNotAligned { address, alignment } => {
-                Error::MemoryNotAligned { address, alignment }
-            }
+            ArmError::MemoryNotAligned(e) => Error::MemoryNotAligned(e),
+            ArmError::InvalidDataLength(e) => Error::InvalidDataLength(e),
             other => Error::Arm(other),
         }
     }

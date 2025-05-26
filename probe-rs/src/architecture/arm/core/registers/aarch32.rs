@@ -1,11 +1,15 @@
+//! Register definitions for AARCH32.
+
+use std::sync::LazyLock;
+
 use super::cortex_m::ARM32_COMMON_REGS_SET;
 use crate::{
     core::{RegisterDataType, RegisterRole, UnwindRule},
     CoreRegister, CoreRegisters, RegisterId,
 };
-use once_cell::sync::Lazy;
 
-pub(crate) static AARCH32_CORE_REGSISTERS: Lazy<CoreRegisters> = Lazy::new(|| {
+/// Core registers used in the AARCH32 instruction set.
+pub static AARCH32_CORE_REGISTERS: LazyLock<CoreRegisters> = LazyLock::new(|| {
     CoreRegisters::new(
         ARM32_COMMON_REGS_SET
             .iter()
@@ -14,7 +18,8 @@ pub(crate) static AARCH32_CORE_REGSISTERS: Lazy<CoreRegisters> = Lazy::new(|| {
     )
 });
 
-pub(crate) static AARCH32_WITH_FP_16_CORE_REGSISTERS: Lazy<CoreRegisters> = Lazy::new(|| {
+/// AArch32 registers with FP16 floating point extension
+pub static AARCH32_WITH_FP_16_CORE_REGISTERS: LazyLock<CoreRegisters> = LazyLock::new(|| {
     CoreRegisters::new(
         ARM32_COMMON_REGS_SET
             .iter()
@@ -24,7 +29,8 @@ pub(crate) static AARCH32_WITH_FP_16_CORE_REGSISTERS: Lazy<CoreRegisters> = Lazy
     )
 });
 
-pub(crate) static AARCH32_WITH_FP_32_CORE_REGSISTERS: Lazy<CoreRegisters> = Lazy::new(|| {
+/// AArch32 registers with FP16 and FP32 floating point extension
+pub static AARCH32_WITH_FP_32_CORE_REGISTERS: LazyLock<CoreRegisters> = LazyLock::new(|| {
     CoreRegisters::new(
         ARM32_COMMON_REGS_SET
             .iter()

@@ -1,9 +1,11 @@
 //! CoreSight ROM table parsing and handling.
 
-use super::adi_v5_memory_interface::ArmProbe;
-use super::AccessPortError;
-use crate::architecture::arm::ArmError;
-use crate::architecture::arm::{ap::MemoryAp, communication_interface::ArmProbeInterface};
+use crate::architecture::arm::{
+    ap::{AccessPortError, AccessPortType},
+    communication_interface::ArmProbeInterface,
+    memory::ArmMemoryInterface,
+    ArmError, FullyQualifiedApAddress,
+};
 
 /// An error to report any errors that are romtable discovery specific.
 #[derive(thiserror::Error, Debug, docsplay::Display)]
@@ -36,12 +38,12 @@ impl RomTableError {
 /// A lazy romtable reader that is used to create an iterator over all romtable entries.
 struct RomTableReader<'probe: 'memory, 'memory> {
     base_address: u64,
-    memory: &'memory mut (dyn ArmProbe + 'probe),
+    memory: &'memory mut (dyn ArmMemoryInterface + 'probe),
 }
 
 /// Iterates over a ROM table non recursively.
 impl<'probe: 'memory, 'memory> RomTableReader<'probe, 'memory> {
-    fn new(memory: &'memory mut (dyn ArmProbe + 'probe), base_address: u64) -> Self {
+    fn new(memory: &'memory mut (dyn ArmMemoryInterface + 'probe), base_address: u64) -> Self {
         RomTableReader {
             base_address,
             memory,
@@ -72,12 +74,12 @@ impl<'probe: 'memory, 'memory: 'reader, 'reader> RomTableIterator<'probe, 'memor
     }
 }
 
-impl<'probe, 'memory, 'reader> Iterator for RomTableIterator<'probe, 'memory, 'reader> {
+impl Iterator for RomTableIterator<'_, '_, '_> {
     type Item = Result<RomTableEntryRaw, RomTableError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         let component_address = self.rom_table_reader.base_address + self.offset;
-        tracing::info!("Reading rom table entry at {:08x}", component_address);
+        tracing::debug!("Reading rom table entry at {:#010x}", component_address);
 
         self.offset += 4;
 
@@ -93,14 +95,14 @@ impl<'probe, 'memory, 'reader> Iterator for RomTableIterator<'probe, 'memory, 'r
 
         // End of entries is marked by an all zero entry
         if entry_data[0] == 0 {
-            tracing::info!("Entry consists of all zeroes, stopping.");
+            tracing::debug!("Entry consists of all zeroes, stopping.");
             return None;
         }
 
         let entry_data =
             RomTableEntryRaw::new(self.rom_table_reader.base_address as u32, entry_data[0]);
 
-        tracing::info!("ROM Table Entry: {:#x?}", entry_data);
+        tracing::debug!("ROM Table Entry: {:#x?}", entry_data);
         Some(Ok(entry_data))
     }
 }
@@ -118,11 +120,14 @@ impl RomTable {
     ///
     /// This does not check whether the data actually signalizes
     /// to contain a ROM table but assumes this was checked beforehand.
-    fn try_parse(memory: &mut dyn ArmProbe, base_address: u64) -> Result<RomTable, RomTableError> {
+    fn try_parse(
+        memory: &mut dyn ArmMemoryInterface,
+        base_address: u64,
+    ) -> Result<RomTable, RomTableError> {
         // This is required for the collect down below.
         let mut entries = vec![];
 
-        tracing::info!("Parsing romtable at base_address {:x?}", base_address);
+        tracing::debug!("Parsing romtable at base_address {:#010x}", base_address);
 
         // Read all the raw romtable entries and flatten them.
 
@@ -136,7 +141,7 @@ impl RomTable {
         for raw_entry in reader.into_iter() {
             let entry_base_addr = raw_entry.component_address();
 
-            tracing::info!("Parsing entry at {:x?}", entry_base_addr);
+            tracing::debug!("Parsing entry at {:#010x}", entry_base_addr);
 
             if raw_entry.entry_present {
                 let component = Component::try_parse(memory, u64::from(entry_base_addr))?;
@@ -146,7 +151,7 @@ impl RomTable {
                     format: raw_entry.format,
                     power_domain_id: raw_entry.power_domain_id,
                     power_domain_valid: raw_entry.power_domain_valid,
-                    component: CoresightComponent::new(component, memory.ap()),
+                    component: CoresightComponent::new(component, memory.ap().ap_address().clone()),
                 });
             }
         }
@@ -190,7 +195,7 @@ struct RomTableEntryRaw {
 impl RomTableEntryRaw {
     /// Create a new RomTableEntryRaw from raw ROM table entry data in memory.
     fn new(base_address: u32, raw: u32) -> Self {
-        tracing::debug!("Parsing raw rom table entry: 0x{:05x}", raw);
+        tracing::debug!("Parsing raw rom table entry: {:#07x}", raw);
 
         let address_offset = ((raw >> 12) & 0xf_ff_ff) as i32;
         let power_domain_id = ((raw >> 4) & 0xf) as u8;
@@ -265,12 +270,12 @@ impl ComponentId {
 /// This reader is meant for internal use only.
 pub struct ComponentInformationReader<'probe: 'memory, 'memory> {
     base_address: u64,
-    memory: &'memory mut (dyn ArmProbe + 'probe),
+    memory: &'memory mut (dyn ArmMemoryInterface + 'probe),
 }
 
 impl<'probe: 'memory, 'memory> ComponentInformationReader<'probe, 'memory> {
     /// Creates a new `ComponentInformationReader` which can be used to extract the data from a component information table in memory.
-    pub fn new(base_address: u64, memory: &'memory mut (dyn ArmProbe + 'probe)) -> Self {
+    pub fn new(base_address: u64, memory: &'memory mut (dyn ArmMemoryInterface + 'probe)) -> Self {
         ComponentInformationReader {
             base_address,
             memory,
@@ -420,7 +425,7 @@ pub enum Component {
     /// For detailed information about Class 0x1 ROM Tables, see _Chapter D3 Class 0x1 ROM Tables_.
     Class1RomTable(ComponentId, RomTable),
     /// CoreSight component. For general information about CoreSight components, see the CoreSight Architecture Specification.
-
+    ///
     /// A CoreSight component can be a Class 0x9 ROM Table, which can be identified from the DEVARCH.ARCHID having the value 0x0AF7. See also _ROM Table Types on page D2-237_. For detailed information about Class 0x9 ROM Tables, see _Chapter D4 Class 0x9 ROM Tables_.
     CoresightComponent(ComponentId),
     /// Peripheral Test Block.
@@ -434,24 +439,24 @@ pub enum Component {
 impl Component {
     /// Tries to parse a CoreSight component table.
     pub fn try_parse<'probe: 'memory, 'memory>(
-        memory: &'memory mut (dyn ArmProbe + 'probe),
+        memory: &'memory mut (dyn ArmMemoryInterface + 'probe),
         baseaddr: u64,
     ) -> Result<Component, RomTableError> {
-        tracing::info!("\tReading component data at: {:08x}", baseaddr);
+        tracing::debug!("\tReading component data at: {:#010x}", baseaddr);
 
         let component_id = ComponentInformationReader::new(baseaddr, memory).read_all()?;
 
         // Determine the component class to find out what component we are dealing with.
-        tracing::info!("\tComponent class: {:x?}", component_id.class);
+        tracing::debug!("\tComponent class: {:x?}", component_id.class);
 
         // Determine the peripheral id to find out what peripheral we are dealing with.
-        tracing::info!(
+        tracing::debug!(
             "\tComponent peripheral id: {:x?}",
             component_id.peripheral_id
         );
 
         if let Some(info) = component_id.peripheral_id.determine_part() {
-            tracing::info!("\tComponent is known: {}", info);
+            tracing::debug!("\tComponent is known: {}", info);
         }
 
         let class = match component_id.class {
@@ -493,13 +498,16 @@ pub struct CoresightComponent {
     /// The component variant that is accessible.
     pub component: Component,
     /// The probe access point where the component can be accessed from
-    pub ap: MemoryAp,
+    pub ap_address: FullyQualifiedApAddress,
 }
 
 impl CoresightComponent {
     /// Construct a coresight component found on the provided access point.
-    pub fn new(component: Component, ap: MemoryAp) -> Self {
-        Self { component, ap }
+    pub fn new(component: Component, ap: FullyQualifiedApAddress) -> Self {
+        Self {
+            component,
+            ap_address: ap,
+        }
     }
 
     /// Reads a register of the component pointed to by this romtable entry.
@@ -508,7 +516,7 @@ impl CoresightComponent {
         interface: &mut dyn ArmProbeInterface,
         offset: u32,
     ) -> Result<u32, ArmError> {
-        let mut memory = interface.memory_interface(self.ap)?;
+        let mut memory = interface.memory_interface(&self.ap_address)?;
         let value = memory.read_word_32(self.component.id().component_address + offset as u64)?;
         Ok(value)
     }
@@ -520,7 +528,7 @@ impl CoresightComponent {
         offset: u32,
         value: u32,
     ) -> Result<(), ArmError> {
-        let mut memory = interface.memory_interface(self.ap)?;
+        let mut memory = interface.memory_interface(&self.ap_address)?;
         memory.write_word_32(self.component.id().component_address + offset as u64, value)?;
         Ok(())
     }

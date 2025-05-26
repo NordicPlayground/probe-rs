@@ -12,25 +12,27 @@ use probe_rs_target::CoreType;
 
 use crate::{
     architecture::arm::{
+        core::registers::cortex_m::{PC, SP},
         dp::{DLPIDR, TARGETID},
         ArmProbeInterface,
     },
     probe::{DebugProbeError, WireProtocol},
-    MemoryMappedRegister,
+    MemoryInterface, MemoryMappedRegister, Session,
 };
 
 use super::{
-    ap::{AccessPortError, MemoryAp},
+    ap::AccessPortError,
     armv6m::Demcr,
     communication_interface::{DapProbe, Initialized},
     component::{TraceFunnel, TraceSink},
-    core::cortex_m::Dhcsr,
+    core::cortex_m::{Dhcsr, Vtor},
     dp::{Abort, Ctrl, DebugPortError, DpAccess, Select, DPIDR},
     memory::{
-        adi_v5_memory_interface::ArmProbe,
         romtable::{CoresightComponent, PeripheralType},
+        ArmMemoryInterface,
     },
-    ArmCommunicationInterface, ArmError, DpAddress, Pins, PortType, Register,
+    ArmCommunicationInterface, ArmError, DpAddress, FullyQualifiedApAddress, Pins, PortType,
+    Register,
 };
 
 /// An error occurred when executing an ARM debug sequence
@@ -70,7 +72,7 @@ impl ArmDebugSequence for DefaultArmSequence {}
 
 /// ResetCatchSet for Cortex-A devices
 fn armv7a_reset_catch_set(
-    core: &mut dyn ArmProbe,
+    core: &mut dyn ArmMemoryInterface,
     debug_base: Option<u64>,
 ) -> Result<(), ArmError> {
     use crate::architecture::arm::core::armv7a_debug_regs::Dbgprcr;
@@ -90,7 +92,7 @@ fn armv7a_reset_catch_set(
 
 /// ResetCatchClear for Cortex-A devices
 fn armv7a_reset_catch_clear(
-    core: &mut dyn ArmProbe,
+    core: &mut dyn ArmMemoryInterface,
     debug_base: Option<u64>,
 ) -> Result<(), ArmError> {
     use crate::architecture::arm::core::armv7a_debug_regs::Dbgprcr;
@@ -109,7 +111,7 @@ fn armv7a_reset_catch_clear(
 }
 
 fn armv7a_reset_system(
-    interface: &mut dyn ArmProbe,
+    interface: &mut dyn ArmMemoryInterface,
     debug_base: Option<u64>,
 ) -> Result<(), ArmError> {
     use crate::architecture::arm::core::armv7a_debug_regs::{Dbgprcr, Dbgprsr};
@@ -139,7 +141,10 @@ fn armv7a_reset_system(
 }
 
 /// DebugCoreStart for v7 Cortex-A devices
-fn armv7a_core_start(core: &mut dyn ArmProbe, debug_base: Option<u64>) -> Result<(), ArmError> {
+fn armv7a_core_start(
+    core: &mut dyn ArmMemoryInterface,
+    debug_base: Option<u64>,
+) -> Result<(), ArmError> {
     use crate::architecture::arm::core::armv7a_debug_regs::{Dbgdsccr, Dbgdscr, Dbgdsmcr, Dbglar};
 
     let debug_base =
@@ -178,7 +183,7 @@ fn armv7a_core_start(core: &mut dyn ArmProbe, debug_base: Option<u64>) -> Result
 
 /// ResetCatchSet for ARMv8-A devices
 fn armv8a_reset_catch_set(
-    core: &mut dyn ArmProbe,
+    core: &mut dyn ArmMemoryInterface,
     debug_base: Option<u64>,
 ) -> Result<(), ArmError> {
     use crate::architecture::arm::core::armv8a_debug_regs::Edecr;
@@ -198,7 +203,7 @@ fn armv8a_reset_catch_set(
 
 /// ResetCatchClear for ARMv8-a devices
 fn armv8a_reset_catch_clear(
-    core: &mut dyn ArmProbe,
+    core: &mut dyn ArmMemoryInterface,
     debug_base: Option<u64>,
 ) -> Result<(), ArmError> {
     use crate::architecture::arm::core::armv8a_debug_regs::Edecr;
@@ -217,7 +222,7 @@ fn armv8a_reset_catch_clear(
 }
 
 fn armv8a_reset_system(
-    interface: &mut dyn ArmProbe,
+    interface: &mut dyn ArmMemoryInterface,
     debug_base: Option<u64>,
 ) -> Result<(), ArmError> {
     use crate::architecture::arm::core::armv8a_debug_regs::{Edprcr, Edprsr};
@@ -248,7 +253,7 @@ fn armv8a_reset_system(
 
 /// DebugCoreStart for v8 Cortex-A devices
 fn armv8a_core_start(
-    core: &mut dyn ArmProbe,
+    core: &mut dyn ArmMemoryInterface,
     debug_base: Option<u64>,
     cti_base: Option<u64>,
 ) -> Result<(), ArmError> {
@@ -316,7 +321,7 @@ fn armv8a_core_start(
 }
 
 /// DebugCoreStart for Cortex-M devices
-fn cortex_m_core_start(core: &mut dyn ArmProbe) -> Result<(), ArmError> {
+pub(crate) fn cortex_m_core_start(core: &mut dyn ArmMemoryInterface) -> Result<(), ArmError> {
     use crate::architecture::arm::core::armv7m::Dhcsr;
 
     let current_dhcsr = Dhcsr(core.read_word_32(Dhcsr::get_mmio_address())?);
@@ -338,7 +343,7 @@ fn cortex_m_core_start(core: &mut dyn ArmProbe) -> Result<(), ArmError> {
 }
 
 /// ResetCatchClear for Cortex-M devices
-fn cortex_m_reset_catch_clear(core: &mut dyn ArmProbe) -> Result<(), ArmError> {
+fn cortex_m_reset_catch_clear(core: &mut dyn ArmMemoryInterface) -> Result<(), ArmError> {
     use crate::architecture::arm::core::armv7m::Demcr;
 
     // Clear reset catch bit
@@ -350,7 +355,7 @@ fn cortex_m_reset_catch_clear(core: &mut dyn ArmProbe) -> Result<(), ArmError> {
 }
 
 /// ResetCatchSet for Cortex-M devices
-fn cortex_m_reset_catch_set(core: &mut dyn ArmProbe) -> Result<(), ArmError> {
+fn cortex_m_reset_catch_set(core: &mut dyn ArmMemoryInterface) -> Result<(), ArmError> {
     use crate::architecture::arm::core::armv7m::{Demcr, Dhcsr};
 
     // Request halt after reset
@@ -366,7 +371,7 @@ fn cortex_m_reset_catch_set(core: &mut dyn ArmProbe) -> Result<(), ArmError> {
 }
 
 /// ResetSystem for Cortex-M devices
-fn cortex_m_reset_system(interface: &mut dyn ArmProbe) -> Result<(), ArmError> {
+fn cortex_m_reset_system(interface: &mut dyn ArmMemoryInterface) -> Result<(), ArmError> {
     use crate::architecture::arm::core::armv7m::{Aircr, Dhcsr};
 
     let mut aircr = Aircr(0);
@@ -390,8 +395,6 @@ fn cortex_m_reset_system(interface: &mut dyn ArmProbe) -> Result<(), ArmError> {
             }) => continue,
             Err(err) => return Err(err),
         };
-
-        // Wait until the S_RESET_ST bit is cleared on a read
         if !dhcsr.s_reset_st() {
             return Ok(());
         }
@@ -421,27 +424,38 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
     /// De-Assert a system-wide reset line nRST. This is based on the
     /// `ResetHardwareDeassert` function from the [ARM SVD Debug Description].
     ///
+    /// This function is called _once_ when using the "connect under reset" functionality,
+    /// after a connection to each core has been established, and it is expected that after
+    /// this function is called, the target will start executing code.
+    ///
+    /// The provided `default_ap` is the default access port that should be used for memory
+    /// access, if the sequence requires it.
+    ///
     /// [ARM SVD Debug Description]: https://open-cmsis-pack.github.io/Open-CMSIS-Pack-Spec/main/html/debug_description.html#resetHardwareDeassert
     #[doc(alias = "ResetHardwareDeassert")]
-    fn reset_hardware_deassert(&self, memory: &mut dyn ArmProbe) -> Result<(), ArmError> {
+    fn reset_hardware_deassert(
+        &self,
+        probe: &mut dyn ArmProbeInterface,
+        _default_ap: &FullyQualifiedApAddress,
+    ) -> Result<(), ArmError> {
         let mut n_reset = Pins(0);
         n_reset.set_nreset(true);
         let n_reset = n_reset.0 as u32;
 
-        let can_read_pins = memory.swj_pins(n_reset, n_reset, 0)? != 0xffff_ffff;
+        let can_read_pins = probe.swj_pins(n_reset, n_reset, 0)? != 0xffff_ffff;
 
         if can_read_pins {
             let start = Instant::now();
 
-            while start.elapsed() < Duration::from_secs(1) {
-                if Pins(memory.swj_pins(n_reset, n_reset, 0)? as u8).nreset() {
+            loop {
+                if Pins(probe.swj_pins(n_reset, n_reset, 0)? as u8).nreset() {
                     return Ok(());
                 }
-
+                if start.elapsed() >= Duration::from_secs(1) {
+                    return Err(ArmError::Timeout);
+                }
                 thread::sleep(Duration::from_millis(100));
             }
-
-            Err(ArmError::Timeout)
         } else {
             thread::sleep(Duration::from_millis(100));
             Ok(())
@@ -468,10 +482,11 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
         // TODO: Handle this differently for ST-Link?
         tracing::debug!("Setting up debug port {dp:x?}");
 
-        // Assume that multidrop means SWD version 2 and dormant state.
-        // There could also be chips with SWD version 2 that don't use multidrop,
-        // so this will have to be changed in the future.
-        let has_dormant = matches!(dp, DpAddress::Multidrop(_));
+        // A multidrop address implies SWD version 2 and dormant state.  In
+        // cases where SWD version 2 is used but not multidrop addressing
+        // (ex. ADIv6), the SWD version 1 sequence is attempted before trying
+        // the SWD version 2 sequence.
+        let mut has_dormant = matches!(dp, DpAddress::Multidrop(_));
 
         fn alert_sequence(interface: &mut dyn DapProbe) -> Result<(), ArmError> {
             tracing::trace!("Sending Selection Alert sequence");
@@ -492,7 +507,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
 
         let mut result = Ok(());
         const NUM_RETRIES: usize = 5;
-        for _ in 0..NUM_RETRIES {
+        for retry in 0..NUM_RETRIES {
             // Ensure current debug interface is in reset state.
             swd_line_reset(interface, 0)?;
 
@@ -559,6 +574,12 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
                 // Successful connection, we can stop retrying.
                 break;
             }
+
+            // If two retries have failed, try using SWD version 2 wake from
+            // dormant sequence.
+            if retry >= 1 {
+                has_dormant = true;
+            }
         }
 
         result
@@ -599,17 +620,14 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
             interface.write_dp_register(dp, ctrl)?;
 
             let start = Instant::now();
-            let mut timeout = true;
-            while start.elapsed() < Duration::from_secs(1) {
+            loop {
                 let ctrl = interface.read_dp_register::<Ctrl>(dp)?;
                 if ctrl.csyspwrupack() && ctrl.cdbgpwrupack() {
-                    timeout = false;
                     break;
                 }
-            }
-
-            if timeout {
-                return Err(ArmError::Timeout);
+                if start.elapsed() >= Duration::from_secs(1) {
+                    return Err(ArmError::Timeout);
+                }
             }
 
             // TODO: Handle JTAG Specific part
@@ -644,7 +662,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
     fn debug_core_start(
         &self,
         interface: &mut dyn ArmProbeInterface,
-        core_ap: MemoryAp,
+        core_ap: &FullyQualifiedApAddress,
         core_type: CoreType,
         debug_base: Option<u64>,
         cti_base: Option<u64>,
@@ -670,7 +688,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
     #[doc(alias = "ResetCatchSet")]
     fn reset_catch_set(
         &self,
-        core: &mut dyn ArmProbe,
+        core: &mut dyn ArmMemoryInterface,
         core_type: CoreType,
         debug_base: Option<u64>,
     ) -> Result<(), ArmError> {
@@ -693,7 +711,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
     #[doc(alias = "ResetCatchClear")]
     fn reset_catch_clear(
         &self,
-        core: &mut dyn ArmProbe,
+        core: &mut dyn ArmMemoryInterface,
         core_type: CoreType,
         debug_base: Option<u64>,
     ) -> Result<(), ArmError> {
@@ -746,7 +764,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
     #[doc(alias = "ResetSystem")]
     fn reset_system(
         &self,
-        interface: &mut dyn ArmProbe,
+        interface: &mut dyn ArmMemoryInterface,
         core_type: CoreType,
         debug_base: Option<u64>,
     ) -> Result<(), ArmError> {
@@ -771,7 +789,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
     fn debug_device_unlock(
         &self,
         _interface: &mut dyn ArmProbeInterface,
-        _default_ap: MemoryAp,
+        _default_ap: &FullyQualifiedApAddress,
         _permissions: &crate::Permissions,
     ) -> Result<(), ArmError> {
         tracing::debug!("debug_device_unlock - empty by default");
@@ -783,7 +801,10 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
     ///
     /// [ARM SVD Debug Description]: https://open-cmsis-pack.github.io/Open-CMSIS-Pack-Spec/main/html/debug_description.htmll#recoverSupportStart
     #[doc(alias = "RecoverSupportStart")]
-    fn recover_support_start(&self, _interface: &mut dyn ArmProbe) -> Result<(), ArmError> {
+    fn recover_support_start(
+        &self,
+        _interface: &mut dyn ArmMemoryInterface,
+    ) -> Result<(), ArmError> {
         // Empty by default
         Ok(())
     }
@@ -796,7 +817,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
     #[doc(alias = "DebugCoreStop")]
     fn debug_core_stop(
         &self,
-        interface: &mut dyn ArmProbe,
+        interface: &mut dyn ArmMemoryInterface,
         core_type: CoreType,
     ) -> Result<(), ArmError> {
         if core_type.is_cortex_m() {
@@ -830,15 +851,17 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
 
         // Wait for the power domains to go away
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(1) {
+        loop {
             let ctrl = interface.raw_read_register(PortType::DebugPort, Ctrl::ADDRESS)?;
             let ctrl = Ctrl(ctrl);
             if !(ctrl.csyspwrupack() || ctrl.cdbgpwrupack()) {
                 return Ok(());
             }
-        }
 
-        Err(ArmError::Timeout)
+            if start.elapsed() >= Duration::from_secs(1) {
+                return Err(ArmError::Timeout);
+            }
+        }
     }
 
     /// Perform a SWD line reset or enter the JTAG Run-Test-Idle state, and then try to connect to a debug port.
@@ -859,6 +882,9 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
         interface: &mut dyn DapProbe,
         dp: DpAddress,
     ) -> Result<(), ArmError> {
+        // Time guard for DPIDR register to become readable after line reset
+        const RESET_RECOVERY_TIMEOUT: Duration = Duration::from_secs(1);
+        const RESET_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(5);
         match interface.active_protocol() {
             Some(WireProtocol::Jtag) => {
                 tracing::debug!("JTAG: No special sequence needed to connect to debug port");
@@ -876,32 +902,49 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
         }
 
         // Enter SWD Line Reset State, afterwards at least 2 idle cycles (SWDIO/TMS Low)
+        // Guard gives time for the target to recover
+        let guard = Instant::now();
+        let dpidr = loop {
+            swd_line_reset(interface, 3)?;
 
-        swd_line_reset(interface, 3)?;
+            // If multidrop is used, we now have to select a target
+            if let DpAddress::Multidrop(targetsel) = dp {
+                // Deselect other debug ports first?
 
-        // If multidrop is used, we now have to select a target
-        if let DpAddress::Multidrop(targetsel) = dp {
-            // Deselect other debug ports first?
+                tracing::debug!("Writing targetsel {:#x}", targetsel);
+                // TARGETSEL write.
+                // The TARGETSEL write is not ACKed by design. We can't use a normal register write
+                // because many probes don't even send the data phase when NAK.
+                let parity = targetsel.count_ones() % 2;
+                let data = (parity as u64) << 45 | (targetsel as u64) << 13 | 0x1f99;
 
-            tracing::debug!("Writing targetsel {:#x}", targetsel);
-            // TARGETSEL write.
-            // The TARGETSEL write is not ACKed by design. We can't use a normal register write
-            // because many probes don't even send the data phase when NAK.
-            let parity = targetsel.count_ones() % 2;
-            let data = (parity as u64) << 45 | (targetsel as u64) << 13 | 0x1f99;
+                // Should this be a swd_sequence?
+                // Technically we shouldn't drive SWDIO all the time when sending a request.
+                interface
+                    .swj_sequence(6 * 8, data)
+                    .map_err(DebugProbeError::from)?;
+            }
 
-            // Should this be a swd_sequence?
-            // Technically we shouldn't drive SWDIO all the time when sending a request.
-            interface
-                .swj_sequence(6 * 8, data)
-                .map_err(DebugProbeError::from)?;
-        }
+            tracing::debug!("Reading DPIDR to enable SWD interface");
 
-        tracing::debug!("Reading DPIDR to enable SWD interface");
+            // Read DPIDR to enable SWD interface.
+            match interface.raw_read_register(PortType::DebugPort, DPIDR::ADDRESS) {
+                Ok(x) => break x,
+                Err(z) => {
+                    if guard.elapsed() > RESET_RECOVERY_TIMEOUT {
+                        tracing::debug!("DPIDR didn't become readable within guard time");
+                        return Err(z);
+                    }
+                }
+            }
 
-        // Read DPIDR to enable SWD interface.
-        let dpidr = interface.raw_read_register(PortType::DebugPort, DPIDR::ADDRESS)?;
-
+            // Be nice - checking at intervals is plenty
+            std::thread::sleep(RESET_RECOVERY_RETRY_INTERVAL);
+        };
+        tracing::debug!(
+            "DPIDR became readable after {}ms",
+            guard.elapsed().as_millis()
+        );
         tracing::debug!("Result of DPIDR read: {:#x?}", dpidr);
 
         tracing::debug!("Clearing errors using ABORT register");
@@ -941,9 +984,9 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
                     target_id,
                     dlpidr
                 );
-                return Err(ArmError::Other(anyhow::anyhow!(
-                    "Target ID and DLPIDR do not match, failed to select debug port"
-                )));
+                return Err(ArmError::Other(
+                    "Target ID and DLPIDR do not match, failed to select debug port".to_string(),
+                ));
             }
         }
 
@@ -966,9 +1009,63 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
         Ok(())
     }
 
+    /// This ARM sequence is called if an image was flashed to RAM directly.
+    /// It will perform the necessary preparation to run that image.
+    ///
+    /// Core should be already `reset_and_halt`ed right before this call.
+    fn prepare_running_on_ram(
+        &self,
+        vector_table_addr: u64,
+        session: &mut Session,
+    ) -> Result<(), crate::Error> {
+        tracing::info!("Performing RAM flash start");
+        const SP_MAIN_OFFSET: usize = 0;
+        const RESET_VECTOR_OFFSET: usize = 1;
+
+        if session.list_cores().len() > 1 {
+            return Err(crate::Error::NotImplemented(
+                "multi-core ram flash start not implemented yet",
+            ));
+        }
+
+        let (_, core_type) = session.list_cores()[0];
+        match core_type {
+            CoreType::Armv7a | CoreType::Armv8a => {
+                return Err(crate::Error::NotImplemented(
+                    "RAM flash not implemented for ARM Cortex-A",
+                ));
+            }
+            CoreType::Armv6m | CoreType::Armv7m | CoreType::Armv7em | CoreType::Armv8m => {
+                tracing::debug!("RAM flash start for Cortex-M single core target");
+                let mut core = session.core(0)?;
+                // See ARMv7-M Architecture Reference Manual Chapter B1.5 for more details. The
+                // process appears to be the same for the other Cortex-M architectures as well.
+                let vtor = Vtor(vector_table_addr as u32);
+                let mut first_table_entries: [u32; 2] = [0; 2];
+                core.read_32(vector_table_addr, &mut first_table_entries)?;
+                // The first entry in the vector table is the SP_main reset value of the main stack pointer,
+                // so we set the stack pointer register accordingly.
+                core.write_core_reg(SP.id, first_table_entries[SP_MAIN_OFFSET])?;
+                // The second entry in the vector table is the reset vector. It needs to be loaded
+                // as the initial PC value on a reset, see chapter A2.3.1 of the reference manual.
+                core.write_core_reg(PC.id, first_table_entries[RESET_VECTOR_OFFSET])?;
+                core.write_word_32(Vtor::get_mmio_address(), vtor.0)?;
+            }
+            _ => {
+                panic!("Logic inconsistency bug - non ARM core type passed {core_type:?}");
+            }
+        }
+        Ok(())
+    }
+
     /// Return the Debug Erase Sequence implementation if it exists
     fn debug_erase_sequence(&self) -> Option<Arc<dyn DebugEraseSequence>> {
         None
+    }
+
+    /// Return the APs that are expected to work.
+    fn allowed_access_ports(&self) -> Vec<u8> {
+        (0..=255).collect()
     }
 }
 
@@ -984,10 +1081,7 @@ pub trait DebugEraseSequence: Send + Sync {
     /// Some devices require the probe to be disconnected and re-attached after a successful chip-erase in
     /// which case it will return `Error::Probe(DebugProbeError::ReAttachRequired)`
     fn erase_all(&self, _interface: &mut dyn ArmProbeInterface) -> Result<(), ArmError> {
-        Err(DebugProbeError::NotImplemented {
-            function_name: "erase_all",
-        }
-        .into())
+        Err(ArmError::NotImplemented("erase_all"))
     }
 }
 

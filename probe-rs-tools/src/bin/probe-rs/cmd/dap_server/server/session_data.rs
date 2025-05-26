@@ -13,12 +13,9 @@ use crate::{
     util::common_options::OperationError,
 };
 use anyhow::{anyhow, Result};
-use probe_rs::{
-    config::TargetSelector,
-    debug::{debug_info::DebugInfo, DebugRegisters, SourceLocation},
-    exception_handler_for_core,
-    probe::list::Lister,
-    CoreStatus, Session,
+use probe_rs::{config::TargetSelector, probe::list::Lister, CoreStatus, Session};
+use probe_rs_debug::{
+    debug_info::DebugInfo, exception_handler_for_core, DebugRegisters, SourceLocation,
 };
 use std::env::set_current_dir;
 use time::UtcOffset;
@@ -142,6 +139,7 @@ impl SessionData {
                 stack_frames: vec![],
                 breakpoints: vec![],
                 rtt_connection: None,
+                rtt_client: None,
             })
         }
 
@@ -232,11 +230,10 @@ impl SessionData {
             };
 
             // We need to poll the core to determine its status.
-            let current_core_status = target_core.poll_core(debug_adapter).map_err(|error| {
-                let error = DebuggerError::ProbeRs(error);
-                let _ = debug_adapter.show_error_message(&error);
-                error
-            })?;
+            let current_core_status =
+                target_core.poll_core(debug_adapter).inspect_err(|error| {
+                    let _ = debug_adapter.show_error_message(error);
+                })?;
 
             // If appropriate, check for RTT data.
             if core_config.rtt_config.enabled {
@@ -247,23 +244,20 @@ impl SessionData {
                     }
                 } else if debug_adapter.configuration_is_done() {
                     // We have not yet reached the point in the target application where the RTT buffers are initialized,
-                    // so, provided we have processed the MSDAP request for "configurationDone" , we should check again.
-                    {
-                        #[allow(clippy::unwrap_used)]
-                        match target_core.attach_to_rtt(
-                            debug_adapter,
-                            core_config.program_binary.as_ref().unwrap(),
-                            &core_config.rtt_config,
-                            timestamp_offset,
-                        ) {
-                            Ok(_) => {
-                                // Nothing else to do.
-                            }
-                            Err(error) => {
-                                debug_adapter
-                                    .show_error_message(&DebuggerError::Other(error))
-                                    .ok();
-                            }
+                    // so, provided we have processed the MSDAP request for "configurationDone", we should check again.
+
+                    #[allow(clippy::unwrap_used)]
+                    match target_core.attach_to_rtt(
+                        debug_adapter,
+                        core_config.program_binary.as_ref().unwrap(),
+                        &core_config.rtt_config,
+                        timestamp_offset,
+                    ) {
+                        Ok(_) => {} // Nothing else to do.
+                        Err(error) => {
+                            debug_adapter
+                                .show_error_message(&DebuggerError::Other(error))
+                                .ok();
                         }
                     }
                 }

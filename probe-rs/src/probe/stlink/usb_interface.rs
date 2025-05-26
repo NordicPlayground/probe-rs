@@ -1,13 +1,12 @@
 use nusb::DeviceInfo;
-use once_cell::sync::Lazy;
-use std::time::Duration;
+use std::{sync::LazyLock, time::Duration};
 
 use crate::probe::{stlink::StlinkError, usb_util::InterfaceExt};
 
 use std::collections::HashMap;
 
 use super::tools::{is_stlink_device, read_serial_number};
-use crate::probe::{DebugProbeError, DebugProbeSelector, ProbeCreationError};
+use crate::probe::{DebugProbeSelector, ProbeCreationError};
 
 /// The USB Command packet size.
 const CMD_LEN: usize = 16;
@@ -18,17 +17,18 @@ pub const USB_VID: u16 = 0x0483;
 pub const TIMEOUT: Duration = Duration::from_millis(1000);
 
 /// Map of USB PID to firmware version name and device endpoints.
-pub static USB_PID_EP_MAP: Lazy<HashMap<u16, StLinkInfo>> = Lazy::new(|| {
+pub static USB_PID_EP_MAP: LazyLock<HashMap<u16, StLinkInfo>> = LazyLock::new(|| {
     let mut m = HashMap::new();
-    m.insert(0x3748, StLinkInfo::new("V2", 0x3748, 0x02, 0x81, 0x83));
-    m.insert(0x374b, StLinkInfo::new("V2-1", 0x374b, 0x01, 0x81, 0x82));
-    m.insert(0x374a, StLinkInfo::new("V2-1", 0x374a, 0x01, 0x81, 0x82)); // Audio
-    m.insert(0x3742, StLinkInfo::new("V2-1", 0x3742, 0x01, 0x81, 0x82)); // No MSD
-    m.insert(0x3752, StLinkInfo::new("V2-1", 0x3752, 0x01, 0x81, 0x82)); // Unproven
-    m.insert(0x374e, StLinkInfo::new("V3", 0x374e, 0x01, 0x81, 0x82));
-    m.insert(0x374f, StLinkInfo::new("V3", 0x374f, 0x01, 0x81, 0x82)); // Bridge
-    m.insert(0x3753, StLinkInfo::new("V3", 0x3753, 0x01, 0x81, 0x82)); // 2VCP
-    m.insert(0x3754, StLinkInfo::new("V3", 0x3754, 0x01, 0x81, 0x82)); // Without mass storage
+    m.insert(0x3748, StLinkInfo::new("V2", 0x02, 0x81, 0x83));
+    m.insert(0x374b, StLinkInfo::new("V2-1", 0x01, 0x81, 0x82));
+    m.insert(0x374a, StLinkInfo::new("V2-1", 0x01, 0x81, 0x82)); // Audio
+    m.insert(0x3742, StLinkInfo::new("V2-1", 0x01, 0x81, 0x82)); // No MSD
+    m.insert(0x3752, StLinkInfo::new("V2-1", 0x01, 0x81, 0x82)); // Unproven
+    m.insert(0x374e, StLinkInfo::new("V3", 0x01, 0x81, 0x82));
+    m.insert(0x374f, StLinkInfo::new("V3", 0x01, 0x81, 0x82)); // Bridge
+    m.insert(0x3753, StLinkInfo::new("V3", 0x01, 0x81, 0x82)); // 2VCP
+    m.insert(0x3754, StLinkInfo::new("V3", 0x01, 0x81, 0x82)); // Without mass storage
+    m.insert(0x3757, StLinkInfo::new("V3PWR", 0x01, 0x81, 0x82)); // Bridge and power, no MSD
     m
 });
 
@@ -36,23 +36,15 @@ pub static USB_PID_EP_MAP: Lazy<HashMap<u16, StLinkInfo>> = Lazy::new(|| {
 #[derive(Clone, Debug, Default)]
 pub struct StLinkInfo {
     pub version_name: &'static str,
-    pub usb_pid: u16,
     ep_out: u8,
     ep_in: u8,
     ep_swo: u8,
 }
 
 impl StLinkInfo {
-    pub const fn new(
-        version_name: &'static str,
-        usb_pid: u16,
-        ep_out: u8,
-        ep_in: u8,
-        ep_swo: u8,
-    ) -> Self {
+    pub const fn new(version_name: &'static str, ep_out: u8, ep_in: u8, ep_swo: u8) -> Self {
         Self {
             version_name,
-            usb_pid,
             ep_out,
             ep_in,
             ep_swo,
@@ -87,14 +79,10 @@ pub trait StLinkUsb: std::fmt::Debug {
 
     /// Reset the USB device. This can be used to recover when the
     /// STLink does not respond to USB requests.
-    fn reset(&mut self) -> Result<(), DebugProbeError>;
+    fn reset(&mut self) -> Result<(), StlinkError>;
 
     /// Reads SWO data from the probe.
-    fn read_swo(
-        &mut self,
-        read_data: &mut [u8],
-        timeout: Duration,
-    ) -> Result<usize, DebugProbeError>;
+    fn read_swo(&mut self, read_data: &mut [u8], timeout: Duration) -> Result<usize, StlinkError>;
 }
 
 // Copy of `Selector::matches` except it uses the stlink-specific read_serial_number
@@ -254,11 +242,7 @@ impl StLinkUsb for StLinkUsbDevice {
         Ok(())
     }
 
-    fn read_swo(
-        &mut self,
-        read_data: &mut [u8],
-        timeout: Duration,
-    ) -> Result<usize, DebugProbeError> {
+    fn read_swo(&mut self, read_data: &mut [u8], timeout: Duration) -> Result<usize, StlinkError> {
         tracing::trace!(
             "Reading {:?} SWO bytes to STLink, timeout: {:?}",
             read_data.len(),
@@ -272,14 +256,14 @@ impl StLinkUsb for StLinkUsbDevice {
         } else {
             self.interface
                 .read_bulk(ep_swo, read_data, timeout)
-                .map_err(DebugProbeError::Usb)
+                .map_err(StlinkError::Usb)
         }
     }
 
     /// Reset the USB device. This can be used to recover when the
     /// STLink does not respond to USB requests.
-    fn reset(&mut self) -> Result<(), DebugProbeError> {
+    fn reset(&mut self) -> Result<(), StlinkError> {
         tracing::debug!("Resetting USB device of STLink");
-        self.device_handle.reset().map_err(DebugProbeError::Usb)
+        self.device_handle.reset().map_err(StlinkError::Usb)
     }
 }

@@ -5,7 +5,6 @@ use std::{
 
 use anyhow::Context;
 use probe_rs::{probe::list::Lister, MemoryInterface};
-use rand::prelude::*;
 
 use crate::util::common_options::LoadedProbeOptions;
 use crate::util::common_options::ProbeOptions;
@@ -113,14 +112,11 @@ impl Cmd {
                     self.word_size,
                     self.iterations,
                 );
-                match res {
-                    core::result::Result::Ok(_) => {}
-                    core::result::Result::Err(e) => {
-                        println!(
-                            "Test failed for speed {} size {} word_size {}bit - {}",
-                            speed, size, self.word_size, e
-                        )
-                    }
+                if let Err(e) = res {
+                    println!(
+                        "Test failed for speed {} size {} word_size {}bit - {}",
+                        speed, size, self.word_size, e
+                    )
                 }
             }
         }
@@ -230,7 +226,7 @@ impl DataType {
     }
 
     pub fn fill_data(&mut self, data_size_words: usize) {
-        let mut rng = rand::thread_rng();
+        let mut rng = fastrand::Rng::new();
         match self {
             DataType::U8(ref mut test_data, ref mut read_data) => {
                 *test_data = vec![0u8; data_size_words];
@@ -240,12 +236,16 @@ impl DataType {
             DataType::U32(ref mut test_data, ref mut read_data) => {
                 *test_data = vec![0u32; data_size_words];
                 *read_data = vec![0u32; data_size_words];
-                rng.fill(&mut test_data[..]);
+                for out in test_data.iter_mut() {
+                    *out = rng.u32(..);
+                }
             }
             DataType::U64(ref mut test_data, ref mut read_data) => {
                 *test_data = vec![0u64; data_size_words];
                 *read_data = vec![0u64; data_size_words];
-                rng.fill(&mut test_data[..]);
+                for out in test_data.iter_mut() {
+                    *out = rng.u64(..);
+                }
             }
         }
     }

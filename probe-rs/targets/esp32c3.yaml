@@ -1,78 +1,95 @@
 name: esp32c3
 manufacturer:
-  cc: 0x0C
   id: 0x12
+  cc: 0xc
+chip_detection:
+- !Espressif
+  idcode: 0x5c25
+  variants:
+    0x1b31506f: esp32c3
+    0x4881606f: esp32c3
+    0x6921506f: esp32c3
+    0x4361606f: esp32c3
 variants:
-  - name: esp32c3
-    jtag:
-      scan_chain:
-        - name: main
-          ir_len: 5
-    default_binary_format: idf
+- name: esp32c3
+  cores:
+  - name: main
+    type: riscv
+    core_access_options: !Riscv
+  memory_map:
+  - !Nvm
+    name: 16 Mb Max addressable Flash
+    range:
+      start: 0x0
+      end: 0x1000000
     cores:
-      - name: main
-        type: riscv
-        core_access_options: !Riscv {}
-    memory_map: # From ESP32-C3 Technical Reference Manual, Table 3.2/3.3 Internal/External Memory Address Mapping
-      - !Nvm
-        range: #16 Mb Max addressable Flash size
-          start: 0x0
-          end: 0x01000000
-        is_boot_memory: true
-        cores:
-          - main
-      - !Ram
-        range: # 384 Kb SRAM on Instruction Bus
-          start: 0x40380000
-          end: 0x403e0000
-        cores:
-          - main
-      - !Ram
-        range: # 384 Kb SRAM on Data Bus
-          start: 0x3fc80000
-          end: 0x3fce0000
-        cores:
-          - main
-      - !Nvm
-        range: # External Flash on Instruction Bus (Read Only)
-          start: 0x42000000
-          end: 0x43000000
-        is_alias: true
-        cores:
-          - main
-      - !Nvm
-        range: # External Flash on Data Bus (Read Only)
-          start: 0x3c000000
-          end: 0x3d000000
-        is_alias: true
-        cores:
-          - main
-    flash_algorithms:
-      - esp32c3-flashloader
+    - main
+    access:
+      boot: true
+  - !Nvm
+    name: External flash on data bus (Read Only)
+    range:
+      start: 0x3c000000
+      end: 0x3d000000
+    cores:
+    - main
+    is_alias: true
+  - !Ram
+    name: SRAM Data bus
+    range:
+      start: 0x3fc80000
+      end: 0x3fce0000
+    cores:
+    - main
+  - !Ram
+    name: SRAM Instruction bus
+    range:
+      start: 0x40380000
+      end: 0x403e0000
+    cores:
+    - main
+  - !Nvm
+    name: External flash on instruction bus (Read Only)
+    range:
+      start: 0x42000000
+      end: 0x43000000
+    cores:
+    - main
+    is_alias: true
+  flash_algorithms:
+  - esp32c3-flashloader
+  jtag:
+    scan_chain:
+    - name: main
+      ir_len: 5
+  default_binary_format: idf
 flash_algorithms:
-  - name: esp32c3-flashloader
-    description: A flash loader for the esp32c3.
-    default: true
-    instructions: QREGxpcAAADngAADAUWyQEEBgoAXAwAAZwBDBhcDAABnAMMHFwMAAGcAIwkXAwAAZwBDHkERBsaXAMf/54BAboFFlwDH/+eAIBI3Bcs/IyIFALe1yz8jqgWufVYjrMWuI64FriOgBbC3BcGquRUMwQFFskBBAYKAtwXLP4xBNwbBqjkWY5fFAEGBFwPH/2cAowkTBXDBgoA3Bcs/CEG3BcGquRVjFrUAFwPH/2cAgwcTBXDBgoB5cQbWItQm0krQTs5SzFbKWshexrcGyz+UQq6JKoQ3BcGqkwXl/hMFcMFjmLYAMoqTdTYAEwUwwYHNslAiVJJUAlnySWJK0kpCS7JLRWGCgLe0yz8DpYSvYwmFBJcAAADngIAUkUUTBUDB4+i5/ANFCgCDRRoAA0Y6AINGKgARCvEZYgbCBqIFTY1VjlGNt7XLPyOsha4jrgWuI6ClsDcFyz8jIgUAI6oFrgOlBLBRzaqEY2M1Ac6EswWVQDe7yz8jILuwBUQNSWPjqQAFSaFrNzXLP5MKRa+3Ccs/kQkTtRQAkyUUAE2NJeUmwgMnS68zhetAKsRWl1AAPABOhdKF1oZKiJcAx//ngKDzkkVj97QAAyVLrxMEYMEZqCqEIkUDJkuvjYwumjKVIyqrrhnA4xd1+5cAAADngAAH41EF+hMFBYATBQWGzb0TBVDB9bUTBQSDfYRhjc21QREGxjcFyz8MQTcFwaoTBuX+EwVwwWOXxQKXAAAA54AAAwVFKsQDRYEABYkBySgAlUWXAMf/54Bg73XVtwXLPyOgBQCyQEEBgoBBEQbGIsQmwkrAt7TLPwOpxK8DpESvA6WEryOqBK4BzEqVtzXLP5OFRa8ihpcAx//ngGDqEaABRUqUI66ErrJAIkSSRAJJQQGCgA==
-    pc_init: 0x0
-    pc_uninit: 0x2c
-    pc_program_page: 0x24
-    pc_erase_sector: 0x14
-    pc_erase_all: 0x1c
-    data_section_offset: 0x403902a4
-    load_address: 0x40390000
-    data_load_address: 0x403C0000
-    transfer_encoding: miniz
-    flash_properties:
-      address_range:
-        start: 0x0
-        end: 0x1000000
-      page_size: 0x4000
-      erased_byte_value: 0xff
-      program_page_timeout: 1000
-      erase_sector_timeout: 2000
-      sectors:
-        - size: 0x10000
-          address: 0x0
-    cores:
-      - main
+- name: esp32c3-flashloader
+  description: A flash loader for the esp32c3.
+  default: true
+  instructions: FwMAAGcAYwQXAwAAZwBjChcDAABnAOMLFwMAAGcAQw0XAwAAZwBjEBcDAABnAEMVFwMAAGcA4xcJxhcDx/9nAGMPAUWCgEERBsYixJcAx//ngABtKoTBZ/0XtwUAAUFmhWYRZwFFlwDH/+eA4AyqhQVFlekihZcAx//ngOAOAUW3Bcs/I6IFADe2yz8jKgau/VYjLNauIy4GriMgBrA3BsGqORaQwbJAIkRBAYKAtwXLP4xBNwbBqjkWY5fFAEGBFwPH/2cAQwYTBXDBgoA3Bcs/CEG3BcGquRVjFrUAFwPH/2cAIwQTBXDBgoC3Bss/lEIuh7cFwaqTh+X+kwVwwWOX9gCTdjYAkwUwwZnCLoWCgLcFOUCThsU0soU6hhcDAABnAIMNQREGxiLEJsK3Bss/lEKuhCqENwXBqpMF5f4TBXDBY5e2ApN1NgATBTDBjeE3BTlAkwYFNyKFsoUmhpcAAADngGAJMzWgAH0VZY0ilbJAIkSSREEBgoC3Bss/mEKuhrcFwaqTh+X+kwVwwWMX9wATdzYAkwUwwRnDLoWCgLKFNoYXAwAAZwAj6UERBsY3Bss/FEKqhTcFwaoTB+X+EwVwwWOV5gIBRYlGIyAGAGOf1QAFRSrEA0WBAAWJAckoAJVFlwDH/+eAIPV11bJAQQGCgDlxBt4i3CbaSthO1lLUVtJa0F7OYsxmyje3yz+DJ4evNomuimOFpwSRRpMFQMFjZtYQg8UKAIPGGgCDxzoAg8QqAJEKcRbiB8IEogbVjcWP3Y23tss/I6ymriOuBq4joLawNwXLPyMiBQAjqgauAyUHsHHBqoxjY8UAsoyzBZVBt7vLPyOgu7CFRI1JY2OmAIVJIWw3Ncs/EwtFrzcKyz8RCmOEDAhjUpAIZsYDpUuvMwWsQCrIA6dLr1qXcAAcCFKF1oXahk6IlwDH/+eAYOOyRWP1vACTBGDBIaiqhEJFA6ZLr7OMvECumjKVI6qrrpnEA6VLryFm4xXF+hmgA6ZLr4Oly68DpYuvLpUjqguuM4TFANqFApkjrouu41MF+BMFBYCTBQWGCagThQSDk9X0QemNGaCTBVDBLoXyUGJU0lRCWbJZIlqSWgJb8ktiTNJMIWGCgAXCQREGxpcAx//ngKDdkwUFgJOFBYZ9hW2NskBBAYKAAUWCgC1xFAIjrhYAgM7EyiOoJgEjpjYBsomuhCqJAUUTBgXwAcoTBhUAowWhEKqFMoX9t6MFsQBjiQkEEwUAEE6EY+SpABMEABCTBbEASoUihpcAAADngKDHY0oFAjOFhACziYlAkwWxACKGGcqDxgQAA8cFAIUEhQV9FuOI5v45oCKZqoTjmwn6AUURoH1VDAKDoMUBgE3ESQOpBQGDqcUAFWGCgAAA
+  load_address: 0x40390000
+  data_load_address: 0x403c0000
+  pc_init: 0x0
+  pc_uninit: 0x30
+  pc_program_page: 0x18
+  pc_erase_sector: 0x8
+  pc_erase_all: 0x10
+  pc_verify: 0x20
+  pc_read: 0x28
+  data_section_offset: 0x40390414
+  flash_properties:
+    address_range:
+      start: 0x0
+      end: 0x1000000
+    page_size: 0x4000
+    erased_byte_value: 0xff
+    program_page_timeout: 1000
+    erase_sector_timeout: 2000
+    sectors:
+    - size: 0x10000
+      address: 0x0
+  cores:
+  - main
+  stack_overflow_check: false
+  transfer_encoding: miniz

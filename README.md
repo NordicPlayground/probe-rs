@@ -42,34 +42,8 @@ In addition to being a library, probe-rs also includes a suite of tools which ca
 
 ### Installation
 
-
 The recommended way to install the tools is to download a precompiled version, using one of the methods below.
 See <https://probe.rs/docs/getting-started/installation/> for a more detailed guide.
-
-
-#### Using a shell script
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/probe-rs/probe-rs/releases/latest/download/probe-rs-installer.sh | sh
-```
-
-#### Using a powershell script
-
-
-```sh
-irm https://github.com/probe-rs/probe-rs/releases/latest/download/probe-rs-installer.ps1 | iex
-```
-
-#### From source
-
-The tools can also be installed from source. After installing the necessary [prerequisites](#building), the latest development version can be installed using `cargo install`:
-
-```bash
-cargo install probe-rs-tools --git https://github.com/probe-rs/probe-rs --locked
-```
-
-This will compile the tools and place them into the cargo `bin` directory. See the [Cargo book](https://doc.rust-lang.org/cargo/commands/cargo-install.html) for details.
-
 
 ### cargo-flash
 
@@ -91,15 +65,18 @@ The probe-rs website includes [VSCode configuration instructions](https://probe.
 
 ### Halting the attached chip
 
-```rust
-use probe_rs::{Permissions, Probe};
+```rust,no_run
+use probe_rs::probe::{list::Lister, Probe};
+use probe_rs::Permissions;
 
 fn main() -> Result<(), probe_rs::Error> {
     // Get a list of all available debug probes.
-    let probes = Probe::list_all();
+    let lister = Lister::new();
+
+    let probes = lister.list_all();
 
     // Use the first probe found.
-    let probe = probes[0].open()?;
+    let mut probe = probes[0].open()?;
 
     // Attach to a chip.
     let mut session = probe.attach("nRF52840_xxAA", Permissions::default())?;
@@ -108,7 +85,7 @@ fn main() -> Result<(), probe_rs::Error> {
     let mut core = session.core(0)?;
 
     // Halt the attached core.
-    core.halt(std::time::Duration::from_millis(300))?;
+    core.halt(std::time::Duration::from_millis(10))?;
 
     Ok(())
 }
@@ -116,7 +93,7 @@ fn main() -> Result<(), probe_rs::Error> {
 
 ### Reading from RAM
 
-```rust
+```rust,no_run
 use probe_rs::{MemoryInterface, Permissions, Session};
 
 fn main() -> Result<(), probe_rs::Error> {

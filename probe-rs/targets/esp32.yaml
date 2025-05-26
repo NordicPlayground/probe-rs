@@ -1,87 +1,106 @@
 name: esp32
 manufacturer:
-  cc: 0x0C
   id: 0x12
+  cc: 0xc
+chip_detection:
+- !Espressif
+  idcode: 0x120034e5
+  variants:
+    0xf01d83: esp32
 variants:
-  - name: esp32-3.3v
-    scan_chain:
-      - name: main
-        ir_len: 5
-      - name: app
-        ir_len: 5
-    default_binary_format: idf
+- name: esp32
+  cores:
+  - name: main
+    type: xtensa
+    core_access_options: !Xtensa
+      jtag_tap: 0
+  - name: app
+    type: xtensa
+    core_access_options: !Xtensa
+      jtag_tap: 1
+  memory_map:
+  - !Nvm
+    range:
+      start: 0x0
+      end: 0x1000000
     cores:
-      - name: main
-        type: xtensa
-        core_access_options:
-          !Xtensa
-            jtag_tap: 0
-    memory_map:
-      - !Nvm
-        range:
-          start: 0x0
-          end: 0x1000000
-        is_boot_memory: true
-        cores:
-          - main
-      - !Nvm # External instruction bus
-        range:
-          start: 0x400C2000
-          end: 0x40C00000
-        is_alias: true
-        cores:
-          - main
-      - !Nvm # External Data Bus
-        range:
-          start: 0x3F400000
-          end: 0x3FC00000
-        is_alias: true
-        cores:
-          - main
-      - !Ram # SRAM2, Data bus
-        range:
-          start: 0x3FFAE000
-          end: 0x3FFE0000
-        cores:
-          - main
-      - !Ram # SRAM1, Data bus
-        range:
-          start: 0x3FFE0000
-          end: 0x40000000
-        cores:
-          - main
-      - !Ram # SRAM0, Instruction bus, non-cache
-        range:
-          start: 0x40080000
-          end: 0x400A0000
-        cores:
-          - main
-    flash_algorithms:
-      - esp32-flashloader
+    - main
+    - app
+    access:
+      boot: true
+  - !Nvm
+    name: External data bus
+    range:
+      start: 0x3f400000
+      end: 0x3fc00000
+    cores:
+    - main
+    - app
+    is_alias: true
+  - !Ram
+    name: SRAM2, Data bus
+    range:
+      start: 0x3ffae000
+      end: 0x3ffe0000
+    cores:
+    - main
+    - app
+  - !Ram
+    name: SRAM1, Data bus
+    range:
+      start: 0x3ffe0000
+      end: 0x40000000
+    cores:
+    - main
+    - app
+  - !Ram
+    name: SRAM0, Instruction bus, non-cache
+    range:
+      start: 0x40080000
+      end: 0x400a0000
+    cores:
+    - main
+    - app
+  - !Nvm
+    name: External instruction bus
+    range:
+      start: 0x400c2000
+      end: 0x40c00000
+    cores:
+    - main
+    - app
+    is_alias: true
+  flash_algorithms:
+  - esp32-flashloader
+  default_binary_format: idf
 flash_algorithms:
-  - name: esp32-flashloader
-    description: A flash loader for the esp32.
-    default: true
-    instructions: WIYAQGwqBkAEAPw/9Kr8P/iq/D/8qvw/AKv8PwAA/D/u/8CqAAD8P+7/wKpMLAZAAAD8P+7/wKoULAZAAAD8P+7/wKr4qvw/yAIJQPyq/D8Aq/w/BAD8P/Sq/D8AgAAA9Cr8PzDvBUBg8P//AAD8P+7/wKrIAglAsCEGQPSq/D/4qvw//Kr8P/Qq/D9QLQZAAAD+PxH//20CfQONBJUEAC0G8EEAAAAAEfr/bQIVBwAtBvBBAAAAABH2/9UIAC0G8EEAABHz/20CfQONBJUJAC0G8EEAAAAAEe7/bQJVGgAtBvBBAAAAADZBAIHF/+AIAAwCgcT/vQLgCACBw/8pCIHD/ykIgcL/fPmZCIHC/ykIgcH/KQiBwf+Rwf+ZCB3wNkEAgcD/iAiRwP+XmBEcCAAIQCCgkYG9/+AIAC0KHfAirBcd8AAAADZBAIG5/4gIkbn/l5gJgbj/4AgALQod8CKsFx3wAAAANqEAgbT/iAiRtP+XmAwMO7CEEBaYACKsEx3wIqwXHfBRr/+IBXGw/2Gy/5Gt/wwKqSGZQScYQ7lx4AkA9kMEIqwUHfCCBAOSBAKiBACyBAEpBcGk/9gh2QyAuxGgqyAAmRGQmiCAiAGAiSCJB4Gf/9kI2QYyw/xLRLhxiAcWmAgwKGMgmMCZBwwahzMBvQq5cTGY/3GZ/4GV/4lhgZj/iVGCrBaJEXz4iTEWEgamGl4pgYgGqHGpoYCTwJmRqQF66MLBIPLBJKhhvQTdB4hR4AgAmIGXsgaIBqgRRgQAiAa4kbqIiQaaRJAiwFghFkoAXQo3mLSIQeAIAI0KrQWYMYcpppF//5ooHfAirBUd8IKoMIqKoJ8xgCkQHfA2YQBhef+IBpF5/5eYJoF4/+AIAAwUSQEMVzF2/wwFiAFAiBAWOAGiwQC9B+ADABbK/sYBAKKsF8YAAK0FWQYtCh3wADZBAJFs/3gJgWz/iAhha/9YBgwCKQkW5wBaqLFp/4Fp/80H4AgALQpah4kGHfAAAA==
-    pc_init: 0x94
-    pc_uninit: 0xd8
-    pc_program_page: 0xc4
-    pc_erase_sector: 0xa8
-    pc_erase_all: 0xb8
-    data_section_offset: 0x400902f8
-    load_address: 0x40090000
-    data_load_address: 0x3FFD0000
-    transfer_encoding: miniz
-    flash_properties:
-      address_range:
-        start: 0x0
-        end: 0x1000000
-      page_size: 0x4000
-      erased_byte_value: 0xff
-      program_page_timeout: 1000
-      erase_sector_timeout: 2000
-      sectors:
-        - size: 0x10000
-          address: 0x0
-    cores:
-      - main
+- name: esp32-flashloader
+  description: A flash loader for the esp32.
+  default: true
+  instructions: 2C4GQFiGAEAAAAABAAABAAAQAAAAQAAA//8AADgyBkBsKgZABAD8P/Sq/D/4qvw//Kr8PwCr/D8AAPw/7v/AqgAA/D/u/8CqTCwGQAAA/D/u/8CqFCwGQAAA/D/u/8CqEAQJQNwCCUAAAPw/7v/AqjQECUDcAglAAAD8P+7/wKpAAQlAAAD8P+7/wKqwIQZA+Kr8P/yq/D8Aq/w/BAD8P/Sq/D8AgAAA9Cr8PzDvBUBg8P//UC0GQGDw//9AAQlAAAD+PxH//20CfQONBNUIAC0G8EEAAAAAEfr/bQKVDQAtBvBBAAAAABH2/1UPAC0G8EEAABHz/20CfQONBBUQAC0G8EEAAAAAEe7/bQJ9A40EFRIALQbwQQAAAAAR6f9tAn0DjQSVFAAtBvBBAAAAABHk/20ClRYALQbwQQAAAAA2QQAW9ACBrv+tAr0DzQTgCAAtCh3wDAId8AAANkEAgan/4AgAfQoMArGn/8Go/9Go/+Go//Go/4Gp/60C4AgAFjoADBId8IGm/60HvQLgCACBpP8pCIGk/ykIgaT/fPmZCIGj/ykIgaP/KQiBo/+Ro/+ZCB3wAAA2QQCBof+ICJGh/5eYERwIAAhAIKCRgZ7/4AgALQod8CKsFx3wAAAANkEAgZr/iAiRmv+XmAmBmf/gCAAtCh3wIqwXHfAAAAA2QQCBlf+ICJGV/5eYDAw4gIQQFpgAIqwTHfAirBcd8NGQ/4GQ/60CvQTNA+AIAC0KHfAANkEAgYz/iAiRjP+XmAwMOICEEBaYACKsEx3wIqwXHfDRh/+Bh/+tAr0EzQPgCAAMCIcaAT0IKiMd8AAANkEAgYH/iAiRgf+XmAwMOICEEBaYACKsEx3wIqwXHfCBfP+tAr0EzQPgCAAtCh3wNmEAjQKRd/+oCbF3/7eaJgwCKQlmKB0MFmkBDFdRc/+IAWCIEBbIAKLBAL0H4AUAFsr+LQod8CKsFx3wNsEAWTGNBG0DkWr/mVGoCZFr/1Fs/7Fo/7lBDAu5YScaPfZIBCKsFB3wogYDsgYCwgYA0gYB6FEpDuhB+GH5DoDdEcDNIAC7EbC8IICqAaCrIKkJoVv/+Qr5BYLI/EtmqAkWGgGAKmMgusC5CQwbpzgJuaEGAgAirBUd8Aw4iaFxUv+BUv+JkYFO/4mBgVD/iXGCrBaJEVkhFqII5hsCBiEAKbGIBYCHwInBiAWYoZnRmQHYkdrowsEs8sEwqIG9Bohx4AgAvQqIsYeyBLgRxgMAmAWowaqZmQWKZoAiwBabAIgFzQd3mK/GAADIBbhhiFGICDhBmAOoYakFXQd9BsppmqhNC7Ex/4gx4AgAvQRpA20HfQVYIXz4p6gCBt7/gS3/iiod8IKoMIqLsJ8xgCkQHfA2QQAWhAGBJ/+tAr0DzQTgCACBJf+KiqCfMYApEB3wDAId8AA2YQIMCCb4E8AgAJKhB5qRgkkAG6idCI0KZvjrkkEHYqEAURn/FpQDYHRjssEHrQLNB+AFAJbaAnBEwHqDosEHnQcWWQELmRu6G8PSCgDiAwCtCz0M1x7phgIAeiI9CFZU/AwCHfB88h3wAAA=
+  load_address: 0x40090000
+  data_load_address: 0x3ffd0000
+  pc_init: 0xc4
+  pc_uninit: 0x130
+  pc_program_page: 0xf4
+  pc_erase_sector: 0xd8
+  pc_erase_all: 0xe8
+  pc_verify: 0x108
+  pc_read: 0x11c
+  data_section_offset: 0x400904a0
+  flash_properties:
+    address_range:
+      start: 0x0
+      end: 0x1000000
+    page_size: 0x4000
+    erased_byte_value: 0xff
+    program_page_timeout: 1000
+    erase_sector_timeout: 2000
+    sectors:
+    - size: 0x10000
+      address: 0x0
+  cores:
+  - main
+  - app
+  stack_overflow_check: false
+  transfer_encoding: miniz

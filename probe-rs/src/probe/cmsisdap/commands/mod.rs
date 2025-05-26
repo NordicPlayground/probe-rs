@@ -7,70 +7,163 @@ pub mod transfer;
 
 use crate::probe::cmsisdap::commands::general::info::PacketSizeCommand;
 use crate::probe::usb_util::InterfaceExt;
-use crate::probe::DebugProbeError;
+use crate::probe::{ProbeError, WireProtocol};
 use std::io::ErrorKind;
 use std::str::Utf8Error;
 use std::time::Duration;
 
+use self::general::host_status::HostStatusRequest;
+use self::swj::clock::SWJClockRequest;
+use self::transfer::InnerTransferBlockRequest;
+
 const USB_TIMEOUT: Duration = Duration::from_millis(1000);
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, docsplay::Display)]
 pub enum CmsisDapError {
-    #[error("Error handling CMSIS-DAP command {command_id:?}")]
+    /// Error handling CMSIS-DAP command {command_id:?}.
     Send {
         command_id: CommandId,
         source: SendError,
     },
-    #[error("CMSIS-DAP responded with an error")]
-    ErrorResponse,
-    #[error("Too much data provided for SWJ Sequence command")]
+
+    /// CMSIS-DAP responded with an error.
+    ErrorResponse(RequestError),
+
+    /// Too much data provided for SWJ Sequence command.
     TooMuchData,
-    #[error("Requested SWO baud rate could not be configured")]
+
+    /// Requested SWO baud rate could not be configured.
     SwoBaudrateNotConfigured,
-    #[error("Probe reported an error while streaming SWO")]
+
+    /// Probe reported an error while streaming SWO.
     SwoTraceStreamError,
-    #[error("Requested SWO mode is not available on this probe")]
+
+    /// Requested SWO mode is not available on this probe.
     SwoModeNotAvailable,
-    #[error("USB Error reading SWO data.")]
+
+    /// USB Error reading SWO data.
     SwoReadError(#[source] std::io::Error),
-    #[error("Could not determine a suitable packet size for this probe")]
+
+    /// Could not determine a suitable packet size for this probe.
     NoPacketSize,
-    #[error("Invalid IDCODE detected")]
+
+    /// Invalid IDCODE detected.
     InvalidIdCode,
-    #[error("Error scanning IR lengths")]
+
+    /// Error scanning IR lengths.
     InvalidIR,
 }
 
-#[derive(Debug, thiserror::Error)]
+impl ProbeError for CmsisDapError {}
+
+#[derive(Debug, thiserror::Error, docsplay::Display)]
 pub enum SendError {
-    #[error("Error in the USB HID access")]
+    /// Error in the USB HID access.
     HidApi(#[from] hidapi::HidError),
-    #[error("Error in the USB access")]
+
+    /// Error in the USB access.
     UsbError(std::io::Error),
-    #[error("Not enough data in response from probe")]
+
+    /// Not enough data in response from probe.
     NotEnoughData,
-    #[error("Status can only be 0x00 or 0xFF")]
+
+    /// Status can only be 0x00 or 0xFF
     InvalidResponseStatus,
-    #[error("Connecting to target failed, received: {0:x}")]
+
+    /// Connecting to target failed, received: {0:x}
     ConnectResponseError(u8),
-    #[error("Command ID in response (:#02x) does not match sent command ID")]
+
+    /// Command ID in response (:#02x) does not match sent command ID
     CommandIdMismatch(u8),
+
     /// String in response is not valid UTF-8.
     ///
     /// Strings are required to be UTF-8 encoded by the
     /// CMSIS-DAP specification.
-    #[error("String in response is not valid UTF-8.")]
+    #[ignore_extra_doc_attributes]
     InvalidString(#[from] Utf8Error),
-    #[error("Unexpected answer to command")]
+
+    /// Unexpected answer to command.
     UnexpectedAnswer,
-    #[error("Timeout in USB communication.")]
+
+    /// Timeout in USB communication.
     Timeout,
 }
 
-impl From<CmsisDapError> for DebugProbeError {
-    fn from(error: CmsisDapError) -> Self {
-        DebugProbeError::ProbeSpecific(Box::new(error))
+impl From<std::io::Error> for SendError {
+    fn from(error: std::io::Error) -> Self {
+        match error.kind() {
+            ErrorKind::TimedOut => SendError::Timeout,
+            _ => SendError::UsbError(error),
+        }
     }
+}
+
+#[derive(Debug, thiserror::Error, docsplay::Display)]
+pub enum RequestError {
+    /// Failed setting the SWJ Clock on probe with the following request: {request:?}
+    SWJClock { request: SWJClockRequest },
+
+    /// Failed to configure the SWD options on probe with the following request: {request:?}
+    SwdConfigure {
+        request: swd::configure::ConfigureRequest,
+    },
+
+    /// Failed to configure the JTAG options on probe with the following request: {request:?}
+    JtagConfigure {
+        request: jtag::configure::ConfigureRequest,
+    },
+
+    /// Failed to configure the transfer options on probe with the following request: {request:?}
+    TransferConfigure {
+        request: transfer::configure::ConfigureRequest,
+    },
+
+    /// Failed to send the SWD sequence to the probe with the following request: {request:?}
+    SwjSequence {
+        request: swj::sequence::SequenceRequest,
+    },
+
+    /// Failed to send the JTAG sequence to the probe with the following request: {request:?}
+    JtagSequence {
+        request: jtag::sequence::SequenceRequest,
+    },
+
+    /// The JTAG `{name}` scan chain is either too long or otherwise broken. Expected next bit to be {expected_bit}
+    BrokenScanChain {
+        name: &'static str,
+        expected_bit: u8,
+    },
+
+    /// The JTAG `{name}` scan chain is empty
+    EmptyScanChain { name: &'static str },
+
+    /// Could not set {transport:?} as the SWO transport
+    SwoTransport { transport: swo::TransportRequest },
+
+    /// Could not set {mode:?} as the SWO mode
+    SwoMode { mode: swo::ModeRequest },
+
+    /// Could not execute SWO control command {command:?}
+    SwoControl { command: swo::ControlRequest },
+
+    /// {protocol:?} initialization failed
+    InitFailed { protocol: Option<WireProtocol> },
+
+    /// Setting the host status on the debug probe failed with request {request:?}
+    HostStatus { request: HostStatusRequest },
+
+    /// Transferring {transfer_count} raw data blocks to DAP {dap_index} failed for block {transfer_request:?}
+    BlockTransfer {
+        /// The DAP index to be used in JTAG mode. This is ignored for SWD.
+        dap_index: u8,
+
+        /// Number of transfers
+        transfer_count: u16,
+
+        /// Information about requested access
+        transfer_request: InnerTransferBlockRequest,
+    },
 }
 
 pub enum CmsisDapDevice {
@@ -104,9 +197,9 @@ impl CmsisDapDevice {
                     n => Ok(n),
                 }
             }
-            CmsisDapDevice::V2 { handle, in_ep, .. } => handle
-                .read_bulk(*in_ep, buf, USB_TIMEOUT)
-                .map_err(SendError::UsbError),
+            CmsisDapDevice::V2 { handle, in_ep, .. } => {
+                Ok(handle.read_bulk(*in_ep, buf, USB_TIMEOUT)?)
+            }
         }
     }
 
@@ -116,9 +209,7 @@ impl CmsisDapDevice {
             CmsisDapDevice::V1 { handle, .. } => Ok(handle.write(buf)?),
             CmsisDapDevice::V2 { handle, out_ep, .. } => {
                 // Skip first byte as it's set to 0 for HID transfers
-                handle
-                    .write_bulk(*out_ep, &buf[1..], USB_TIMEOUT)
-                    .map_err(SendError::UsbError)
+                Ok(handle.write_bulk(*out_ep, &buf[1..], USB_TIMEOUT)?)
             }
         }
     }
@@ -193,7 +284,7 @@ impl CmsisDapDevice {
     pub(super) fn find_packet_size(&mut self) -> Result<usize, CmsisDapError> {
         for repeat in 0..16 {
             tracing::debug!("Attempt {} to find packet size", repeat + 1);
-            match send_command(self, PacketSizeCommand {}) {
+            match send_command(self, &PacketSizeCommand {}) {
                 Ok(size) => {
                     tracing::debug!("Success: packet size is {}", size);
                     self.set_packet_size(size as usize);
@@ -254,15 +345,15 @@ impl CmsisDapDevice {
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub(crate) enum Status {
-    DAPOk = 0x00,
-    DAPError = 0xFF,
+    DapOk = 0x00,
+    DapError = 0xFF,
 }
 
 impl Status {
     pub fn from_byte(value: u8) -> Result<Self, SendError> {
         match value {
-            0x00 => Ok(Status::DAPOk),
-            0xFF => Ok(Status::DAPError),
+            0x00 => Ok(Status::DapOk),
+            0xFF => Ok(Status::DapError),
             _ => Err(SendError::InvalidResponseStatus),
         }
     }
@@ -273,6 +364,7 @@ impl Status {
 /// The command ID is always sent as the first byte for every command,
 /// and also is the first byte of every response.
 #[derive(Debug)]
+#[allow(unused)]
 pub enum CommandId {
     Info = 0x00,
     HostStatus = 0x01,
@@ -324,7 +416,7 @@ pub(crate) trait Request {
 
 pub(crate) fn send_command<Req: Request>(
     device: &mut CmsisDapDevice,
-    request: Req,
+    request: &Req,
 ) -> Result<Req::Response, CmsisDapError> {
     send_command_inner(device, request).map_err(|e| CmsisDapError::Send {
         command_id: Req::COMMAND_ID,
@@ -334,7 +426,7 @@ pub(crate) fn send_command<Req: Request>(
 
 fn send_command_inner<Req: Request>(
     device: &mut CmsisDapDevice,
-    request: Req,
+    request: &Req,
 ) -> Result<Req::Response, SendError> {
     // Size the buffer for the maximum packet size.
     // On v1, we always send this full-sized report, while

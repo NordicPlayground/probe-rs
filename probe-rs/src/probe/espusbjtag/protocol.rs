@@ -10,7 +10,7 @@ use std::{
 
 use crate::probe::{
     espusbjtag::EspUsbJtagFactory, usb_util::InterfaceExt, DebugProbeError, DebugProbeInfo,
-    DebugProbeSelector, ProbeCreationError,
+    DebugProbeSelector, ProbeCreationError, ProbeError,
 };
 
 const JTAG_PROTOCOL_CAPABILITIES_VERSION: u8 = 1;
@@ -27,13 +27,24 @@ const USB_TIMEOUT: Duration = Duration::from_millis(5000);
 const USB_DEVICE_CLASS: u8 = 0xFF;
 const USB_DEVICE_SUBCLASS: u8 = 0xFF;
 const USB_DEVICE_PROTOCOL: u8 = 0x01;
-const USB_DEVICE_TRANSFER_TYPE: EndpointType = EndpointType::Bulk;
 
 const USB_VID: u16 = 0x303A;
 const USB_PID: u16 = 0x1001;
 
 const DESCRIPTOR_JTAG_CAPABILITIES_TYPE: u8 = 0x20;
 const DESCRIPTOR_JTAG_CAPABILITIES_INDEX: u8 = 0x00;
+
+/// Errors that can occur when working with the ESP JTAG adapter.
+#[derive(Debug, thiserror::Error, docsplay::Display)]
+pub enum EspError {
+    /// USB interface or endpoints could not be found.
+    InterfaceNotFound,
+
+    /// Unknown capabilities descriptor version: {0:#04x}.
+    UnknownCapabilities(u8),
+}
+
+impl ProbeError for EspError {}
 
 pub(super) struct ProtocolHandler {
     // The USB device handle.
@@ -87,59 +98,63 @@ impl ProtocolHandler {
 
         let config = device_handle.configurations().next().unwrap();
 
-        tracing::debug!("Active config descriptor: {:?}", &config);
+        tracing::debug!("Active config descriptor: {:?}", config);
 
         let mut found = None;
-
         for interface in config.interfaces() {
-            tracing::trace!("Interface {}", interface.interface_number());
+            let interface_number = interface.interface_number();
+            tracing::trace!("Interface {interface_number}");
+
+            let Some(descriptor) = interface.alt_settings().next() else {
+                continue;
+            };
+
+            if !(descriptor.class() == USB_DEVICE_CLASS
+                && descriptor.subclass() == USB_DEVICE_SUBCLASS
+                && descriptor.protocol() == USB_DEVICE_PROTOCOL)
+            {
+                tracing::debug!(
+                    "Skipping interface {interface_number} because of wrong class/subclass/protocol"
+                );
+                continue;
+            }
 
             let mut ep_out = None;
             let mut ep_in = None;
+            for endpoint in descriptor.endpoints() {
+                let address = endpoint.address();
+                tracing::trace!("Endpoint {address:#04x}");
+                if endpoint.transfer_type() != EndpointType::Bulk {
+                    tracing::debug!("Skipping endpoint {address:#04x}");
+                    continue;
+                }
 
-            let descriptor = interface.alt_settings().next();
-            if let Some(descriptor) = descriptor {
-                if descriptor.class() == USB_DEVICE_CLASS
-                    && descriptor.subclass() == USB_DEVICE_SUBCLASS
-                    && descriptor.protocol() == USB_DEVICE_PROTOCOL
-                {
-                    for endpoint in descriptor.endpoints() {
-                        tracing::trace!("Endpoint {}", endpoint.address());
-                        if endpoint.transfer_type() == USB_DEVICE_TRANSFER_TYPE {
-                            if endpoint.direction() == Direction::In {
-                                ep_in = Some(endpoint.address());
-                            } else {
-                                ep_out = Some(endpoint.address());
-                            }
-                        }
-                    }
+                if endpoint.direction() == Direction::In {
+                    ep_in = Some(address);
+                } else {
+                    ep_out = Some(address);
                 }
             }
 
             if let (Some(ep_in), Some(ep_out)) = (ep_in, ep_out) {
-                tracing::debug!(
-                    "Claiming interface {} with IN EP {} and OUT EP {}.",
-                    interface.interface_number(),
-                    ep_in,
-                    ep_out
-                );
-
-                let iface = device_handle
-                    .claim_interface(interface.interface_number())
-                    .map_err(ProbeCreationError::Usb)?;
-
-                found = Some((iface, ep_in, ep_out));
+                found = Some((interface_number, ep_in, ep_out));
                 break;
             }
         }
 
-        let Some((iface, ep_in, ep_out)) = found else {
-            return Err(ProbeCreationError::ProbeSpecific(
-                "USB interface or endpoints could not be found.".into(),
-            ));
+        let Some((interface_number, ep_in, ep_out)) = found else {
+            return Err(EspError::InterfaceNotFound.into());
         };
 
-        let start = std::time::Instant::now();
+        tracing::debug!(
+            "Claiming interface {interface_number} with IN EP {ep_in} and OUT EP {ep_out}."
+        );
+
+        let iface = device_handle
+            .claim_interface(interface_number)
+            .map_err(ProbeCreationError::Usb)?;
+
+        let start = Instant::now();
         let buffer = loop {
             let buffer = device_handle
                 .get_descriptor(
@@ -152,49 +167,50 @@ impl ProtocolHandler {
             if !buffer.is_empty() {
                 break buffer;
             }
-            if Instant::now() - start > USB_TIMEOUT {
+            if start.elapsed() > USB_TIMEOUT {
                 return Err(ProbeCreationError::Other(
                     "Timeout accessing device descriptor",
                 ));
             }
         };
 
+        let protocol_version = buffer[0];
+        tracing::trace!("Descriptor bytes: {:02x?}", buffer);
+        tracing::debug!("Protocol version: {protocol_version}");
+        if protocol_version != JTAG_PROTOCOL_CAPABILITIES_VERSION {
+            return Err(EspError::UnknownCapabilities(protocol_version).into());
+        }
+
         let mut base_speed_khz = 1000;
         let mut div_min = 1;
         let mut div_max = 1;
 
-        let protocol_version = buffer[0];
-        tracing::debug!("{:02x?}", &buffer);
-        tracing::debug!("Protocol version: {}", protocol_version);
-        if protocol_version != JTAG_PROTOCOL_CAPABILITIES_VERSION {
-            return Err(ProbeCreationError::ProbeSpecific(
-                "Unknown capabilities descriptor version.".into(),
-            ));
-        }
-
         let length = buffer[1] as usize;
-
         let mut p = 2usize;
         while p < length {
-            let typ = buffer[p];
-            let length = buffer[p + 1];
+            let cap_type = buffer[p];
+            let cap_length = buffer[p + 1] as usize;
+            let cap_bytes = &buffer[p..][..cap_length];
 
-            if typ == JTAG_PROTOCOL_CAPABILITIES_SPEED_APB_TYPE {
+            // cap_length includes the type and length bytes, so we need to skip the first 2.
+            let cap_data_bytes = &cap_bytes[2..];
+
+            if cap_type == JTAG_PROTOCOL_CAPABILITIES_SPEED_APB_TYPE {
                 base_speed_khz =
-                    ((((buffer[p + 3] as u16) << 8) | buffer[p + 2] as u16) as u64 * 10 / 2) as u32;
-                div_min = ((buffer[p + 5] as u16) << 8) | buffer[p + 4] as u16;
-                div_max = ((buffer[p + 7] as u16) << 8) | buffer[p + 6] as u16;
-                tracing::info!("Found ESP USB JTAG adapter, base speed is {base_speed_khz}kHz. Available dividers: ({div_min}..{div_max})");
+                    u16::from_le_bytes([cap_data_bytes[0], cap_data_bytes[1]]) as u32 * 10 / 2;
+                div_min = u16::from_le_bytes([cap_data_bytes[2], cap_data_bytes[3]]);
+                div_max = u16::from_le_bytes([cap_data_bytes[4], cap_data_bytes[5]]);
+                tracing::debug!("Found ESP USB JTAG adapter, base speed is {base_speed_khz}kHz. Available dividers: ({div_min}..{div_max})");
             } else {
-                tracing::warn!("Unknown capabilities type {:01X?}", typ);
+                tracing::debug!("Unknown capabilities type {cap_type}");
             }
 
-            p += length as usize;
+            p += cap_bytes.len();
         }
 
         tracing::debug!("Succesfully attached to ESP USB JTAG.");
 
-        Ok(Self {
+        let mut this = Self {
             device_handle: iface,
             command_queue: None,
             output_buffer: Vec::with_capacity(OUT_BUFFER_SIZE),
@@ -206,7 +222,35 @@ impl ProtocolHandler {
             base_speed_khz,
             div_min,
             div_max,
-        })
+        };
+
+        // We need to flush the device's response buffer, but we don't always succeed in doing so.
+        // This nonsense if supposed to help us recover from some errors.
+        // Not bulletproof, but significantly reduces error rate.
+        let flush_ep = |this: &mut Self| {
+            let mut incoming = [0; IN_EP_BUFFER_SIZE];
+            this.device_handle
+                .read_bulk(this.ep_in, &mut incoming, Duration::from_millis(100))
+                .is_ok()
+        };
+
+        if flush_ep(&mut this) {
+            while flush_ep(&mut this) {}
+        } else {
+            // Just returning here would end us up with Invalid IDCODE.
+            for _ in 0..16 {
+                this.shift_bit(true, true, false).unwrap();
+            }
+
+            this.flush().unwrap();
+            this.response.clear();
+
+            if flush_ep(&mut this) {
+                while flush_ep(&mut this) {}
+            }
+        }
+
+        Ok(this)
     }
 
     /// Put a bit on TDI and possibly read one from TDO.
@@ -230,9 +274,6 @@ impl ProtocolHandler {
         }
 
         self.push_command(RepeatableCommand::Clock { cap, tdi, tms })?;
-        if cap {
-            self.pending_in_bits += 1;
-        }
 
         Ok(())
     }
@@ -311,9 +352,20 @@ impl ProtocolHandler {
     ) -> Result<(), DebugProbeError> {
         tracing::trace!("add raw cmd {:?} reps={}", command, repetitions + 1);
 
+        // If the repeated sequence would overflow the buffer, we flush first. This is a bit more
+        // conservative than necessary, but it's simpler than alternatives.
+        if command.captures() && self.pending_in_bits + repetitions + 1 > 128 * 8 {
+            self.send_buffer()?;
+        }
+
         // Send the actual command.
         self.add_raw_command(command.into())?;
         self.add_repetitions(repetitions)?;
+
+        if command.captures() {
+            // Only increment pending bits if a whole command is in the buffer.
+            self.pending_in_bits += repetitions + 1;
+        }
 
         Ok(())
     }
@@ -337,18 +389,23 @@ impl ProtocolHandler {
 
     /// Adds a single command to the output buffer and writes it to the USB EP if the buffer reaches a limit of `OUT_BUFFER_SIZE`.
     fn add_raw_command(&mut self, command: Command) -> Result<(), DebugProbeError> {
-        self.output_buffer.push(command);
-
         // If we reach a maximal size of the output buffer, we flush.
         if self.output_buffer.len() == OUT_BUFFER_SIZE {
             self.send_buffer()?;
         }
+        self.output_buffer.push(command);
 
         Ok(())
     }
 
     /// Sends the commands stored in the output buffer to the USB EP.
     fn send_buffer(&mut self) -> Result<(), DebugProbeError> {
+        assert!(
+            self.output_buffer.len() <= OUT_BUFFER_SIZE,
+            "Output buffer too large: {} elements, max {OUT_BUFFER_SIZE}",
+            self.output_buffer.len()
+        );
+
         let mut commands = [0; OUT_EP_BUFFER_SIZE];
         for (out, byte) in commands
             .iter_mut()
@@ -365,6 +422,13 @@ impl ProtocolHandler {
         }
 
         let len = (self.output_buffer.len() + 1) / 2;
+
+        assert!(
+            len <= commands.len(),
+            "Output buffer too large: {len} bytes ({} nibbles), max {}",
+            self.output_buffer.len(),
+            commands.len(),
+        );
 
         tracing::trace!(
             "Writing {} bytes ({} nibbles) to usb endpoint",
@@ -395,14 +459,14 @@ impl ProtocolHandler {
 
     /// Tries to receive pending in bits from the USB EP.
     fn receive_buffer(&mut self) -> Result<(), DebugProbeError> {
-        let count = ((self.pending_in_bits + 7) / 8).min(IN_EP_BUFFER_SIZE);
-        let mut incoming = [0; IN_EP_BUFFER_SIZE];
-
         tracing::trace!("Receiving buffer, pending bits: {}", self.pending_in_bits);
 
         if self.pending_in_bits == 0 {
             return Ok(());
         }
+
+        let count = self.pending_in_bits.div_ceil(8).min(IN_EP_BUFFER_SIZE);
+        let mut incoming = [0; IN_EP_BUFFER_SIZE];
 
         let read_bytes = self
             .device_handle
@@ -417,11 +481,15 @@ impl ProtocolHandler {
                 DebugProbeError::Usb(e)
             })?;
 
+        if read_bytes > count {
+            tracing::warn!("Read more bytes than expected: {} > {}", read_bytes, count);
+        }
+
         let bits_in_buffer = self.pending_in_bits.min(read_bytes * 8);
-        let incoming = &incoming[..count];
+        let incoming = &incoming[..read_bytes];
 
         tracing::trace!("Read: {:?}, length = {}", incoming, bits_in_buffer);
-        self.pending_in_bits -= bits_in_buffer;
+        self.pending_in_bits = self.pending_in_bits.saturating_sub(bits_in_buffer);
 
         let bs: &BitSlice<_, Lsb0> = BitSlice::from_slice(incoming);
         self.response.extend_from_bitslice(&bs[..bits_in_buffer]);
@@ -433,6 +501,14 @@ impl ProtocolHandler {
 #[derive(PartialEq, Debug, Clone, Copy)]
 enum RepeatableCommand {
     Clock { cap: bool, tdi: bool, tms: bool },
+}
+
+impl RepeatableCommand {
+    fn captures(&self) -> bool {
+        match self {
+            RepeatableCommand::Clock { cap, .. } => *cap,
+        }
+    }
 }
 
 impl From<RepeatableCommand> for Command {
@@ -455,7 +531,7 @@ impl From<Command> for u8 {
     fn from(command: Command) -> Self {
         match command {
             Command::Clock { cap, tdi, tms } => {
-                (if cap { 4 } else { 0 } | if tms { 2 } else { 0 } | u8::from(tdi))
+                u8::from(cap) << 2 | u8::from(tms) << 1 | u8::from(tdi)
             }
             Command::Reset(srst) => 8 | u8::from(srst),
             Command::Flush => 0xA,

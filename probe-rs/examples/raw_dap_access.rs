@@ -1,6 +1,8 @@
+//! This example demonstrates how to use the raw DAP access API to perform a chip recovery operation on a nRF52840 target.
+
 use anyhow::Result;
 use probe_rs::{
-    architecture::arm::{sequences::DefaultArmSequence, ApAddress, DpAddress},
+    architecture::arm::{sequences::DefaultArmSequence, DpAddress, FullyQualifiedApAddress},
     probe::list::Lister,
 };
 
@@ -22,13 +24,7 @@ fn main() -> Result<()> {
         .initialize(DefaultArmSequence::create(), DpAddress::Default)
         .map_err(|(_interface, e)| e)?;
 
-    // This is an example on how to do a "recover" operation (erase+unlock a locked chip)
-    // on an nRF52840 target.
-
-    let port = ApAddress {
-        dp: DpAddress::Default,
-        ap: 1,
-    };
+    let port = &FullyQualifiedApAddress::v1_with_default_dp(1);
 
     const RESET: u8 = 0;
     const ERASEALL: u8 = 4;

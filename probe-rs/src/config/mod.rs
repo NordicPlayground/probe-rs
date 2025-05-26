@@ -1,5 +1,3 @@
-#![warn(missing_docs)]
-
 //! Target specific configuration
 //!
 //! For debugging and flashing different chips, called *target* in probe-rs, some
@@ -24,12 +22,11 @@
 
 mod chip_info;
 pub(crate) mod registry;
-pub mod sequences;
 mod target;
 
 pub use probe_rs_target::{
-    Chip, ChipFamily, Core, CoreType, FlashProperties, GenericRegion, InstructionSet, MemoryRange,
-    MemoryRegion, NvmRegion, PageInfo, RamRegion, RawFlashAlgorithm, ScanChainElement,
+    Chip, ChipFamily, Core, CoreType, FlashProperties, GenericRegion, InstructionSet, MemoryAccess,
+    MemoryRange, MemoryRegion, NvmRegion, PageInfo, RamRegion, RawFlashAlgorithm, ScanChainElement,
     SectorDescription, SectorInfo, TargetDescriptionSource,
 };
 
@@ -37,7 +34,7 @@ pub use registry::{
     add_target_from_yaml, families, get_target_and_family_by_name, get_target_by_name,
     get_targets_by_family_name, search_chips, RegistryError,
 };
-pub use target::{DebugSequence, Target, TargetParseError, TargetSelector};
+pub use target::{DebugSequence, Target, TargetSelector};
 
 // Crate-internal API
 pub(crate) use chip_info::ChipInfo;

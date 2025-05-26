@@ -1,12 +1,12 @@
-use std::collections::BTreeMap;
-use std::fmt::write;
+use std::{
+    cell::{Ref, RefCell},
+    fmt::write,
+    rc::Rc,
+};
 
 use probe_rs::Core;
 
-use crate::{
-    cmd::cargo_embed::rttui::channel::ChannelData,
-    util::rtt::{RttActiveDownChannel, RttActiveUpChannel},
-};
+use crate::{cmd::cargo_embed::rttui::channel::ChannelData, util::rtt::client::RttClient};
 
 use super::channel::UpChannel;
 
@@ -28,9 +28,8 @@ pub struct TabConfig {
     pub hide: bool,
 }
 
-#[derive(Debug)]
 pub struct Tab {
-    up_channel: usize,
+    up_channel: Rc<RefCell<UpChannel>>,
     down_channel: Option<(usize, String)>,
     name: String,
     scroll_offset: usize,
@@ -41,14 +40,14 @@ pub struct Tab {
 
 impl Tab {
     pub fn new(
-        up_channel: &RttActiveUpChannel,
-        down_channel: Option<&RttActiveDownChannel>,
+        up_channel: Rc<RefCell<UpChannel>>,
+        down_channel: Option<usize>,
         name: Option<String>,
     ) -> Self {
         Self {
-            up_channel: up_channel.number(),
-            down_channel: down_channel.map(|down| (down.number(), String::new())),
-            name: name.unwrap_or_else(|| up_channel.channel_name.clone()),
+            name: name.unwrap_or_else(|| up_channel.borrow().channel_name().to_string()),
+            up_channel,
+            down_channel: down_channel.map(|down| (down, String::new())),
             scroll_offset: 0,
             messages: Vec::new(),
             last_processed: 0,
@@ -60,28 +59,24 @@ impl Tab {
         &self.name
     }
 
-    pub fn scroll_offset(&self) -> usize {
-        self.scroll_offset
-    }
-
     pub fn set_scroll_offset(&mut self, value: usize) {
         self.scroll_offset = value;
     }
 
-    pub fn up_channel(&self) -> usize {
-        self.up_channel
+    pub fn up_channel(&self) -> Ref<'_, UpChannel> {
+        self.up_channel.borrow()
     }
 
-    pub fn scroll_up(&mut self) {
+    pub fn scroll_up(&mut self, lines: usize) {
         self.set_scroll_offset(
-            self.scroll_offset()
-                .saturating_add(1)
+            self.scroll_offset
+                .saturating_add(lines)
                 .min(self.messages.len()),
         );
     }
 
-    pub fn scroll_down(&mut self) {
-        self.set_scroll_offset(self.scroll_offset().saturating_sub(1));
+    pub fn scroll_down(&mut self, lines: usize) {
+        self.set_scroll_offset(self.scroll_offset.saturating_sub(lines));
     }
 
     pub fn clear(&mut self) {
@@ -104,27 +99,19 @@ impl Tab {
         self.down_channel.as_ref().map(|(_, input)| input.as_str())
     }
 
-    pub fn send_input(
-        &mut self,
-        core: &mut Core,
-        channels: &mut BTreeMap<usize, RttActiveDownChannel>,
-    ) -> anyhow::Result<()> {
+    pub fn send_input(&mut self, core: &mut Core, client: &mut RttClient) -> anyhow::Result<()> {
         if let Some((channel, input)) = self.down_channel.as_mut() {
-            let channel = channels.get_mut(channel).expect("down channel disappeared");
             input.push('\n');
-            channel.push_rtt(core, input.as_str())?;
+            client.write_down_channel(core, *channel, input.as_str())?;
             input.clear();
         }
 
         Ok(())
     }
 
-    pub fn update_messages(&mut self, width: usize, up_channels: &BTreeMap<usize, UpChannel>) {
-        let up_channel = up_channels
-            .get(&self.up_channel)
-            .expect("up channel disappeared");
-
+    pub fn update_messages(&mut self, width: usize, height: usize) {
         if self.last_width != width {
+            // If the width changes, we need to reprocess all messages.
             self.last_width = width;
             self.last_processed = 0;
             self.set_scroll_offset(0);
@@ -132,7 +119,7 @@ impl Tab {
         }
 
         let old_message_count = self.messages.len();
-        match &up_channel.data {
+        match &self.up_channel.borrow().data {
             ChannelData::Strings { messages, .. } => {
                 // We strip ANSI sequences because they interfere with text wrapping.
                 //  - It's not obvious how we could tell defmt_parser to not emit ANSI sequences.
@@ -141,38 +128,29 @@ impl Tab {
                 //  - We can only interpret the sequences by emitting ratatui span styles, but at
                 // that point we can no longer wrap the text using textwrap.
                 //  - Leaving sequences in the output intact is just a bad experience.
-                fn text_block(output: ansi_parser::Output) -> Option<&str> {
-                    match output {
-                        ansi_parser::Output::TextBlock(text) => Some(text),
-                        _ => None,
-                    }
-                }
-                fn strip_ansi(s: impl AsRef<str>) -> String {
-                    use ansi_parser::AnsiParser;
-                    s.as_ref()
-                        .ansi_parse()
-                        .filter_map(text_block)
-                        .collect::<String>()
+
+                for line in messages.iter().skip(self.last_processed).map(strip_ansi) {
+                    // TODO: we shouldn't assume that one message is one complete line. If the
+                    // last line did not end with a newline, we should append to that line instead.
+
+                    // Trim a single newline from the end
+                    let line = if line.ends_with('\n') {
+                        &line[..line.len() - 1]
+                    } else {
+                        &line
+                    };
+
+                    self.messages
+                        .extend(textwrap::wrap(line, width).into_iter().map(String::from));
                 }
 
-                let new = messages
-                    .iter()
-                    .skip(self.last_processed)
-                    .map(strip_ansi)
-                    .flat_map(|m| {
-                        textwrap::wrap(&m, width)
-                            .into_iter()
-                            .map(|cow| cow.to_string())
-                            .collect::<Vec<_>>()
-                    });
                 self.last_processed = messages.len();
-
-                self.messages.extend(new);
             }
             ChannelData::Binary { data } => {
                 let mut string = self.messages.pop().unwrap_or_default();
 
                 if !data.is_empty() {
+                    // 4 characters per byte (0xAB) + 1 space, except at the end
                     string.reserve(data.len() * 5 - 1);
                 }
 
@@ -186,10 +164,10 @@ impl Tab {
                             let _ = write(&mut output, format_args!("{byte:#04x}"));
                             output
                         });
-                self.last_processed = data.len();
-                let new = textwrap::wrap(&string, width);
 
-                self.messages.extend(new.into_iter().map(String::from));
+                self.messages
+                    .extend(textwrap::wrap(&string, width).into_iter().map(String::from));
+                self.last_processed = data.len();
             }
         };
 
@@ -197,7 +175,15 @@ impl Tab {
 
         // Move scroll offset if we're not at the bottom
         if self.scroll_offset != 0 {
-            self.set_scroll_offset(self.scroll_offset + inserted);
+            // This scroll ensures that inserting new messages will not move our view.
+            self.scroll_up(inserted);
+
+            // Don't let scrolling up more than necessary to show all messages.
+            // Doing so would require the user to scroll down more times than necessary.
+            self.set_scroll_offset(
+                self.scroll_offset
+                    .min(self.messages.len().saturating_sub(height)),
+            );
         }
     }
 
@@ -206,7 +192,24 @@ impl Tab {
         self.messages
             .iter()
             .map(|s| s.as_str())
-            .skip(message_num - (height + self.scroll_offset).min(message_num))
+            .skip(message_num.saturating_sub(height + self.scroll_offset))
             .take(height)
     }
+}
+
+/// Removes ANSI escape sequences from a string.
+fn strip_ansi(s: impl AsRef<str>) -> String {
+    fn text_block(output: ansi_parser::Output) -> Option<&str> {
+        match output {
+            ansi_parser::Output::TextBlock(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    // TODO: use a cow: if ansi-parser returns a single string, do not allocate
+    use ansi_parser::AnsiParser;
+    s.as_ref()
+        .ansi_parse()
+        .filter_map(text_block)
+        .collect::<String>()
 }

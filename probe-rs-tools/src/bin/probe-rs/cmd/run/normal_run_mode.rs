@@ -1,6 +1,6 @@
-use crate::cmd::run::{OutputStream, RunLoop, RunMode};
+use crate::cmd::run::{OutputStream, RunLoop, RunMode, SemihostingPrinter};
 use anyhow::anyhow;
-use probe_rs::{BreakpointCause, Core, HaltReason, SemihostingCommand, Session};
+use probe_rs::{semihosting::SemihostingCommand, BreakpointCause, Core, HaltReason, Session};
 
 /// Options only used in normal run mode
 #[derive(Debug, clap::Parser, Clone)]
@@ -24,31 +24,43 @@ impl NormalRunMode {
     }
 }
 impl RunMode for NormalRunMode {
-    fn run(&self, mut session: Session, run_loop: RunLoop) -> anyhow::Result<()> {
+    fn run(&self, mut session: Session, mut run_loop: RunLoop) -> anyhow::Result<()> {
         let mut core = session.core(run_loop.core_id)?;
 
-        let halt_handler = |halt_reason: HaltReason, _core: &mut Core| match halt_reason {
-            HaltReason::Breakpoint(BreakpointCause::Semihosting(cmd)) => {
-                match cmd {
-                    SemihostingCommand::ExitSuccess => {
-                        Ok(Some(())) // Exit the run loop
-                    }
-                    SemihostingCommand::ExitError(details) => {
-                        Err(anyhow!("Semihosting indicates exit with {}", details))
-                    }
-                    SemihostingCommand::Unknown(details) => {
-                        tracing::warn!("Target wanted to run semihosting operation {:#x} with parameter {:#x},\
-                             but probe-rs does not support this operation yet. Continuing...", details.operation, details.parameter);
-                        Ok(None) // Continue running
-                    }
-                    SemihostingCommand::GetCommandLine(_) => {
-                        tracing::warn!("Target wanted to run semihosting operation SYS_GET_CMDLINE, but probe-rs does not support this operation yet. Continuing...");
-                        Ok(None) // Continue running
-                    }
+        let mut printer = SemihostingPrinter::new();
+        let halt_handler = |halt_reason: HaltReason, core: &mut Core| {
+            let HaltReason::Breakpoint(BreakpointCause::Semihosting(cmd)) = halt_reason else {
+                anyhow::bail!("CPU halted unexpectedly.");
+            };
+
+            match cmd {
+                SemihostingCommand::ExitSuccess => Ok(Some(())), // Exit the run loop
+                SemihostingCommand::ExitError(details) => {
+                    Err(anyhow!("Semihosting indicated exit with {details}"))
+                }
+                SemihostingCommand::Unknown(details) => {
+                    tracing::warn!(
+                        "Target wanted to run semihosting operation {:#x} with parameter {:#x},\
+                             but probe-rs does not support this operation yet. Continuing...",
+                        details.operation,
+                        details.parameter
+                    );
+                    Ok(None) // Continue running
+                }
+                SemihostingCommand::GetCommandLine(_) => {
+                    tracing::warn!("Target wanted to run semihosting operation SYS_GET_CMDLINE, but probe-rs does not support this operation yet. Continuing...");
+                    Ok(None) // Continue running
+                }
+                other @ (SemihostingCommand::Open(_)
+                | SemihostingCommand::Close(_)
+                | SemihostingCommand::WriteConsole(_)
+                | SemihostingCommand::Write(_)) => {
+                    printer.handle(other, core)?;
+                    Ok(None)
                 }
             }
-            _ => Err(anyhow!("CPU halted unexpectedly.")),
         };
+
         run_loop.run_until(
             &mut core,
             self.run_options.catch_hardfault,

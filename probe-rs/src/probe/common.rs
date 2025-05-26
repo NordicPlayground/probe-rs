@@ -2,14 +2,13 @@
 
 use std::iter;
 
-use anyhow::anyhow;
 use bitfield::bitfield;
 use bitvec::prelude::*;
 use probe_rs_target::ScanChainElement;
 
 use crate::probe::{
-    BatchExecutionError, ChainParams, DebugProbe, DebugProbeError, DeferredResultSet, JTAGAccess,
-    JtagChainItem, JtagCommandQueue,
+    BatchExecutionError, ChainParams, CommandResult, DebugProbe, DebugProbeError,
+    DeferredResultSet, JTAGAccess, JtagChainItem, JtagCommand, JtagCommandQueue,
 };
 
 pub(crate) fn bits_to_byte(bits: impl IntoIterator<Item = bool>) -> u32 {
@@ -106,7 +105,7 @@ fn starts_to_lengths(starts: &[usize], total: usize) -> Vec<usize> {
 /// Because we don't know how many TAPs there are, we scan until we find
 /// a 32-bit IDCODE of all 1s, which comes after the last TAP in the chain.
 ///
-/// Returns Vec<Option<IdCode>>, with None for TAPs in BYPASS.
+/// Returns `Vec<Option<IdCode>>`, with None for TAPs in BYPASS.
 pub(crate) fn extract_idcodes(
     mut dr: &BitSlice<u8>,
 ) -> Result<Vec<Option<IdCode>>, ScanChainError> {
@@ -165,9 +164,9 @@ pub(crate) fn common_sequence<'a, S: BitStore>(
 /// they must be provided, and are then checked.
 ///
 /// This implementation is a port of the algorithm from:
-/// https://github.com/GlasgowEmbedded/glasgow/blob/30dc11b2/software/glasgow/applet/interface/jtag_probe/__init__.py#L712
+/// <https://github.com/GlasgowEmbedded/glasgow/blob/30dc11b2/software/glasgow/applet/interface/jtag_probe/__init__.py#L712>
 ///
-/// Returns Vec<usize>, with an entry for each TAP.
+/// Returns `Vec<usize>`, with an entry for each TAP.
 pub(crate) fn extract_ir_lengths(
     ir: &BitSlice<u8>,
     n_taps: usize,
@@ -244,6 +243,28 @@ pub(crate) fn extract_ir_lengths(
         tracing::info!("IR lengths are unambiguous: {irlens:?}");
         Ok(irlens)
     } else {
+        if n_taps < starts.len() {
+            // We have more possible starts than TAPs. This may be because some devices start the
+            // IR scan with 101xx. Try to merge length 2 IRs with their neighbours.
+            let mut irlens = starts_to_lengths(&starts, ir.len()).into_iter();
+            let mut merged = Vec::new();
+            while let Some(len) = irlens.next() {
+                if len == 2 {
+                    if let Some(next) = irlens.next() {
+                        merged.push(len + next);
+                        continue;
+                    }
+                }
+                merged.push(len);
+            }
+
+            // Only succeed if we end up with the expected number of IRs.
+            if merged.len() == n_taps {
+                tracing::info!("IR lengths after merging 101xx prefixes: {merged:?}");
+                return Ok(merged);
+            }
+        }
+
         tracing::error!("IR lengths are ambiguous and must be explicitly configured.");
         Err(ScanChainError::InvalidIR)
     }
@@ -375,7 +396,6 @@ impl JtagState {
 #[derive(Debug)]
 pub(crate) struct JtagDriverState {
     pub state: JtagState,
-    pub current_ir_reg: u32,
     // The maximum IR address
     pub max_ir_address: u32,
     pub expected_scan_chain: Option<Vec<ScanChainElement>>,
@@ -390,7 +410,6 @@ impl Default for JtagDriverState {
     fn default() -> Self {
         Self {
             state: JtagState::Reset,
-            current_ir_reg: 1,
             max_ir_address: 0x0F,
             expected_scan_chain: None,
             scan_chain: Vec::new(),
@@ -442,7 +461,7 @@ pub(crate) trait RawJtagIo {
         self.shift_bits(tms, tdi, iter::repeat(false))?;
         let response = self.read_captured_bits()?;
 
-        tracing::debug!("Response to reset: {}", response);
+        tracing::debug!("Response to reset: {response}");
 
         Ok(())
     }
@@ -457,8 +476,9 @@ pub(crate) trait RawJtagIo {
 
         let max_ir_address = (1 << params.irlen) - 1;
 
-        tracing::debug!("Setting chain params: {:?}", params);
-        tracing::debug!("Setting max_ir_address to {}", max_ir_address);
+        tracing::debug!("Selecting JTAG TAP: {target}");
+        tracing::debug!("Setting chain params: {params:?}");
+        tracing::debug!("Setting max_ir_address to {max_ir_address}");
 
         let state = self.state_mut();
         state.max_ir_address = max_ir_address;
@@ -496,7 +516,7 @@ fn shift_ir(
 
     // Check the bit length, enough data has to be available
     if data.len() * 8 < len || len == 0 {
-        return Err(DebugProbeError::Other(anyhow!(
+        return Err(DebugProbeError::Other(format!(
             "Invalid data length. IR bits: {}, expected: {}",
             data.len(),
             len
@@ -550,7 +570,7 @@ fn shift_dr(
 
     // Check the bit length, enough data has to be available
     if data.len() * 8 < register_bits || register_bits == 0 {
-        return Err(DebugProbeError::Other(anyhow!(
+        return Err(DebugProbeError::Other(format!(
             "Invalid data length. DR bits: {}, expected: {}",
             data.len(),
             register_bits
@@ -612,18 +632,15 @@ fn prepare_write_register(
     len: u32,
     capture: bool,
 ) -> Result<usize, DebugProbeError> {
-    if protocol.state().current_ir_reg != address {
-        if address > protocol.state().max_ir_address {
-            return Err(DebugProbeError::Other(anyhow!(
-                "Invalid instruction register access: {}",
-                address
-            )));
-        }
-
-        let ir_len = protocol.state().chain_params.irlen;
-        shift_ir(protocol, &address.to_le_bytes(), ir_len, false)?;
-        protocol.state_mut().current_ir_reg = address;
+    if address > protocol.state().max_ir_address {
+        return Err(DebugProbeError::Other(format!(
+            "Invalid instruction register access: {}",
+            address
+        )));
     }
+
+    let ir_len = protocol.state().chain_params.irlen;
+    shift_ir(protocol, &address.to_le_bytes(), ir_len, false)?;
 
     // read DR register by transfering len bits to the chain
     shift_dr(protocol, data, len as usize, capture)
@@ -644,7 +661,7 @@ impl<Probe: DebugProbe + RawJtagIo + 'static> JTAGAccess for Probe {
 
         tracing::debug!("DR: {:?}", response);
 
-        let idcodes = extract_idcodes(&response).map_err(|e| DebugProbeError::Other(e.into()))?;
+        let idcodes = extract_idcodes(&response)?;
 
         tracing::info!(
             "JTAG DR scan complete, found {} TAPs. {:?}",
@@ -692,8 +709,7 @@ impl<Probe: DebugProbe + RawJtagIo + 'static> JTAGAccess for Probe {
                         .collect::<Vec<usize>>()
                 })
                 .as_deref(),
-        )
-        .map_err(|e| DebugProbeError::Other(e.into()))?;
+        )?;
 
         tracing::info!("Found {} TAPs on reset scan", idcodes.len());
         tracing::debug!("Detected IR lens: {:?}", ir_lens);
@@ -722,7 +738,7 @@ impl<Probe: DebugProbe + RawJtagIo + 'static> JTAGAccess for Probe {
     }
 
     fn read_register(&mut self, address: u32, len: u32) -> Result<Vec<u8>, DebugProbeError> {
-        let data = vec![0u8; (len as usize + 7) / 8];
+        let data = vec![0u8; len.div_ceil(8) as usize];
 
         self.write_register(address, &data, len)
     }
@@ -745,6 +761,19 @@ impl<Probe: DebugProbe + RawJtagIo + 'static> JTAGAccess for Probe {
         Ok(result)
     }
 
+    fn write_dr(&mut self, data: &[u8], len: u32) -> Result<Vec<u8>, DebugProbeError> {
+        shift_dr(self, data, len as usize, true)?;
+
+        let mut response = self.read_captured_bits()?;
+
+        // Implementations don't need to align to keep the code simple
+        response.force_align();
+        let result = response.into_vec();
+
+        tracing::trace!("recieve_write_dr result: {:?}", result);
+        Ok(result)
+    }
+
     #[tracing::instrument(skip(self, writes))]
     fn write_register_batch(
         &mut self,
@@ -753,18 +782,26 @@ impl<Probe: DebugProbe + RawJtagIo + 'static> JTAGAccess for Probe {
         let mut bits = Vec::with_capacity(writes.len());
         let t1 = std::time::Instant::now();
         tracing::debug!("Preparing {} writes...", writes.len());
-        for (idx, write) in writes.iter() {
-            // If an error happens during prep, return no results as chip will be in an inconsistent state
-            let op = prepare_write_register(
-                self,
-                write.address,
-                &write.data,
-                write.len,
-                idx.should_capture(),
-            )
-            .map_err(|e| BatchExecutionError::new(e.into(), DeferredResultSet::new()))?;
+        for (idx, command) in writes.iter() {
+            let result = match command {
+                JtagCommand::WriteRegister(write) => prepare_write_register(
+                    self,
+                    write.address,
+                    &write.data,
+                    write.len,
+                    idx.should_capture(),
+                ),
 
-            bits.push((idx, write, op));
+                JtagCommand::ShiftDr(write) => {
+                    shift_dr(self, &write.data, write.len as usize, idx.should_capture())
+                }
+            };
+
+            // If an error happens during prep, return no results as chip will be in an inconsistent state
+            let op =
+                result.map_err(|e| BatchExecutionError::new(e.into(), DeferredResultSet::new()))?;
+
+            bits.push((idx, command, op));
         }
 
         tracing::debug!("Sending to chip...");
@@ -783,10 +820,20 @@ impl<Probe: DebugProbe + RawJtagIo + 'static> JTAGAccess for Probe {
                 let mut reg_bits = bitstream[..bits].to_bitvec();
                 reg_bits.force_align();
                 let response = reg_bits.into_vec();
-                match (command.transform)(command, response) {
+
+                let result = match command {
+                    JtagCommand::WriteRegister(command) => (command.transform)(command, response),
+                    JtagCommand::ShiftDr(command) => (command.transform)(command, response),
+                };
+
+                match result {
                     Ok(response) => responses.push(idx, response),
                     Err(e) => return Err(BatchExecutionError::new(e, responses)),
                 }
+            } else {
+                // Add a response so that the number of successfully processed commands is correct.
+                // This is important in case we need to retry part of the batch.
+                responses.push(idx, CommandResult::None);
             }
 
             bitstream = &bitstream[bits..];
@@ -829,6 +876,19 @@ mod tests {
         // the boundary scan TAP (IR is 5-bit wide) and the Cortex® -M4 with FPU TAP (IR is 4-bit wide).
         // This test ensures our scan chain interrogation handles this scenario.
         let ir = &bitvec![u8, Lsb0; 1,0,0,0,1,0,0,0,0];
+        let n_taps = 2;
+        let expected = None;
+
+        let ir_lengths = extract_ir_lengths(ir, n_taps, expected).unwrap();
+
+        assert_eq!(ir_lengths, vec![4, 5]);
+    }
+
+    #[test]
+    fn extract_ir_lengths_with_two_taps_101() {
+        // Slightly contrived example where the IR scan starts with 101xx. In known real devices
+        // the 101 TAP is 5 bits long, but this is an edge case that the algorithm should handle.
+        let ir = &bitvec![u8, Lsb0; 1,0,1,0,1,0,0,0,0];
         let n_taps = 2;
         let expected = None;
 

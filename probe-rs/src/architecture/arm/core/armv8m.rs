@@ -9,16 +9,15 @@ use super::{
 };
 use crate::{
     architecture::arm::{
-        core::registers::cortex_m::XPSR, memory::adi_v5_memory_interface::ArmProbe,
-        sequences::ArmDebugSequence, ArmError,
+        core::registers::cortex_m::XPSR, memory::ArmMemoryInterface, sequences::ArmDebugSequence,
+        ArmError,
     },
     core::{CoreRegisters, RegisterId, RegisterValue, VectorCatchCondition},
     error::Error,
-    memory::valid_32bit_address,
+    memory::{valid_32bit_address, CoreMemoryInterface},
     Architecture, BreakpointCause, CoreInformation, CoreInterface, CoreRegister, CoreStatus,
     CoreType, HaltReason, InstructionSet, MemoryInterface, MemoryMappedRegister,
 };
-use anyhow::Result;
 use bitfield::bitfield;
 use std::{
     mem::size_of,
@@ -28,7 +27,7 @@ use std::{
 
 /// The state of a core that can be used to persist core state across calls to multiple different cores.
 pub struct Armv8m<'probe> {
-    memory: Box<dyn ArmProbe + 'probe>,
+    memory: Box<dyn ArmMemoryInterface + 'probe>,
 
     state: &'probe mut CortexMState,
 
@@ -37,7 +36,7 @@ pub struct Armv8m<'probe> {
 
 impl<'probe> Armv8m<'probe> {
     pub(crate) fn new(
-        mut memory: Box<dyn ArmProbe + 'probe>,
+        mut memory: Box<dyn ArmMemoryInterface + 'probe>,
         state: &'probe mut CortexMState,
         sequence: Arc<dyn ArmDebugSequence>,
     ) -> Result<Self, Error> {
@@ -85,19 +84,20 @@ impl<'probe> Armv8m<'probe> {
     }
 }
 
-impl<'probe> CoreInterface for Armv8m<'probe> {
+impl CoreInterface for Armv8m<'_> {
     fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), Error> {
         // Wait until halted state is active again.
         let start = Instant::now();
 
-        while start.elapsed() < timeout {
-            if self.core_halted()? {
-                return Ok(());
+        while !self.core_halted()? {
+            if start.elapsed() >= timeout {
+                return Err(Error::Arm(ArmError::Timeout));
             }
-
+            // Wait a bit before polling again.
             std::thread::sleep(Duration::from_millis(1));
         }
-        Err(Error::Arm(ArmError::Timeout))
+
+        Ok(())
     }
 
     fn core_halted(&mut self) -> Result<bool, Error> {
@@ -266,8 +266,6 @@ impl<'probe> CoreInterface for Armv8m<'probe> {
     }
 
     fn step(&mut self) -> Result<CoreInformation, Error> {
-        self.state.semihosting_command = None;
-
         // First check if we stopped on a breakpoint, because this requires special handling before we can continue.
         let breakpoint_at_pc = if matches!(
             self.state.current_state,
@@ -314,6 +312,8 @@ impl<'probe> CoreInterface for Armv8m<'probe> {
             self.enable_breakpoints(true)?;
         }
 
+        self.state.semihosting_command = None;
+
         Ok(CoreInformation {
             pc: pc_after_step.try_into()?,
         })
@@ -330,7 +330,9 @@ impl<'probe> CoreInterface for Armv8m<'probe> {
 
     fn write_core_reg(&mut self, address: RegisterId, value: RegisterValue) -> Result<(), Error> {
         if self.state.current_state.is_halted() {
-            super::cortex_m::write_core_reg(&mut *self.memory, address, value.try_into()?)
+            super::cortex_m::write_core_reg(&mut *self.memory, address, value.try_into()?)?;
+
+            Ok(())
         } else {
             Err(Error::Arm(ArmError::CoreNotHalted))
         }
@@ -538,91 +540,14 @@ impl<'probe> CoreInterface for Armv8m<'probe> {
     }
 }
 
-impl<'probe> MemoryInterface for Armv8m<'probe> {
-    fn supports_native_64bit_access(&mut self) -> bool {
-        self.memory.supports_native_64bit_access()
-    }
+impl CoreMemoryInterface for Armv8m<'_> {
+    type ErrorType = ArmError;
 
-    fn read_word_64(&mut self, address: u64) -> Result<u64, Error> {
-        self.memory.read_word_64(address).map_err(Error::from)
+    fn memory(&self) -> &dyn MemoryInterface<Self::ErrorType> {
+        self.memory.as_memory_interface()
     }
-
-    fn read_word_32(&mut self, address: u64) -> Result<u32, Error> {
-        self.memory.read_word_32(address).map_err(Error::from)
-    }
-
-    fn read_word_16(&mut self, address: u64) -> Result<u16, Error> {
-        self.memory.read_word_16(address).map_err(Error::from)
-    }
-
-    fn read_word_8(&mut self, address: u64) -> Result<u8, Error> {
-        self.memory.read_word_8(address).map_err(Error::from)
-    }
-
-    fn read_64(&mut self, address: u64, data: &mut [u64]) -> Result<(), Error> {
-        self.memory.read_64(address, data).map_err(Error::from)
-    }
-
-    fn read_32(&mut self, address: u64, data: &mut [u32]) -> Result<(), Error> {
-        self.memory.read_32(address, data).map_err(Error::from)
-    }
-
-    fn read_16(&mut self, address: u64, data: &mut [u16]) -> Result<(), Error> {
-        self.memory.read_16(address, data).map_err(Error::from)
-    }
-
-    fn read_8(&mut self, address: u64, data: &mut [u8]) -> Result<(), Error> {
-        self.memory.read_8(address, data).map_err(Error::from)
-    }
-
-    fn write_word_64(&mut self, address: u64, data: u64) -> Result<(), Error> {
-        self.memory
-            .write_word_64(address, data)
-            .map_err(Error::from)
-    }
-
-    fn write_word_32(&mut self, address: u64, data: u32) -> Result<(), Error> {
-        self.memory
-            .write_word_32(address, data)
-            .map_err(Error::from)
-    }
-
-    fn write_word_16(&mut self, address: u64, data: u16) -> Result<(), Error> {
-        self.memory
-            .write_word_16(address, data)
-            .map_err(Error::from)
-    }
-
-    fn write_word_8(&mut self, address: u64, data: u8) -> Result<(), Error> {
-        self.memory.write_word_8(address, data).map_err(Error::from)
-    }
-
-    fn write_64(&mut self, address: u64, data: &[u64]) -> Result<(), Error> {
-        self.memory.write_64(address, data).map_err(Error::from)
-    }
-
-    fn write_32(&mut self, address: u64, data: &[u32]) -> Result<(), Error> {
-        self.memory.write_32(address, data).map_err(Error::from)
-    }
-
-    fn write_16(&mut self, address: u64, data: &[u16]) -> Result<(), Error> {
-        self.memory.write_16(address, data).map_err(Error::from)
-    }
-
-    fn write_8(&mut self, address: u64, data: &[u8]) -> Result<(), Error> {
-        self.memory.write_8(address, data).map_err(Error::from)
-    }
-
-    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Error> {
-        self.memory.write(address, data).map_err(Error::from)
-    }
-
-    fn supports_8bit_transfers(&self) -> Result<bool, Error> {
-        self.memory.supports_8bit_transfers().map_err(Error::from)
-    }
-
-    fn flush(&mut self) -> Result<(), Error> {
-        self.memory.flush().map_err(Error::from)
+    fn memory_mut(&mut self) -> &mut dyn MemoryInterface<Self::ErrorType> {
+        self.memory.as_memory_interface_mut()
     }
 }
 

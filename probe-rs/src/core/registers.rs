@@ -1,7 +1,7 @@
 //! Core registers are represented by the `CoreRegister` struct, and collected in a `RegisterFile` for each of the supported architectures.
 
 use crate::Error;
-use anyhow::{anyhow, Result};
+use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
     convert::Infallible,
@@ -104,11 +104,12 @@ pub enum UnwindRule {
 /// Each architecture will have a set of general purpose registers, and potentially some special purpose registers. It also happens that some general purpose registers can be used for special purposes. For instance, some ARM variants allows the `LR` (link register / return address) to be used as general purpose register `R14`."
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CoreRegister {
-    // /// Some architectures have multiple names for the same register, depending on the context and the role of the register.
-    pub(crate) id: RegisterId,
+    /// Some architectures have multiple names for the same register, depending on the context and the role of the register.
+    pub id: RegisterId,
     /// If the register plays a special role (one or more) during program execution and exception handling, this array will contain the appropriate [`RegisterRole`] entry/entries.
-    pub(crate) roles: &'static [RegisterRole],
-    pub(crate) data_type: RegisterDataType,
+    pub roles: &'static [RegisterRole],
+    /// The data type of the register
+    pub data_type: RegisterDataType,
     /// For unwind purposes (debug and/or exception handling), we need to know how values are preserved between function calls. (Applies to ARM and RISC-V)
     #[serde(skip_serializing)]
     pub unwind_rule: UnwindRule,
@@ -174,7 +175,7 @@ impl CoreRegister {
     /// Get the size, in bytes, of this register
     pub fn size_in_bytes(&self) -> usize {
         // Always round up
-        (self.size_in_bits() + 7) / 8
+        self.size_in_bits().div_ceil(8)
     }
 
     /// Get the width to format this register as a hex string
@@ -247,10 +248,9 @@ impl RegisterValue {
                     *value = reg_val;
                     Ok(())
                 } else {
-                    Err(Error::Other(anyhow!(
+                    Err(Error::Other(format!(
                         "Overflow error: Attempting to add {} bytes to Register value {}",
-                        bytes,
-                        self
+                        bytes, self
                     )))
                 }
             }
@@ -259,10 +259,9 @@ impl RegisterValue {
                     *value = reg_val;
                     Ok(())
                 } else {
-                    Err(Error::Other(anyhow!(
+                    Err(Error::Other(format!(
                         "Overflow error: Attempting to add {} bytes to Register value {}",
-                        bytes,
-                        self
+                        bytes, self
                     )))
                 }
             }
@@ -271,10 +270,9 @@ impl RegisterValue {
                     *value = reg_val;
                     Ok(())
                 } else {
-                    Err(Error::Other(anyhow!(
+                    Err(Error::Other(format!(
                         "Overflow error: Attempting to add {} bytes to Register value {}",
-                        bytes,
-                        self
+                        bytes, self
                     )))
                 }
             }
@@ -289,10 +287,9 @@ impl RegisterValue {
                     *value = reg_val;
                     Ok(())
                 } else {
-                    Err(Error::Other(anyhow!(
+                    Err(Error::Other(format!(
                         "Overflow error: Attempting to subtract {} bytes to Register value {}",
-                        bytes,
-                        self
+                        bytes, self
                     )))
                 }
             }
@@ -301,10 +298,9 @@ impl RegisterValue {
                     *value = reg_val;
                     Ok(())
                 } else {
-                    Err(Error::Other(anyhow!(
+                    Err(Error::Other(format!(
                         "Overflow error: Attempting to subtract {} bytes to Register value {}",
-                        bytes,
-                        self
+                        bytes, self
                     )))
                 }
             }
@@ -313,10 +309,9 @@ impl RegisterValue {
                     *value = reg_val;
                     Ok(())
                 } else {
-                    Err(Error::Other(anyhow!(
+                    Err(Error::Other(format!(
                         "Overflow error: Attempting to subtract {} bytes to Register value {}",
-                        bytes,
-                        self
+                        bytes, self
                     )))
                 }
             }
@@ -416,10 +411,10 @@ impl TryInto<u32> for RegisterValue {
             Self::U32(v) => Ok(v),
             Self::U64(v) => v
                 .try_into()
-                .map_err(|_| crate::Error::Other(anyhow!("Value '{}' too large for u32", v))),
+                .map_err(|_| crate::Error::Other(format!("Value '{}' too large for u32", v))),
             Self::U128(v) => v
                 .try_into()
-                .map_err(|_| crate::Error::Other(anyhow!("Value '{}' too large for u32", v))),
+                .map_err(|_| crate::Error::Other(format!("Value '{}' too large for u32", v))),
         }
     }
 }
@@ -433,7 +428,7 @@ impl TryInto<u64> for RegisterValue {
             Self::U64(v) => Ok(v),
             Self::U128(v) => v
                 .try_into()
-                .map_err(|_| crate::Error::Other(anyhow!("Value '{}' too large for u64", v))),
+                .map_err(|_| crate::Error::Other(format!("Value '{}' too large for u64", v))),
         }
     }
 }
@@ -451,7 +446,7 @@ impl TryInto<u128> for RegisterValue {
 }
 
 /// Extension trait to support converting errors
-/// from TryInto calls into [probe_rs::Error]
+/// from TryInto calls into [Error]
 pub trait RegisterValueResultExt<T> {
     /// Convert [Result<T,E>] into `Result<T, probe_rs::Error>`
     fn into_crate_error(self) -> Result<T, Error>;

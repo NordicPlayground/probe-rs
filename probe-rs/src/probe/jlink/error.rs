@@ -1,4 +1,4 @@
-use crate::probe::DebugProbeError;
+use crate::probe::ProbeError;
 
 use super::{capabilities::Capability, interface::Interface};
 
@@ -22,8 +22,8 @@ pub enum JlinkError {
     /// advertised as optional *capability* bits. This error occurs when the capability bit for an
     /// operation isn't set when that operation is attempted.
     ///
-    /// Capabilities can be read by calling [`JLink::capabilities`], which returns a
-    /// [`Capabilities`] bitflags struct.
+    /// Capabilities can be read by calling [`super::JLink::capabilities()`], which returns a
+    /// [`Capabilities`][super::Capabilities] struct.
     MissingCapability(Capability),
 
     #[error("probe does not support target interface {0:?}")]
@@ -39,8 +39,4 @@ pub enum JlinkError {
     Other(String),
 }
 
-impl From<JlinkError> for DebugProbeError {
-    fn from(e: JlinkError) -> Self {
-        DebugProbeError::ProbeSpecific(Box::new(e))
-    }
-}
+impl ProbeError for JlinkError {}

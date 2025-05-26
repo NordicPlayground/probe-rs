@@ -5,6 +5,14 @@ use std::ops::Range;
 /// Describes any error that happened during the or in preparation for the flashing procedure.
 #[derive(thiserror::Error, Debug)]
 pub enum FlashError {
+    /// No flash algorithm was found by the given name.
+    #[error("The {name} target has no flash algorithm called {name}")]
+    AlgorithmNotFound {
+        /// The name of the target.
+        name: String,
+        /// The name of the algorithm that was not found.
+        algo_name: String,
+    },
     /// No flash memory contains the entire requested memory range.
     #[error("No flash memory contains the entire requested memory range {range:#010X?}.")]
     NoSuitableNvm {
@@ -16,6 +24,12 @@ pub enum FlashError {
     /// Erasing the full chip flash failed.
     #[error("Failed to erase the whole chip.")]
     ChipEraseFailed {
+        /// The source error of this error.
+        source: Box<dyn std::error::Error + 'static + Send + Sync>,
+    },
+    /// Failed to read data from flash.
+    #[error("Failed to read data from flash.")]
+    FlashReadFailed {
         /// The source error of this error.
         source: Box<dyn std::error::Error + 'static + Send + Sync>,
     },
@@ -40,7 +54,7 @@ pub enum FlashError {
     /// Initializing the flash algorithm failed.
     #[error("The initialization of the flash algorithm failed.")]
     Init(#[source] Box<dyn std::error::Error + 'static + Send + Sync>),
-    /// Uninizializing the flash algorithm failed.
+    /// Uninitializing the flash algorithm failed.
     #[error("The uninitialization of the flash algorithm failed.")]
     Uninit(#[source] Box<dyn std::error::Error + 'static + Send + Sync>),
     /// This target does not support full chip flash erases.
@@ -54,6 +68,9 @@ pub enum FlashError {
         /// The error code the called routine returned.
         error_code: u32,
     },
+    /// Failed to read the core status.
+    #[error("Failed to read the core status.")]
+    UnableToReadCoreStatus(#[source] error::Error),
     /// The core entered an unexpected status while executing a flashing operation.
     #[error("The core entered an unexpected status: {status:?}.")]
     UnexpectedCoreStatus {
@@ -70,7 +87,13 @@ pub enum FlashError {
     },
     /// An error occurred during the interaction with the core.
     #[error("Something during the interaction with the core went wrong")]
-    Core(#[from] error::Error),
+    Core(#[source] error::Error),
+    /// Failed to reset, and then halt the CPU.
+    #[error("Failed to reset, and then halt the CPU.")]
+    ResetAndHalt(#[source] error::Error),
+    /// Failed to start running code on the CPU.
+    #[error("Failed to start running code on the CPU")]
+    Run(#[source] error::Error),
     /// The RAM contents did not match the flash algorithm.
     #[error(
         "The RAM contents did not match the expected contents after loading the flash algorithm."
@@ -80,26 +103,31 @@ pub enum FlashError {
     ///
     /// Check the algorithm code and settings before you try again.
     #[error(
-        "Failed to load flash algorithm into RAM at address {address:08X?}. Is there space for the algorithm header?"
+        "Failed to load flash algorithm into RAM at address {address:#010x}. Is there space for the algorithm header?"
     )]
     InvalidFlashAlgorithmLoadAddress {
         /// The address where the algorithm was supposed to be loaded to.
         address: u64,
     },
     /// Failed to configure a valid stack size for the flash algorithm.
-    #[error("Failed to configure a stack for the flash algorithm.")]
-    InvalidFlashAlgorithmStackSize,
-    /// The given page size is not valid. Only page sizes multiples of 4 bytes are allowed.
-    #[error("Invalid page size {size:08X?}. Must be a multiple of 4 bytes.")]
-    InvalidPageSize {
-        /// The size of the page in bytes.
-        size: u32,
+    #[error("Failed to configure a stack of size {size} for the flash algorithm.")]
+    InvalidFlashAlgorithmStackSize {
+        /// The size of the stack that was tried to be configured.
+        size: u64,
+    },
+    /// Failed to configure the data region of a flash algorithm.
+    #[error("Failed to place data to address {data_load_addr:#010x} in RAM. The data must be placed in the range {data_ram:#x?}.")]
+    InvalidDataAddress {
+        /// The address where the data was supposed to be loaded to.
+        data_load_addr: u64,
+        /// The range of the data memory.
+        data_ram: Range<u64>,
     },
     // TODO: Warn at YAML parsing stage.
     // TODO: 1 Add information about flash (name, address)
     // TODO: 2 Add source of target definition (built-in, yaml)
     /// No flash algorithm was linked to this target.
-    #[error("Trying to write to flash region {range:#010X?}, but no suitable (default) flash loader algorithm is linked to the given target: {name}.")]
+    #[error("Trying to write to flash region {range:#010x?}, but no suitable (default) flash loader algorithm is linked to the given target: {name}.")]
     NoFlashLoaderAlgorithmAttached {
         /// The name of the chip.
         name: String,
@@ -124,7 +152,7 @@ pub enum FlashError {
     // TODO: 1 Add source of target definition
     // TOOD: 2 Do this at target load time.
     /// The given chip has no RAM defined.
-    #[error("No RAM defined for target: {name}.")]
+    #[error("No suitable RAM region is defined for target: {name}.")]
     NoRamDefined {
         /// The name of the chip.
         name: String,
@@ -142,7 +170,7 @@ pub enum FlashError {
     /// Two blocks of data overlap each other which means the loaded binary is broken.
     ///
     /// Please check your data and try again.
-    #[error("Adding data for addresses {added_addresses:08X?} overlaps previously added data for addresses {existing_addresses:08X?}.")]
+    #[error("Adding data for addresses {added_addresses:#010x?} overlaps previously added data for addresses {existing_addresses:#010x?}.")]
     DataOverlaps {
         /// The address range that was tried to be added.
         added_addresses: Range<u64>,
@@ -153,9 +181,15 @@ pub enum FlashError {
     #[error("No core can access the NVM region {0:?}.")]
     NoNvmCoreAccess(NvmRegion),
     /// No core can access this RAM region.
-    #[error("No core can access the ram region {0:?}.")]
+    #[error("No core can access the RAM region {0:?}.")]
     NoRamCoreAccess(RamRegion),
     /// The register value supplied for this flash algorithm is out of the supported range.
-    #[error("The register value {0:08X?} is out of the supported range.")]
+    #[error("The register value {0:#010x} is out of the supported range.")]
     RegisterValueNotSupported(u64),
+    /// Stack overflow while flashing.
+    #[error("Stack overflow detected during {operation}.")]
+    StackOverflowDetected {
+        /// The operation that caused the stack overflow.
+        operation: &'static str,
+    },
 }

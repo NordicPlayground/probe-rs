@@ -65,13 +65,12 @@ jobs:
 
       - name: Bump versions
         run: |
-          cargo release version ${{ inputs.version }} --execute --verbose --no-confirm --allow-branch ${BRANCH_NAME}
+          cargo release version ${{ inputs.version }} --exclude probe-rs-mi --execute --verbose --no-confirm --allow-branch ${BRANCH_NAME}
           cargo release replace --execute --verbose --no-confirm
           cargo release hook --execute --verbose --no-confirm
           cargo release commit --execute --verbose --no-confirm --sign-commit
         env:
           SSH_AUTH_SOCK: /tmp/ssh_agent.sock
-
 
       - name: Check semver compliance
         run: |
@@ -86,7 +85,7 @@ jobs:
           gh pr create -B master -H "${BRANCH_NAME}"\
             --title "Release ${{ inputs.version }}"\
             --label "release"\
-            --label "skip-changelog"\
+            --label "changelog:skip"\
             --body "Released packages are:
 
           - probe-rs
@@ -94,4 +93,4 @@ jobs:
           - target-gen
           - rtthost"
         env:
-            GH_TOKEN: ${{ secrets.GH_PAT }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}

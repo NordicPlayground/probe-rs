@@ -1,3 +1,5 @@
+use std::io::Write as _;
+
 use probe_rs_target::TransferEncoding;
 
 use crate::flashing::{FlashLayout, FlashPage, FlashSector};
@@ -5,6 +7,7 @@ use crate::flashing::{FlashLayout, FlashPage, FlashSector};
 trait EncoderAlgorithm {
     fn pages(&self) -> &[FlashPage];
     fn sectors(&self) -> &[FlashSector];
+    fn layout(&self) -> &FlashLayout;
 }
 
 /// No-op encoder.
@@ -26,6 +29,10 @@ impl EncoderAlgorithm for RawEncoder {
     fn sectors(&self) -> &[FlashSector] {
         self.flash.sectors()
     }
+
+    fn layout(&self) -> &FlashLayout {
+        &self.flash
+    }
 }
 
 /// Miniz-encoder.
@@ -35,12 +42,12 @@ impl EncoderAlgorithm for RawEncoder {
 ///
 /// The flash loader that accepts this format must be able to track the offset in the current image.
 /// The end of an image is signaled by the first non-full page. This may include an empty page.
-struct MinizEncoder {
+struct ZlibEncoder {
     flash: FlashLayout,
     compressed_pages: Vec<FlashPage>,
 }
 
-impl MinizEncoder {
+impl ZlibEncoder {
     fn new(flash: FlashLayout) -> Self {
         let mut compressed_pages = vec![];
 
@@ -50,8 +57,15 @@ impl MinizEncoder {
             if image.is_empty() {
                 return;
             }
+
+            use flate2::write::ZlibEncoder;
+            use flate2::Compression;
+
             // This page is not contiguous with the previous one, finish the previous image.
-            let compressed = miniz_oxide::deflate::compress_to_vec_zlib(image, 9);
+            let mut e = ZlibEncoder::new(Vec::new(), Compression::best());
+            // These unwraps are okay because we are writing to a Vec and that is infallible.
+            e.write_all(image).unwrap();
+            let compressed = e.finish().unwrap();
 
             let image_len = compressed.len();
             // We chunk up the image and prepend the compressed image's length to the first chunk.
@@ -109,13 +123,17 @@ impl MinizEncoder {
     }
 }
 
-impl EncoderAlgorithm for MinizEncoder {
+impl EncoderAlgorithm for ZlibEncoder {
     fn pages(&self) -> &[FlashPage] {
         &self.compressed_pages
     }
 
     fn sectors(&self) -> &[FlashSector] {
         self.flash.sectors()
+    }
+
+    fn layout(&self) -> &FlashLayout {
+        &self.flash
     }
 }
 
@@ -128,7 +146,7 @@ impl FlashEncoder {
         Self {
             encoder: match encoding {
                 TransferEncoding::Raw => Box::new(RawEncoder::new(flash)),
-                TransferEncoding::Miniz => Box::new(MinizEncoder::new(flash)),
+                TransferEncoding::Miniz => Box::new(ZlibEncoder::new(flash)),
             },
         }
     }
@@ -139,5 +157,13 @@ impl FlashEncoder {
 
     pub fn sectors(&self) -> &[FlashSector] {
         self.encoder.sectors()
+    }
+
+    pub fn program_size(&self) -> u64 {
+        self.pages().iter().map(|p| p.data().len() as u64).sum()
+    }
+
+    pub fn flash_layout(&self) -> &FlashLayout {
+        self.encoder.layout()
     }
 }

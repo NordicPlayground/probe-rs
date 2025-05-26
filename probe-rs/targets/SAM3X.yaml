@@ -1,4 +1,7 @@
 name: SAM3X
+manufacturer:
+  id: 0x1f
+  cc: 0x0
 generated_from_pack: true
 pack_file_release: 1.0.50
 variants:
@@ -8,23 +11,16 @@ variants:
     type: armv7m
     core_access_options: !Arm
       ap: 0
-      psel: 0
   memory_map:
-  - !Ram
-    name: IRAM1
-    range:
-      start: 0x20000000
-      end: 0x20008000
-    cores:
-    - main
   - !Nvm
     name: IROM1
     range:
       start: 0x80000
       end: 0xa0000
-    is_boot_memory: true
     cores:
     - main
+    access:
+      boot: true
   - !Generic
     name: IROM2
     range:
@@ -37,6 +33,13 @@ variants:
     range:
       start: 0x100000
       end: 0x200000
+    cores:
+    - main
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20008000
     cores:
     - main
   - !Generic
@@ -55,23 +58,16 @@ variants:
     type: armv7m
     core_access_options: !Arm
       ap: 0
-      psel: 0
   memory_map:
-  - !Ram
-    name: IRAM1
-    range:
-      start: 0x20000000
-      end: 0x20008000
-    cores:
-    - main
   - !Nvm
     name: IROM1
     range:
       start: 0x80000
       end: 0xa0000
-    is_boot_memory: true
     cores:
     - main
+    access:
+      boot: true
   - !Generic
     name: IROM2
     range:
@@ -84,6 +80,13 @@ variants:
     range:
       start: 0x100000
       end: 0x200000
+    cores:
+    - main
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20008000
     cores:
     - main
   - !Generic
@@ -102,23 +105,16 @@ variants:
     type: armv7m
     core_access_options: !Arm
       ap: 0
-      psel: 0
   memory_map:
-  - !Ram
-    name: IRAM1
-    range:
-      start: 0x20000000
-      end: 0x20010000
-    cores:
-    - main
   - !Nvm
     name: IROM1
     range:
       start: 0x80000
       end: 0xc0000
-    is_boot_memory: true
     cores:
     - main
+    access:
+      boot: true
   - !Generic
     name: IROM2
     range:
@@ -131,6 +127,13 @@ variants:
     range:
       start: 0x100000
       end: 0x200000
+    cores:
+    - main
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20010000
     cores:
     - main
   - !Generic
@@ -149,23 +152,16 @@ variants:
     type: armv7m
     core_access_options: !Arm
       ap: 0
-      psel: 0
   memory_map:
-  - !Ram
-    name: IRAM1
-    range:
-      start: 0x20000000
-      end: 0x20010000
-    cores:
-    - main
   - !Nvm
     name: IROM1
     range:
       start: 0x80000
       end: 0xc0000
-    is_boot_memory: true
     cores:
     - main
+    access:
+      boot: true
   - !Generic
     name: IROM2
     range:
@@ -178,6 +174,13 @@ variants:
     range:
       start: 0x100000
       end: 0x200000
+    cores:
+    - main
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20010000
     cores:
     - main
   - !Generic
@@ -196,23 +199,16 @@ variants:
     type: armv7m
     core_access_options: !Arm
       ap: 0
-      psel: 0
   memory_map:
-  - !Ram
-    name: IRAM1
-    range:
-      start: 0x20000000
-      end: 0x20010000
-    cores:
-    - main
   - !Nvm
     name: IROM1
     range:
       start: 0x80000
       end: 0xc0000
-    is_boot_memory: true
     cores:
     - main
+    access:
+      boot: true
   - !Generic
     name: IROM2
     range:
@@ -225,6 +221,13 @@ variants:
     range:
       start: 0x100000
       end: 0x200000
+    cores:
+    - main
+  - !Ram
+    name: IRAM1
+    range:
+      start: 0x20000000
+      end: 0x20010000
     cores:
     - main
   - !Generic

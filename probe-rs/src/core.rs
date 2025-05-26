@@ -4,20 +4,19 @@ use crate::{
         xtensa::sequences::XtensaDebugSequence,
     },
     config::DebugSequence,
-    debug::{DebugInfo, DebugRegisters, StackFrame},
     error::Error,
+    memory::CoreMemoryInterface,
     CoreType, InstructionSet, MemoryInterface, Target,
 };
-use anyhow::anyhow;
 pub use probe_rs_target::{Architecture, CoreAccessOptions};
 use probe_rs_target::{
     ArmCoreAccessOptions, MemoryRegion, RiscvCoreAccessOptions, XtensaCoreAccessOptions,
 };
-use std::{collections::HashMap, ops::Range, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 pub mod core_state;
 pub mod core_status;
-pub(crate) mod dump;
+pub mod dump;
 pub mod memory_mapped_registers;
 pub mod registers;
 
@@ -25,8 +24,6 @@ pub use core_state::*;
 pub use core_status::*;
 pub use memory_mapped_registers::MemoryMappedRegister;
 pub use registers::*;
-
-use self::dump::CoreDump;
 
 /// An struct for storing the current state of a core.
 #[derive(Debug, Clone)]
@@ -36,7 +33,7 @@ pub struct CoreInformation {
 }
 
 /// A generic interface to control a MCU core.
-pub trait CoreInterface: MemoryInterface {
+pub trait CoreInterface: MemoryInterface + CoreMemoryInterfaceShim {
     /// Wait until the core is halted. If the core does not halt on its own,
     /// a [`DebugProbeError::Timeout`](crate::probe::DebugProbeError::Timeout) error will be returned.
     fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), Error>;
@@ -181,202 +178,29 @@ pub trait CoreInterface: MemoryInterface {
     }
 }
 
-impl<'probe> MemoryInterface for Core<'probe> {
-    fn supports_native_64bit_access(&mut self) -> bool {
-        self.inner.supports_native_64bit_access()
-    }
+/// Implementation detail to allow trait upcasting-like behaviour.
+//
+// TODO: replace with trait upcasting once stable
+pub trait CoreMemoryInterfaceShim: MemoryInterface {
+    /// Returns a reference to the underlying `MemoryInterface`.
+    // TODO: replace with trait upcasting once stable
+    fn as_memory_interface(&self) -> &dyn MemoryInterface;
 
-    fn read_word_64(&mut self, address: u64) -> Result<u64, Error> {
-        self.inner.read_word_64(address)
-    }
-
-    fn read_word_32(&mut self, address: u64) -> Result<u32, Error> {
-        self.inner.read_word_32(address)
-    }
-
-    fn read_word_16(&mut self, address: u64) -> Result<u16, Error> {
-        self.inner.read_word_16(address)
-    }
-
-    fn read_word_8(&mut self, address: u64) -> Result<u8, Error> {
-        self.inner.read_word_8(address)
-    }
-
-    fn read_64(&mut self, address: u64, data: &mut [u64]) -> Result<(), Error> {
-        self.inner.read_64(address, data)
-    }
-
-    fn read_32(&mut self, address: u64, data: &mut [u32]) -> Result<(), Error> {
-        self.inner.read_32(address, data)
-    }
-
-    fn read_16(&mut self, address: u64, data: &mut [u16]) -> Result<(), Error> {
-        self.inner.read_16(address, data)
-    }
-
-    fn read_8(&mut self, address: u64, data: &mut [u8]) -> Result<(), Error> {
-        self.inner.read_8(address, data)
-    }
-
-    fn read(&mut self, address: u64, data: &mut [u8]) -> Result<(), Error> {
-        self.inner.read(address, data)
-    }
-
-    fn write_word_64(&mut self, addr: u64, data: u64) -> Result<(), Error> {
-        self.inner.write_word_64(addr, data)
-    }
-
-    fn write_word_32(&mut self, addr: u64, data: u32) -> Result<(), Error> {
-        self.inner.write_word_32(addr, data)
-    }
-
-    fn write_word_16(&mut self, addr: u64, data: u16) -> Result<(), Error> {
-        self.inner.write_word_16(addr, data)
-    }
-
-    fn write_word_8(&mut self, addr: u64, data: u8) -> Result<(), Error> {
-        self.inner.write_word_8(addr, data)
-    }
-
-    fn write_64(&mut self, addr: u64, data: &[u64]) -> Result<(), Error> {
-        self.inner.write_64(addr, data)
-    }
-
-    fn write_32(&mut self, addr: u64, data: &[u32]) -> Result<(), Error> {
-        self.inner.write_32(addr, data)
-    }
-
-    fn write_16(&mut self, addr: u64, data: &[u16]) -> Result<(), Error> {
-        self.inner.write_16(addr, data)
-    }
-
-    fn write_8(&mut self, addr: u64, data: &[u8]) -> Result<(), Error> {
-        self.inner.write_8(addr, data)
-    }
-
-    fn write(&mut self, addr: u64, data: &[u8]) -> Result<(), Error> {
-        self.inner.write(addr, data)
-    }
-
-    fn supports_8bit_transfers(&self) -> Result<bool, Error> {
-        self.inner.supports_8bit_transfers()
-    }
-
-    fn flush(&mut self) -> Result<(), Error> {
-        self.inner.flush()
-    }
+    /// Returns a mutable reference to the underlying `MemoryInterface`.
+    // TODO: replace with trait upcasting once stable
+    fn as_memory_interface_mut(&mut self) -> &mut dyn MemoryInterface;
 }
 
-/// A struct containing key information about an exception.
-/// The exception details are architecture specific, and the abstraction is handled in the
-/// architecture specific implementations of [`crate::core::ExceptionInterface`].
-#[derive(PartialEq)]
-pub struct ExceptionInfo {
-    /// The exception number.
-    /// This is architecture specific and can be used to decode the architecture specific exception reason.
-    pub raw_exception: u32,
-    /// A human readable explanation for the exception.
-    pub description: String,
-    /// A populated [`StackFrame`] to represent the stack data in the exception handler.
-    pub handler_frame: StackFrame,
-}
-
-/// A generic interface to identify and decode exceptions during unwind processing.
-pub trait ExceptionInterface {
-    /// Using the `stackframe_registers` for a "called frame",
-    /// determine if the given frame was called from an exception handler,
-    /// and resolve the relevant details about the exception, including the reason for the exception,
-    /// and the stackframe registers for the frame that triggered the exception.
-    /// A return value of `Ok(None)` indicates that the given frame was called from within the current thread,
-    /// and the unwind should continue normally.
-    fn exception_details(
-        &self,
-        memory: &mut dyn MemoryInterface,
-        stackframe_registers: &DebugRegisters,
-        debug_info: &DebugInfo,
-    ) -> Result<Option<ExceptionInfo>, Error>;
-
-    /// Using the `stackframe_registers` for a "called frame", retrieve updated register values for the "calling frame".
-    fn calling_frame_registers(
-        &self,
-        memory: &mut dyn MemoryInterface,
-        stackframe_registers: &crate::debug::DebugRegisters,
-        raw_exception: u32,
-    ) -> Result<crate::debug::DebugRegisters, crate::Error>;
-
-    /// Retrieve the architecture specific exception number.
-    fn raw_exception(
-        &self,
-        stackframe_registers: &crate::debug::DebugRegisters,
-    ) -> Result<u32, crate::Error>;
-
-    /// Convert the architecture specific exception number into a human readable description.
-    /// Where possible, the implementation may read additional registers from the core, to provide additional context.
-    fn exception_description(
-        &self,
-        raw_exception: u32,
-        memory: &mut dyn MemoryInterface,
-    ) -> Result<String, crate::Error>;
-}
-
-/// Placeholder for exception handling for cores where handling exceptions is not yet supported.
-pub struct UnimplementedExceptionHandler;
-
-impl ExceptionInterface for UnimplementedExceptionHandler {
-    fn exception_details(
-        &self,
-        _memory: &mut dyn MemoryInterface,
-        _stackframe_registers: &DebugRegisters,
-        _debug_info: &DebugInfo,
-    ) -> Result<Option<ExceptionInfo>, Error> {
-        // For architectures where the exception handling has not been implemented in probe-rs,
-        // this will result in maintaining the current `unwind` behavior, i.e. unwinding will include up
-        // to the first frame that was called from an exception handler.
-        Ok(None)
+impl<T> CoreMemoryInterfaceShim for T
+where
+    T: CoreInterface,
+{
+    fn as_memory_interface(&self) -> &dyn MemoryInterface {
+        self
     }
 
-    fn calling_frame_registers(
-        &self,
-        _memory: &mut dyn MemoryInterface,
-        _stackframe_registers: &crate::debug::DebugRegisters,
-        _raw_exception: u32,
-    ) -> Result<crate::debug::DebugRegisters, crate::Error> {
-        Err(Error::NotImplemented("calling frame registers"))
-    }
-
-    fn raw_exception(
-        &self,
-        _stackframe_registers: &crate::debug::DebugRegisters,
-    ) -> Result<u32, crate::Error> {
-        Err(Error::NotImplemented(
-            "Not implemented for this architecture.",
-        ))
-    }
-
-    fn exception_description(
-        &self,
-        _raw_exception: u32,
-        _memory: &mut dyn MemoryInterface,
-    ) -> Result<String, crate::Error> {
-        Err(Error::NotImplemented("exception description"))
-    }
-}
-
-/// Creates a new exception interface for the [`CoreType`] at hand.
-pub fn exception_handler_for_core(core_type: CoreType) -> Box<dyn ExceptionInterface> {
-    match core_type {
-        CoreType::Armv6m => Box::new(
-            crate::architecture::arm::core::exception_handling::armv6m::ArmV6MExceptionHandler {},
-        ),
-        CoreType::Armv7m | CoreType::Armv7em => Box::new(
-            crate::architecture::arm::core::exception_handling::armv7m::ArmV7MExceptionHandler {},
-        ),
-        CoreType::Armv8m => Box::new(
-            crate::architecture::arm::core::exception_handling::armv8m::ArmV8MExceptionHandler,
-        ),
-        CoreType::Armv7a | CoreType::Armv8a | CoreType::Riscv | CoreType::Xtensa => {
-            Box::new(UnimplementedExceptionHandler)
-        }
+    fn as_memory_interface_mut(&mut self) -> &mut dyn MemoryInterface {
+        self
     }
 }
 
@@ -389,9 +213,21 @@ pub fn exception_handler_for_core(core_type: CoreType) -> Box<dyn ExceptionInter
 pub struct Core<'probe> {
     id: usize,
     name: &'probe str,
-    memory_regions: &'probe [MemoryRegion],
+    target: &'probe Target,
 
     inner: Box<dyn CoreInterface + 'probe>,
+}
+
+impl CoreMemoryInterface for Core<'_> {
+    type ErrorType = Error;
+
+    fn memory(&self) -> &dyn MemoryInterface<Self::ErrorType> {
+        self.inner.as_memory_interface()
+    }
+
+    fn memory_mut(&mut self) -> &mut dyn MemoryInterface<Self::ErrorType> {
+        self.inner.as_memory_interface_mut()
+    }
 }
 
 impl<'probe> Core<'probe> {
@@ -404,22 +240,28 @@ impl<'probe> Core<'probe> {
     pub(crate) fn new(
         id: usize,
         name: &'probe str,
-        memory_regions: &'probe [MemoryRegion],
+        target: &'probe Target,
         core: impl CoreInterface + 'probe,
     ) -> Core<'probe> {
         Self {
             id,
             name,
-            memory_regions,
+            target,
             inner: Box::new(core),
         }
     }
 
-    /// Return the memory regions associated with this core.
+    /// Returns the memory regions associated with this core.
     pub fn memory_regions(&self) -> impl Iterator<Item = &MemoryRegion> {
-        self.memory_regions
+        self.target
+            .memory_map
             .iter()
             .filter(|r| r.cores().iter().any(|m| m == self.name))
+    }
+
+    /// Returns the target descriptor of the current `Session`.
+    pub fn target(&self) -> &Target {
+        self.target
     }
 
     /// Creates a new [`CoreState`]
@@ -429,52 +271,10 @@ impl<'probe> Core<'probe> {
         target: &Target,
         core_type: CoreType,
     ) -> CombinedCoreState {
-        let specific_state = SpecificCoreState::from_core_type(core_type);
-
-        match options {
-            CoreAccessOptions::Arm(options) => {
-                let DebugSequence::Arm(sequence) = target.debug_sequence.clone() else {
-                    panic!(
-                        "Mismatch between sequence and core kind. This is a bug, please report it."
-                    );
-                };
-
-                let core_state = CoreState::new(ResolvedCoreOptions::Arm { sequence, options });
-
-                CombinedCoreState {
-                    id,
-                    core_state,
-                    specific_state,
-                }
-            }
-            CoreAccessOptions::Riscv(options) => {
-                let DebugSequence::Riscv(sequence) = target.debug_sequence.clone() else {
-                    panic!(
-                        "Mismatch between sequence and core kind. This is a bug, please report it."
-                    );
-                };
-
-                let core_state = CoreState::new(ResolvedCoreOptions::Riscv { sequence, options });
-                CombinedCoreState {
-                    id,
-                    core_state,
-                    specific_state,
-                }
-            }
-            CoreAccessOptions::Xtensa(options) => {
-                let DebugSequence::Xtensa(sequence) = target.debug_sequence.clone() else {
-                    panic!(
-                        "Mismatch between sequence and core kind. This is a bug, please report it."
-                    );
-                };
-
-                let core_state = CoreState::new(ResolvedCoreOptions::Xtensa { sequence, options });
-                CombinedCoreState {
-                    id,
-                    core_state,
-                    specific_state,
-                }
-            }
+        CombinedCoreState {
+            id,
+            core_state: CoreState::new(ResolvedCoreOptions::new(target, options)),
+            specific_state: SpecificCoreState::from_core_type(core_type),
         }
     }
 
@@ -641,7 +441,9 @@ impl<'probe> Core<'probe> {
                 next_available_hw_breakpoint += 1;
             }
         }
-        Err(Error::Other(anyhow!("No available hardware breakpoints")))
+        Err(Error::Other(
+            "No available hardware breakpoints".to_string(),
+        ))
     }
 
     /// Set a hardware breakpoint
@@ -701,7 +503,7 @@ impl<'probe> Core<'probe> {
                 self.inner.clear_hw_breakpoint(bp_position)?;
                 Ok(())
             }
-            None => Err(Error::Other(anyhow!(
+            None => Err(Error::Other(format!(
                 "No breakpoint found at address {:#010x}",
                 address
             ))),
@@ -773,49 +575,13 @@ impl<'probe> Core<'probe> {
         self.inner.disable_vector_catch(condition)
     }
 
-    /// Dumps core info with the current state.
-    ///
-    /// # Arguments
-    ///
-    /// * `ranges`: Memory ranges that should be dumped.
-    pub fn dump(&mut self, ranges: Vec<Range<u64>>) -> Result<CoreDump, Error> {
-        let instruction_set = self.instruction_set()?;
-        let core_type = self.core_type();
-        let supports_native_64bit_access = self.supports_native_64bit_access();
-        let fpu_support = self.fpu_support()?;
-        let floating_point_register_count = self.floating_point_register_count()?;
-
-        let mut registers = HashMap::new();
-        for register in self.registers().all_registers() {
-            let value = self.read_core_reg(register.id())?;
-            registers.insert(register.id(), value);
-        }
-
-        let mut data = Vec::new();
-        for range in ranges {
-            let mut values = vec![0; (range.end - range.start) as usize];
-            self.read(range.start, &mut values)?;
-            data.push((range, values));
-        }
-
-        Ok(CoreDump {
-            registers,
-            data,
-            instruction_set,
-            supports_native_64bit_access,
-            core_type,
-            fpu_support,
-            floating_point_register_count: Some(floating_point_register_count),
-        })
-    }
-
     /// Check if the integer size is 64-bit
     pub fn is_64_bit(&self) -> bool {
         self.inner.is_64_bit()
     }
 }
 
-impl<'probe> CoreInterface for Core<'probe> {
+impl CoreInterface for Core<'_> {
     fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), Error> {
         self.wait_for_core_halted(timeout)
     }
@@ -958,10 +724,28 @@ pub enum ResolvedCoreOptions {
         options: XtensaCoreAccessOptions,
     },
 }
+
 impl ResolvedCoreOptions {
+    fn new(target: &Target, options: CoreAccessOptions) -> Self {
+        match (options, target.debug_sequence.clone()) {
+            (CoreAccessOptions::Arm(options), DebugSequence::Arm(sequence)) => {
+                Self::Arm { sequence, options }
+            }
+            (CoreAccessOptions::Riscv(options), DebugSequence::Riscv(sequence)) => {
+                Self::Riscv { sequence, options }
+            }
+            (CoreAccessOptions::Xtensa(options), DebugSequence::Xtensa(sequence)) => {
+                Self::Xtensa { sequence, options }
+            }
+            _ => unreachable!(
+                "Mismatch between core kind and access options. This is a bug, please report it."
+            ),
+        }
+    }
+
     fn interface_idx(&self) -> usize {
         match self {
-            Self::Arm { .. } => 0, // TODO
+            Self::Arm { options, .. } => options.jtag_tap.unwrap_or(0),
             Self::Riscv { options, .. } => options.jtag_tap.unwrap_or(0),
             Self::Xtensa { options, .. } => options.jtag_tap.unwrap_or(0),
         }

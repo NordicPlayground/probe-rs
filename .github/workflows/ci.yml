@@ -9,6 +9,13 @@ on:
   pull_request:
   merge_group:
 
+# Cancel any currently running workflows from the same PR, branch, or
+# tag when a new workflow is triggered.
+#
+# https://stackoverflow.com/a/66336834
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
 
 name: Run CI
 
@@ -39,7 +46,7 @@ jobs:
         if: (matrix.os == 'ubuntu-latest') || (matrix.os == 'ubuntu-20.04')
 
       - name: Cache Dependencies
-        uses: Swatinem/rust-cache@v2.7.3
+        uses: Swatinem/rust-cache@v2.7.7
 
       - name: cargo check for probe-rs, --no-default-features
         run: cargo check -p probe-rs --no-default-features --locked
@@ -78,7 +85,7 @@ jobs:
         run: rustup target add thumbv7m-none-eabi
 
       - name: Cache Dependencies
-        uses: Swatinem/rust-cache@v2.7.3
+        uses: Swatinem/rust-cache@v2.7.7
 
       - name: Run cargo test
         run: cargo test --all-features --locked
@@ -106,7 +113,7 @@ jobs:
           sudo apt install -y libudev-dev
 
       - name: Cache Dependencies
-        uses: Swatinem/rust-cache@v2.7.3
+        uses: Swatinem/rust-cache@v2.7.7
 
       - name: Run cargo clippy
         run: cargo clippy --all-features --all-targets --locked -- -D warnings
@@ -115,7 +122,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
-    - uses: EmbarkStudios/cargo-deny-action@v1
+    - uses: EmbarkStudios/cargo-deny-action@v2
 
   doc:
     name: Check docs
@@ -130,7 +137,7 @@ jobs:
           sudo apt install -y libudev-dev
 
       - name: Cache Dependencies
-        uses: Swatinem/rust-cache@v2.7.3
+        uses: Swatinem/rust-cache@v2.7.7
 
       - name: Run cargo doc
         run: cargo doc -p probe-rs --no-deps --all-features --locked

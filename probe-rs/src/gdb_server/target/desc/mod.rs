@@ -26,9 +26,10 @@ impl TargetDescriptionXmlOverride for RuntimeTarget<'_> {
     ) -> gdbstub::target::TargetResult<usize, Self> {
         let annex = String::from_utf8_lossy(annex);
         if annex != "target.xml" {
-            return Err(TargetError::Fatal(
-                anyhow!("Unsupported annex: '{}'", annex).into(),
-            ));
+            return Err(TargetError::Fatal(anyhow!(
+                "Unsupported annex: '{}'",
+                annex
+            )));
         }
 
         let xml = self.target_desc.get_target_xml();
@@ -91,8 +92,8 @@ fn gdb_memory_map(session: &mut Session, primary_core_id: usize) -> Result<Strin
         let region_entry = format!(
             r#"<memory type="ram" start="0x0" length="{:#x}"/>\n"#,
             match address_size {
-                32 => 0xFFFF_FFFFu64,
-                64 => 0xFFFF_FFFF_FFFF_FFFF,
+                32 => u32::MAX as u64,
+                64 => u64::MAX,
                 _ => 0x0,
             }
         );
@@ -100,26 +101,17 @@ fn gdb_memory_map(session: &mut Session, primary_core_id: usize) -> Result<Strin
         xml_map.push_str(&region_entry);
     } else {
         for region in &session.target().memory_map {
-            let region_entry = match region {
-                MemoryRegion::Ram(ram) => format!(
-                    r#"<memory type="ram" start="{:#x}" length="{:#x}"/>\n"#,
-                    ram.range.start,
-                    ram.range.end - ram.range.start
-                ),
-                MemoryRegion::Generic(region) => format!(
-                    r#"<memory type="rom" start="{:#x}" length="{:#x}"/>\n"#,
-                    region.range.start,
-                    region.range.end - region.range.start
-                ),
-                MemoryRegion::Nvm(region) => {
-                    // TODO: Use flash with block size
-                    format!(
-                        r#"<memory type="rom" start="{:#x}" length="{:#x}"/>\n"#,
-                        region.range.start,
-                        region.range.end - region.range.start
-                    )
-                }
+            let region_kind = match region {
+                MemoryRegion::Ram(_) => "ram",
+                MemoryRegion::Generic(_) => "rom",
+                MemoryRegion::Nvm(_) => "rom",
             };
+            let range = region.address_range();
+            let start = range.start;
+            let length = range.end - range.start;
+            let region_entry = format!(
+                r#"<memory type="{region_kind}" start="{start:#x}" length="{length:#x}"/>\n"#,
+            );
 
             xml_map.push_str(&region_entry);
         }

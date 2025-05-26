@@ -17,7 +17,6 @@ use crate::{
         ProbeCreationError, ProbeFactory, ScanChainElement, WireProtocol,
     },
 };
-use anyhow::anyhow;
 use bitvec::prelude::*;
 use nusb::DeviceInfo;
 use std::{
@@ -75,12 +74,7 @@ impl JtagAdapter {
         let mut junk = vec![];
         let _ = self.device.read_to_end(&mut junk);
 
-        // TMS starts high
-        let output = 0x0008;
-
-        // TMS, TDO and TCK are outputs
-        let direction = 0x000b;
-
+        let (output, direction) = self.pin_layout();
         self.device.set_pins(output, direction)?;
 
         self.apply_clock_speed(self.speed_khz)?;
@@ -88,6 +82,26 @@ impl JtagAdapter {
         self.device.disable_loopback()?;
 
         Ok(())
+    }
+
+    fn pin_layout(&self) -> (u16, u16) {
+        let (output, direction) = match (
+            self.device.vendor_id(),
+            self.device.product_id(),
+            self.device.product_string().unwrap_or(""),
+        ) {
+            // Digilent HS3
+            (0x0403, 0x6014, "Digilent USB Device") => (0x2088, 0x308b),
+            // Digilent HS2
+            (0x0403, 0x6014, "Digilent Adept USB Device") => (0x00e8, 0x60eb),
+            // Digilent HS1
+            (0x0403, 0x6010, "Digilent Adept USB Device") => (0x0088, 0x008b),
+            // Other devices:
+            // TMS starts high
+            // TMS, TDO and TCK are outputs
+            _ => (0x0008, 0x000b),
+        };
+        (output, direction)
     }
 
     fn speed_khz(&self) -> u32 {
@@ -140,15 +154,6 @@ impl JtagAdapter {
 
         let mut reply = Vec::with_capacity(self.in_bit_counts.len());
         while reply.len() < self.in_bit_counts.len() {
-            if t0.elapsed() > timeout {
-                tracing::warn!(
-                    "Read {} bytes, expected {}",
-                    reply.len(),
-                    self.in_bit_counts.len()
-                );
-                return Err(DebugProbeError::Timeout);
-            }
-
             let read = self
                 .device
                 .read_to_end(&mut reply)
@@ -157,10 +162,19 @@ impl JtagAdapter {
             if read > 0 {
                 t0 = Instant::now();
             }
+
+            if t0.elapsed() > timeout {
+                tracing::warn!(
+                    "Read {} bytes, expected {}",
+                    reply.len(),
+                    self.in_bit_counts.len()
+                );
+                return Err(DebugProbeError::Timeout);
+            }
         }
 
         if reply.len() != self.in_bit_counts.len() {
-            return Err(DebugProbeError::Other(anyhow!(
+            return Err(DebugProbeError::Other(format!(
                 "Read more data than expected. Expected {} bytes, got {} bytes",
                 self.in_bit_counts.len(),
                 reply.len()
@@ -179,14 +193,13 @@ impl JtagAdapter {
     fn flush(&mut self) -> Result<(), DebugProbeError> {
         self.finalize_command()?;
         self.send_buffer()?;
-        self.read_response()
-            .map_err(|e| DebugProbeError::ProbeSpecific(Box::new(e)))?;
+        self.read_response()?;
 
         Ok(())
     }
 
     fn append_command(&mut self, command: Command) -> Result<(), DebugProbeError> {
-        tracing::debug!("Appending {:?}", command);
+        tracing::trace!("Appending {:?}", command);
         // 1 byte is reserved for the send immediate command
         if self.commands.len() + command.len() + 1 >= self.ftdi.buffer_size {
             self.send_buffer()?;
@@ -333,9 +346,7 @@ impl DebugProbe for FtdiProbe {
     fn attach(&mut self) -> Result<(), DebugProbeError> {
         tracing::debug!("Attaching...");
 
-        self.adapter
-            .attach()
-            .map_err(|e| DebugProbeError::ProbeSpecific(Box::new(e)))?;
+        self.adapter.attach()?;
 
         self.scan_chain()?;
         self.select_target(0)

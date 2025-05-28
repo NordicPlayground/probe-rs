@@ -10,9 +10,9 @@ use probe_rs::{
     config::Registry,
     flashing::{
         DownloadOptions, FlashLoader, FlashProgress, ProgressEvent, ProgressOperation, erase_all,
-        erase_sectors,
+        erase_sectors, run_blank_check,
     },
-    probe::WireProtocol,
+    probe::{DebugProbeSelector, WireProtocol, list::Lister},
 };
 use probe_rs_target::RawFlashAlgorithm;
 use xshell::{Shell, cmd};
@@ -27,6 +27,7 @@ pub fn cmd_test(
     test_start_sector_address: Option<u64>,
     chip: Option<String>,
     name: Option<String>,
+    probe: Option<DebugProbeSelector>,
     speed: Option<u32>,
     protocol: Option<WireProtocol>,
 ) -> Result<()> {
@@ -97,9 +98,30 @@ pub fn cmd_test(
         protocol,
     };
 
+    let lister = Lister::new();
+    let available_probes = lister.list(probe.as_ref());
+    if available_probes.len() > 1 {
+        return Err(anyhow!(
+            "Multiple probes were found -- please specify a probe with `--probe`"
+        ));
+    }
+    let Some(probe) = available_probes.first() else {
+        return Err(anyhow!("No probes were found"));
+    };
+    let mut probe = probe.open()?;
+
+    // If the caller has specified speed or protocol in SessionConfig, set them
+    if let Some(speed) = session_config.speed {
+        probe.set_speed(speed)?;
+    }
+
+    if let Some(protocol) = session_config.protocol {
+        probe.select_protocol(protocol)?;
+    }
+
     // We need to get the chip name so that special startup procedure can be used. (matched on name)
     let mut session =
-        probe_rs::Session::auto_attach_with_registry(target_name, session_config, &registry)?;
+        probe.attach_with_registry(target_name, session_config.permissions, &registry)?;
 
     // Register callback to update the progress.
     let t = Rc::new(RefCell::new(Instant::now()));
@@ -154,7 +176,6 @@ pub fn cmd_test(
     let start_address = flash_properties.address_range.start;
     let end_address = flash_properties.address_range.end;
     let data_size = flash_properties.page_size;
-    let erased_state = flash_properties.erased_byte_value;
     let sector_size = flash_properties.sectors[0].size;
 
     let test_start_sector_address = test_start_sector_address.unwrap_or(start_address);
@@ -179,14 +200,7 @@ pub fn cmd_test(
 
     println!("{test}: Erase done");
 
-    let mut readback = vec![0; (sector_size * 2) as usize];
-    session
-        .core(0)?
-        .read_8(test_start_sector_address, &mut readback)?;
-    assert!(
-        readback.iter().all(|v| *v == erased_state),
-        "Not all sectors were erased"
-    );
+    run_blank_check(&mut session, progress.clone(), test_start_sector_index, 2)?;
 
     println!("{test}: Writing two pages ...");
 
@@ -200,20 +214,13 @@ pub fn cmd_test(
     let mut readback = vec![0; data_size as usize];
     session
         .core(0)?
-        .read_8(test_start_sector_address + 1, &mut readback)?;
+        .read(test_start_sector_address + 1, &mut readback)?;
     assert_eq!(readback, data);
 
     println!("{test}: Erasing the entire chip and writing two pages ...");
     run_flash_erase(&mut session, progress.clone(), EraseType::EraseAll)?;
     println!("{test}: Erase done");
-    let mut readback = vec![0; (sector_size * 2) as usize];
-    session
-        .core(0)?
-        .read_8(test_start_sector_address, &mut readback)?;
-    assert!(
-        readback.iter().all(|v| *v == erased_state),
-        "Not all sectors were erased"
-    );
+    run_blank_check(&mut session, progress.clone(), test_start_sector_index, 2)?;
 
     println!("{test}: Writing two pages ...");
     let mut loader = session.target().flash_loader();
@@ -237,14 +244,7 @@ pub fn cmd_test(
     )?;
     println!("{test}: Erase done");
 
-    let mut readback = vec![0; (sector_size * 2) as usize];
-    session
-        .core(0)?
-        .read_8(test_start_sector_address, &mut readback)?;
-    assert!(
-        readback.iter().all(|v| *v == erased_state),
-        "Not all sectors were erased"
-    );
+    run_blank_check(&mut session, progress.clone(), test_start_sector_index, 2)?;
 
     println!("{test}: Writing two pages ...");
     let mut loader = session.target().flash_loader();

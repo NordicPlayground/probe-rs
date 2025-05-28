@@ -1,12 +1,15 @@
 use crate::{
-    probe::{DebugProbe, DebugProbeError},
     CoreStatus,
+    probe::{DebugProbe, DebugProbeError},
 };
 
 use super::{
-    dp::{DpAddress, DpRegisterAddress},
     ArmError,
+    communication_interface::DapProbe,
+    dp::{DpAddress, DpRegisterAddress},
 };
+
+pub(crate) mod polyfill;
 
 /// Specifies the address of register to access in a debug or access port.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -420,4 +423,10 @@ pub trait DapAccess {
     fn flush(&mut self) -> Result<(), ArmError> {
         Ok(())
     }
+
+    /// Gain access to the Probe that implements this trait
+    fn try_dap_probe(&self) -> Option<&dyn DapProbe>;
+
+    /// Gain mutable access to the Probe that implements this trait
+    fn try_dap_probe_mut(&mut self) -> Option<&mut dyn DapProbe>;
 }

@@ -3,10 +3,11 @@
 use std::time::{Duration, Instant};
 
 use probe_rs::architecture::arm::{component::TraceSink, swo::SwoConfig};
+use probe_rs::config::Registry;
 use probe_rs::probe::list::Lister;
 
-use crate::util::common_options::ProbeOptions;
 use crate::CoreOptions;
+use crate::util::common_options::ProbeOptions;
 
 #[derive(clap::Subcommand)]
 pub(crate) enum ItmSource {
@@ -68,8 +69,8 @@ pub struct Cmd {
 }
 
 impl Cmd {
-    pub fn run(self, lister: &Lister) -> anyhow::Result<()> {
-        let (mut session, _probe_options) = self.common.simple_attach(lister)?;
+    pub fn run(self, registry: &mut Registry, lister: &Lister) -> anyhow::Result<()> {
+        let (mut session, _probe_options) = self.common.simple_attach(registry, lister)?;
 
         match self.source {
             ItmSource::TraceMemory { coreclk } => {

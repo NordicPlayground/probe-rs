@@ -7,12 +7,17 @@ use std::{
 
 use super::esp::EspFlashSizeDetector;
 use crate::{
+    MemoryInterface, Session,
     architecture::xtensa::{
-        communication_interface::{ProgramCounter, XtensaCommunicationInterface, XtensaError},
+        Xtensa,
+        communication_interface::{
+            MemoryRegionProperties, ProgramCounter, XtensaCommunicationInterface, XtensaError,
+        },
         sequences::XtensaDebugSequence,
         xdm,
     },
-    MemoryInterface, Session,
+    semihosting::{SemihostingCommand, UnknownCommandDetails},
+    vendor::espressif::sequences::esp::EspBreakpointHandler,
 };
 
 /// The debug sequence implementation for the ESP32-S3.
@@ -40,13 +45,8 @@ impl ESP32S3 {
             },
         })
     }
-}
 
-impl XtensaDebugSequence for ESP32S3 {
-    fn on_connect(&self, core: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
-        // External memory bus
-        core.add_slow_memory_access_range(0x3C00_0000..0x3E00_0000);
-
+    fn disable_wdts(&self, core: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
         tracing::info!("Disabling ESP32-S3 watchdogs...");
 
         // disable super wdt
@@ -73,13 +73,60 @@ impl XtensaDebugSequence for ESP32S3 {
 
         // rtc wdg
         const RTC_CNTL_BASE: u64 = 0x60008000;
-        const RTC_WRITE_PROT: u64 = RTC_CNTL_BASE | 0xa4;
+        const RTC_WRITE_PROT: u64 = RTC_CNTL_BASE | 0xb0;
         const RTC_WDTCONFIG0: u64 = RTC_CNTL_BASE | 0x98;
         core.write_word_32(RTC_WRITE_PROT, 0x50D83AA1)?; // write protection off
         core.write_word_32(RTC_WDTCONFIG0, 0x0)?;
         core.write_word_32(RTC_WRITE_PROT, 0x0)?; // write protection on
 
         Ok(())
+    }
+}
+
+impl XtensaDebugSequence for ESP32S3 {
+    fn on_connect(&self, interface: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
+        // Internal DRAM
+        interface.core_properties().memory_ranges.insert(
+            0x3FC8_8000..0x3FD0_0000,
+            MemoryRegionProperties {
+                unaligned_store: true,
+                unaligned_load: true,
+                fast_memory_access: true,
+            },
+        );
+        // Internal DROM
+        interface.core_properties().memory_ranges.insert(
+            0x3FF0_0000..0x3FF2_0000,
+            MemoryRegionProperties {
+                unaligned_store: false,
+                unaligned_load: true,
+                fast_memory_access: true,
+            },
+        );
+        // Internal IROM
+        interface.core_properties().memory_ranges.insert(
+            0x4000_0000..0x4006_0000,
+            MemoryRegionProperties {
+                unaligned_store: false,
+                unaligned_load: false,
+                fast_memory_access: true,
+            },
+        );
+        // Internal IRAM
+        interface.core_properties().memory_ranges.insert(
+            0x4037_0000..0x403E_0000,
+            MemoryRegionProperties {
+                unaligned_store: false,
+                unaligned_load: false,
+                fast_memory_access: true,
+            },
+        );
+
+        self.disable_wdts(interface)
+    }
+
+    fn on_halt(&self, interface: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
+        self.disable_wdts(interface)
     }
 
     fn detect_flash_size(&self, session: &mut Session) -> Result<Option<usize>, crate::Error> {
@@ -173,7 +220,7 @@ impl XtensaDebugSequence for ESP32S3 {
             }
 
             if start.elapsed() >= timeout {
-                return Err(crate::Error::Timeout);
+                return Err(XtensaError::Timeout.into());
             }
         }
 
@@ -187,5 +234,13 @@ impl XtensaDebugSequence for ESP32S3 {
         tracing::info!("Reset complete");
 
         Ok(())
+    }
+
+    fn on_unknown_semihosting_command(
+        &self,
+        interface: &mut Xtensa,
+        details: UnknownCommandDetails,
+    ) -> Result<Option<SemihostingCommand>, crate::Error> {
+        EspBreakpointHandler::handle_xtensa_idf_semihosting(interface, details)
     }
 }

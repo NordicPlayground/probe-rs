@@ -1,20 +1,21 @@
 use crate::{
+    CoreStatus, Error,
     architecture::arm::{
-        ap,
-        dp::{Ctrl, DebugPortId, DebugPortVersion, DpAccess, DPIDR},
-        dp::{DpAddress, DpRegisterAddress, Select1, SelectV1, SelectV3},
+        ApAddress, ArmError, DapAccess, FullyQualifiedApAddress, RawDapAccess, RegisterAddress,
+        SwoAccess, SwoConfig, ap,
+        dp::{
+            Ctrl, DPIDR, DebugPortId, DebugPortVersion, DpAccess, DpAddress, DpRegisterAddress,
+            Select1, SelectV1, SelectV3,
+        },
         memory::{ADIMemoryInterface, ArmMemoryInterface, Component},
         sequences::{ArmDebugSequence, DefaultArmSequence},
-        ApAddress, ArmError, DapAccess, FullyQualifiedApAddress, RawDapAccess, RegisterAddress,
-        SwoAccess, SwoConfig,
     },
-    probe::{DebugProbe, DebugProbeError, Probe},
-    CoreStatus, Error,
+    probe::{DebugProbe, DebugProbeError, Probe, WireProtocol},
 };
 use jep106::JEP106Code;
 
 use std::{
-    collections::{hash_map, BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, hash_map},
     fmt::Debug,
     sync::Arc,
     time::Duration,
@@ -24,9 +25,9 @@ use std::{
 /// debug port.
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq, Copy)]
 pub enum DapError {
-    /// An error occurred during SWD communication.
-    #[error("An error occurred in the SWD communication between probe and device.")]
-    SwdProtocol,
+    /// A protocol error occurred during communication.
+    #[error("A protocol error occurred in the {0} communication between probe and device.")]
+    Protocol(WireProtocol),
     /// The target device did not respond to the request.
     #[error("Target device did not respond to request.")]
     NoAcknowledge,
@@ -193,18 +194,18 @@ impl ArmDebugState for Initialized {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SelectCache {
+pub(crate) enum SelectCache {
     DPv1(SelectV1),
     DPv3(SelectV3, Select1),
 }
 impl SelectCache {
-    fn dp_bank_sel(&self) -> u8 {
+    pub fn dp_bank_sel(&self) -> u8 {
         match self {
             SelectCache::DPv1(s) => s.dp_bank_sel(),
             SelectCache::DPv3(s, _) => s.dp_bank_sel(),
         }
     }
-    fn set_dp_bank_sel(&mut self, bank: u8) {
+    pub fn set_dp_bank_sel(&mut self, bank: u8) {
         match self {
             SelectCache::DPv1(s) => s.set_dp_bank_sel(bank),
             SelectCache::DPv3(s, _) => s.set_dp_bank_sel(bank),
@@ -215,7 +216,7 @@ impl SelectCache {
 pub(crate) struct DpState {
     pub debug_port_version: DebugPortVersion,
 
-    current_select: SelectCache,
+    pub(crate) current_select: SelectCache,
 }
 
 impl DpState {
@@ -670,6 +671,17 @@ impl DapAccess for ArmCommunicationInterface<Initialized> {
 
     fn flush(&mut self) -> Result<(), ArmError> {
         self.probe_mut().raw_flush()
+    }
+
+    fn try_dap_probe(&self) -> Option<&dyn DapProbe> {
+        self.probe.as_deref()
+    }
+
+    fn try_dap_probe_mut(&mut self) -> Option<&mut dyn DapProbe> {
+        self.probe
+            .as_deref_mut()
+            // Need to explicitly coerce lifetimes: https://github.com/rust-lang/rust/issues/108999
+            .map(|p: &mut (dyn DapProbe + 'static)| p as &mut (dyn DapProbe + '_))
     }
 }
 

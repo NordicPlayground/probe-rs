@@ -1,18 +1,18 @@
 // Bad things happen to the VSCode debug extenison and debug_adapter if we panic at the wrong time.
 #![warn(clippy::unwrap_used, clippy::panic, clippy::expect_used)]
-mod debug_adapter;
+pub(crate) mod debug_adapter;
 mod peripherals;
-mod server;
+pub(crate) mod server;
 
 #[cfg(test)]
 mod test;
 
 use anyhow::Result;
 use probe_rs::{
+    CoreDumpError, Error,
     architecture::arm::ap::AccessPortError,
     flashing::FileDownloadError,
-    probe::{list::Lister, DebugProbeError},
-    CoreDumpError, Error,
+    probe::{DebugProbeError, list::Lister},
 };
 use probe_rs_debug::DebugError;
 use server::startup::debug;
@@ -91,12 +91,12 @@ pub struct Cmd {
     single_session: bool,
 }
 
-pub fn run(
+pub async fn run(
     cmd: Cmd,
     lister: &Lister,
     time_offset: UtcOffset,
     log_file: Option<&Path>,
 ) -> Result<()> {
     let addr = SocketAddr::new(cmd.ip, cmd.port);
-    debug(lister, addr, cmd.single_session, log_file, time_offset)
+    debug(lister, addr, cmd.single_session, log_file, time_offset).await
 }

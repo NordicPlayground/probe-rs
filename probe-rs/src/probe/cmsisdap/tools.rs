@@ -1,11 +1,11 @@
 use super::CmsisDapDevice;
 use crate::probe::{
-    cmsisdap::CmsisDapFactory, DebugProbeInfo, DebugProbeSelector, ProbeCreationError,
+    DebugProbeInfo, DebugProbeSelector, ProbeCreationError, cmsisdap::CmsisDapFactory,
 };
 use hidapi::HidApi;
 use nusb::{
-    transfer::{Direction, EndpointType},
     DeviceInfo,
+    transfer::{Direction, EndpointType},
 };
 
 const USB_CLASS_HID: u8 = 0x03;
@@ -280,7 +280,9 @@ pub fn open_device_from_selector(
 
     // Attempt to open provided VID/PID/SN with hidapi
 
-    let hid_api = HidApi::new()?;
+    let Ok(hid_api) = HidApi::new() else {
+        return Err(ProbeCreationError::NotFound);
+    };
 
     let mut device_list = hid_api.device_list();
 
@@ -305,7 +307,9 @@ pub fn open_device_from_selector(
         })
         .ok_or(ProbeCreationError::NotFound)?;
 
-    let device = device_info.open_device(&hid_api)?;
+    let Ok(device) = device_info.open_device(&hid_api) else {
+        return Err(ProbeCreationError::NotFound);
+    };
 
     match device.get_product_string() {
         Ok(Some(s)) if is_cmsis_dap(&s) => {

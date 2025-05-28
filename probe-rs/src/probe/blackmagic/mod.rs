@@ -2,34 +2,33 @@
 use std::{
     char,
     io::{BufReader, BufWriter, Read, Write},
+    net::SocketAddr,
     time::Duration,
 };
 
 use crate::{
     architecture::{
         arm::{
-            communication_interface::{DapProbe, UninitializedArmProbe},
             ArmCommunicationInterface,
+            communication_interface::{DapProbe, UninitializedArmProbe},
         },
         riscv::{communication_interface::RiscvInterfaceBuilder, dtm::jtag_dtm::JtagDtmBuilder},
         xtensa::communication_interface::{
             XtensaCommunicationInterface, XtensaDebugInterfaceState,
         },
     },
-    probe::{DebugProbe, DebugProbeInfo, JTAGAccess, ProbeFactory},
+    probe::{
+        AutoImplementJtagAccess, DebugProbe, DebugProbeError, DebugProbeInfo, DebugProbeSelector,
+        IoSequenceItem, JtagAccess, JtagDriverState, ProbeCreationError, ProbeError, ProbeFactory,
+        ProbeStatistics, RawJtagIo, RawSwdIo, SwdSettings, WireProtocol,
+    },
 };
-use bitvec::{order::Lsb0, vec::BitVec};
-use probe_rs_target::ScanChainElement;
-use serialport::{available_ports, SerialPortType};
-
-use super::{
-    arm_debug_interface::{ProbeStatistics, RawProtocolIo, SwdSettings},
-    common::{JtagDriverState, RawJtagIo},
-    DebugProbeError, ProbeCreationError, ProbeError, WireProtocol,
-};
+use bitvec::vec::BitVec;
+use serialport::{SerialPortType, available_ports};
 
 const BLACK_MAGIC_PROBE_VID: u16 = 0x1d50;
 const BLACK_MAGIC_PROBE_PID: u16 = 0x6018;
+const BLACK_MAGIC_PROBE: (u16, u16) = (BLACK_MAGIC_PROBE_VID, BLACK_MAGIC_PROBE_PID);
 const BLACK_MAGIC_PROTOCOL_RESPONSE_START: u8 = b'&';
 const BLACK_MAGIC_PROTOCOL_RESPONSE_END: u8 = b'#';
 pub(crate) const BLACK_MAGIC_REMOTE_SIZE_MAX: usize = 1024;
@@ -89,7 +88,7 @@ enum RemoteCommand<'a> {
     TargetClockOutput {
         enable: bool,
     },
-    SetSpeedKhz(u32),
+    SetSpeedHz(u32),
     SpeedKhz,
     TargetReset(bool),
     RawAccessV0P {
@@ -285,7 +284,7 @@ impl std::string::ToString for RemoteCommand<'_> {
             RemoteCommand::Handshake(_) => "+#!GA#".to_string(),
             RemoteCommand::GetVoltage => " !GV#".to_string(),
             RemoteCommand::GetSpeedKhz => "!Gf#".to_string(),
-            RemoteCommand::SetSpeedKhz(speed) => {
+            RemoteCommand::SetSpeedHz(speed) => {
                 format!("!GF{:08x}#", speed)
             }
             RemoteCommand::HighLevelCheck => "!HC#".to_string(),
@@ -597,6 +596,15 @@ impl From<bool> for SwdDirection {
     }
 }
 
+impl From<IoSequenceItem> for SwdDirection {
+    fn from(value: IoSequenceItem) -> Self {
+        match value {
+            IoSequenceItem::Input => SwdDirection::Input,
+            IoSequenceItem::Output(_) => SwdDirection::Output,
+        }
+    }
+}
+
 /// A Black Magic Probe.
 pub struct BlackMagicProbe {
     reader: BufReader<Box<dyn Read + Send>>,
@@ -608,7 +616,7 @@ pub struct BlackMagicProbe {
     jtag_state: JtagDriverState,
     probe_statistics: ProbeStatistics,
     swd_settings: SwdSettings,
-    in_bits: BitVec<u8, Lsb0>,
+    in_bits: BitVec,
     swd_direction: SwdDirection,
 }
 
@@ -664,7 +672,7 @@ impl BlackMagicProbe {
                         ProbeCreationError::ProbeSpecific(
                             RemoteError::UnsupportedVersion(version).into(),
                         ),
-                    ))
+                    ));
                 }
             }
         } else {
@@ -690,7 +698,7 @@ impl BlackMagicProbe {
         probe.command(RemoteCommand::SetPower(false)).ok();
         probe.command(RemoteCommand::SetNrst(false)).ok();
         probe.command(RemoteCommand::GetVoltage).ok();
-        probe.command(RemoteCommand::SetSpeedKhz(400_0000)).ok();
+        probe.command(RemoteCommand::SetSpeedHz(400_0000)).ok();
         probe.command(RemoteCommand::GetSpeedKhz).ok();
 
         Ok(probe)
@@ -822,7 +830,7 @@ impl BlackMagicProbe {
                         break;
                     }
 
-                    *dest = *dest << 4
+                    *dest = (*dest << 4)
                         | Self::hex_val(byte[0])
                             .or(Err(RemoteError::ParameterError(byte[0] as _)))?;
                 } else {
@@ -906,24 +914,19 @@ impl BlackMagicProbe {
     ///
     /// The caller needs to ensure that the given iterators are not longer than the maximum transfer size
     /// allowed. It seems that the maximum transfer size is determined by [`self.max_mem_block_size`].
-    fn perform_swdio_transfer<D, S>(
-        &mut self,
-        dir: D,
-        swdio: S,
-    ) -> Result<Vec<bool>, DebugProbeError>
+    #[allow(clippy::unnecessary_fallible_conversions)] //  IoSequenceItem conversion may panic
+    fn perform_swdio_transfer<S>(&mut self, swdio: S) -> Result<Vec<bool>, DebugProbeError>
     where
-        D: IntoIterator<Item = bool>,
-        S: IntoIterator<Item = bool>,
+        S: IntoIterator<Item = IoSequenceItem>,
     {
-        let dir = dir.into_iter();
-        let swdio = swdio.into_iter();
+        let swdio_sequence = swdio.into_iter();
         let mut output = vec![];
 
         let mut accumulator = 0u32;
         let mut accumulator_length = 0;
 
-        for (dir, swdio) in dir.zip(swdio) {
-            let dir = SwdDirection::from(dir);
+        for swdio in swdio_sequence {
+            let dir: SwdDirection = swdio.into();
             if dir != self.swd_direction
                 || accumulator_length >= core::mem::size_of_val(&accumulator) * 8
             {
@@ -948,7 +951,11 @@ impl BlackMagicProbe {
                 accumulator_length = 0;
             }
             self.swd_direction = dir;
-            accumulator |= if swdio { 1 << accumulator_length } else { 0 };
+            accumulator |= if swdio.try_into().unwrap_or(false) {
+                1 << accumulator_length
+            } else {
+                0
+            };
             accumulator_length += 1;
         }
 
@@ -1030,30 +1037,9 @@ impl DebugProbe for BlackMagicProbe {
     }
 
     fn set_speed(&mut self, speed_khz: u32) -> Result<u32, DebugProbeError> {
-        Self::send(&mut self.writer, &RemoteCommand::SetSpeedKhz(speed_khz))?;
+        self.command(RemoteCommand::SetSpeedHz(speed_khz * 1000))?;
         self.speed_khz = self.get_speed()?;
         Ok(self.speed_khz)
-    }
-
-    fn set_scan_chain(&mut self, scan_chain: Vec<ScanChainElement>) -> Result<(), DebugProbeError> {
-        tracing::info!("Setting scan chain to {:?}", scan_chain);
-        self.jtag_state.expected_scan_chain = Some(scan_chain);
-        Ok(())
-    }
-
-    fn scan_chain(&self) -> Result<&[ScanChainElement], DebugProbeError> {
-        match self.active_protocol() {
-            Some(WireProtocol::Jtag) => {
-                if let Some(ref chain) = self.jtag_state.expected_scan_chain {
-                    Ok(chain.as_slice())
-                } else {
-                    Ok(&[])
-                }
-            }
-            _ => Err(DebugProbeError::InterfaceNotAvailable {
-                interface_name: "JTAG",
-            }),
-        }
     }
 
     fn attach(&mut self) -> Result<(), DebugProbeError> {
@@ -1069,7 +1055,6 @@ impl DebugProbe for BlackMagicProbe {
 
         match self.protocol {
             Some(WireProtocol::Jtag) => {
-                self.scan_chain()?;
                 self.select_target(0)?;
 
                 if let ProtocolVersion::V1
@@ -1095,10 +1080,6 @@ impl DebugProbe for BlackMagicProbe {
                 interface_name: "no protocol specified",
             }),
         }
-    }
-
-    fn select_jtag_tap(&mut self, index: usize) -> Result<(), DebugProbeError> {
-        self.select_target(index)
     }
 
     fn detach(&mut self) -> Result<(), crate::Error> {
@@ -1141,6 +1122,10 @@ impl DebugProbe for BlackMagicProbe {
 
     fn active_protocol(&self) -> Option<WireProtocol> {
         self.protocol
+    }
+
+    fn try_as_jtag_probe(&mut self) -> Option<&mut dyn JtagAccess> {
+        Some(self)
     }
 
     fn try_get_riscv_interface_builder<'probe>(
@@ -1200,84 +1185,16 @@ impl DebugProbe for BlackMagicProbe {
     }
 }
 
+impl AutoImplementJtagAccess for BlackMagicProbe {}
 impl DapProbe for BlackMagicProbe {}
 
-impl RawProtocolIo for BlackMagicProbe {
-    fn jtag_shift_tms<M>(&mut self, tms: M, _tdi: bool) -> Result<(), DebugProbeError>
+impl RawSwdIo for BlackMagicProbe {
+    fn swd_io<S>(&mut self, swdio: S) -> Result<Vec<bool>, DebugProbeError>
     where
-        M: IntoIterator<Item = bool>,
+        S: IntoIterator<Item = IoSequenceItem>,
     {
         self.probe_statistics.report_io();
-
-        let tms = tms.into_iter().collect::<Vec<bool>>();
-        let mut accumulator = 0;
-        let mut accumulator_length = 0;
-        for tms in tms.into_iter() {
-            accumulator |= if tms { 1 << accumulator_length } else { 0 };
-            accumulator_length += 1;
-
-            if accumulator_length >= core::mem::size_of_val(&accumulator) * 8 {
-                self.command(RemoteCommand::JtagTms {
-                    bits: accumulator,
-                    length: accumulator_length,
-                })?;
-                accumulator_length = 0;
-                accumulator = 0;
-            }
-        }
-
-        if accumulator_length > 0 {
-            self.command(RemoteCommand::JtagTms {
-                bits: accumulator,
-                length: accumulator_length,
-            })?;
-        }
-
-        Ok(())
-    }
-
-    fn jtag_shift_tdi<I>(&mut self, _tms: bool, tdi: I) -> Result<(), DebugProbeError>
-    where
-        I: IntoIterator<Item = bool>,
-    {
-        self.probe_statistics.report_io();
-
-        let tdi = tdi.into_iter().collect::<Vec<bool>>();
-        let mut accumulator = 0;
-        let mut accumulator_length = 0;
-        for tms in tdi.into_iter() {
-            accumulator |= if tms { 1 << accumulator_length } else { 0 };
-            accumulator_length += 1;
-
-            if accumulator_length >= core::mem::size_of_val(&accumulator) * 8 {
-                self.command(RemoteCommand::JtagTdi {
-                    bits: accumulator,
-                    length: accumulator_length,
-                    tms: false,
-                })?;
-                accumulator_length = 0;
-                accumulator = 0;
-            }
-        }
-
-        if accumulator_length > 0 {
-            self.command(RemoteCommand::JtagTdi {
-                bits: accumulator,
-                length: accumulator_length,
-                tms: false,
-            })?;
-        }
-
-        Ok(())
-    }
-
-    fn swd_io<D, S>(&mut self, dir: D, swdio: S) -> Result<Vec<bool>, DebugProbeError>
-    where
-        D: IntoIterator<Item = bool>,
-        S: IntoIterator<Item = bool>,
-    {
-        self.probe_statistics.report_io();
-        self.perform_swdio_transfer(dir, swdio)
+        self.perform_swdio_transfer(swdio)
     }
 
     fn swj_pins(
@@ -1372,7 +1289,7 @@ impl RawJtagIo for BlackMagicProbe {
         Ok(())
     }
 
-    fn read_captured_bits(&mut self) -> Result<BitVec<u8, Lsb0>, DebugProbeError> {
+    fn read_captured_bits(&mut self) -> Result<BitVec, DebugProbeError> {
         tracing::trace!("reading captured bits");
         Ok(std::mem::take(&mut self.in_bits))
     }
@@ -1396,10 +1313,14 @@ fn black_magic_debug_port_info(
     // Only accept /dev/cu.* values on macos, to avoid having two
     // copies of the port (both /dev/tty.* and /dev/cu.*)
     if cfg!(target_os = "macos") && !port_name.contains("/cu.") {
+        tracing::trace!(
+            "{}: port name doesn't contain `/cu.` -- skipping",
+            port_name
+        );
         return None;
     }
 
-    let (vendor_id, product_id, serial_number, hid_interface, identifier) = match port_type {
+    let (vendor_id, product_id, serial_number, mut interface, identifier) = match port_type {
         SerialPortType::UsbPort(info) => (
             info.vid,
             info.pid,
@@ -1408,29 +1329,72 @@ fn black_magic_debug_port_info(
             info.product
                 .unwrap_or_else(|| "Black Magic Probe".to_string()),
         ),
-        _ => return None,
+        _ => {
+            tracing::trace!(
+                "{}: serial port {:?} is not USB -- skipping",
+                port_name,
+                port_type,
+            );
+            return None;
+        }
     };
 
     if vendor_id != BLACK_MAGIC_PROBE_VID {
+        tracing::trace!(
+            "{}: vid is {:04x}, not {:04x} -- skipping",
+            port_name,
+            vendor_id,
+            BLACK_MAGIC_PROBE_VID
+        );
         return None;
     }
+
     if product_id != BLACK_MAGIC_PROBE_PID {
+        tracing::trace!(
+            "{}: pid is {:04x}, not {:04x} -- skipping",
+            port_name,
+            product_id,
+            BLACK_MAGIC_PROBE_PID
+        );
         return None;
+    }
+
+    // The `interface` property has been observed on Mac to occasionally be `None`.
+    // This shouldn't happen on any known devices. If this happens, derive the
+    // interface number from the last character of the filename.
+    if cfg!(target_os = "macos") && interface.is_none() {
+        tracing::warn!(
+            "{}: interface number is `None` -- applying interface number workaround",
+            port_name
+        );
+        interface = port_name.as_bytes().last().map(|v| *v - b'0');
     }
 
     // Mac specifies the interface as the CDC Data interface, whereas Linux and
     // Windows use the CDC Communications interface. Accept either one here.
-    if hid_interface != Some(0) && hid_interface != Some(1) {
+    if interface != Some(0) && interface != Some(1) {
+        tracing::trace!(
+            "{}: interface is {:?}, not Some(0) or Some(1) -- skipping",
+            port_name,
+            interface
+        );
         return None;
     }
 
+    tracing::debug!(
+        "{}: returning port {}:{}:{:?}",
+        port_name,
+        vendor_id,
+        product_id,
+        serial_number
+    );
     Some(DebugProbeInfo {
         identifier,
         vendor_id,
         product_id,
         serial_number,
         probe_factory: &BlackMagicProbeFactory,
-        hid_interface,
+        hid_interface: interface,
     })
 }
 
@@ -1443,6 +1407,13 @@ impl ProbeFactory for BlackMagicProbeFactory {
         if selector.vendor_id != BLACK_MAGIC_PROBE_VID
             || selector.product_id != BLACK_MAGIC_PROBE_PID
         {
+            tracing::trace!(
+                "{:04x}:{:04x} doesn't match BMP VID/PID {:04x}:{:04x}",
+                selector.vendor_id,
+                selector.product_id,
+                BLACK_MAGIC_PROBE_VID,
+                BLACK_MAGIC_PROBE_PID
+            );
             return Err(DebugProbeError::ProbeCouldNotBeCreated(
                 ProbeCreationError::NotFound,
             ));
@@ -1463,6 +1434,7 @@ impl ProbeFactory for BlackMagicProbeFactory {
 
         // Otherwise, treat it as a serial port and iterate through all ports.
         let Ok(ports) = available_ports() else {
+            tracing::trace!("unable to get available serial ports");
             return Err(DebugProbeError::ProbeCouldNotBeCreated(
                 ProbeCreationError::CouldNotOpen,
             ));
@@ -1476,7 +1448,12 @@ impl ProbeFactory for BlackMagicProbeFactory {
                 continue;
             };
 
-            if selector.serial_number != info.serial_number {
+            if selector.serial_number.is_some() && selector.serial_number != info.serial_number {
+                tracing::trace!(
+                    "serial number {:?} doesn't match requested number {:?}",
+                    info.serial_number,
+                    selector.serial_number
+                );
                 continue;
             }
 
@@ -1503,6 +1480,7 @@ impl ProbeFactory for BlackMagicProbeFactory {
                 .map(|p| Box::new(p) as Box<dyn DebugProbe>);
         }
 
+        tracing::trace!("unable to find port {:?}", selector);
         Err(DebugProbeError::ProbeCouldNotBeCreated(
             ProbeCreationError::NotFound,
         ))
@@ -1510,9 +1488,14 @@ impl ProbeFactory for BlackMagicProbeFactory {
 
     fn list_probes(&self) -> Vec<super::DebugProbeInfo> {
         let mut probes = vec![];
-        let Ok(ports) = available_ports() else {
-            return probes;
+        let ports = match available_ports() {
+            Ok(ports) => ports,
+            Err(e) => {
+                tracing::trace!("Unable to enumerate serial ports: {}", e);
+                return probes;
+            }
         };
+
         for port in ports {
             let Some(info) = black_magic_debug_port_info(port.port_type, &port.port_name) else {
                 continue;
@@ -1520,5 +1503,52 @@ impl ProbeFactory for BlackMagicProbeFactory {
             probes.push(info);
         }
         probes
+    }
+
+    fn list_probes_filtered(&self, selector: Option<&DebugProbeSelector>) -> Vec<DebugProbeInfo> {
+        // No selector - list probes as usual
+        let Some(selector) = selector else {
+            return self.list_probes();
+        };
+
+        let vid_pid = (selector.vendor_id, selector.product_id);
+
+        let Some(serial) = selector.serial_number.as_deref() else {
+            if vid_pid != BLACK_MAGIC_PROBE {
+                // Filter is not for black magic probes, skip listing.
+                return vec![];
+            }
+            // Since there is no serial specified, we can list all probes.
+            return self.list_probes();
+        };
+
+        // If the selector refers to an IP:port pair, return that as the list of probes.
+        let Ok(ip_port) = serial.parse::<SocketAddr>() else {
+            if vid_pid != BLACK_MAGIC_PROBE {
+                // Filter is not for black magic probes, skip listing.
+                return vec![];
+            }
+            // The selector is not an IP:port pair, so we can list all probes, applying the requested filter.
+            return self
+                .list_probes()
+                .into_iter()
+                .filter(|probe| selector.matches_probe(probe))
+                .collect();
+        };
+
+        if vid_pid != BLACK_MAGIC_PROBE && vid_pid != (0, 0) {
+            // Filter is not for black magic probes, skip listing.
+            return vec![];
+        }
+
+        // Filter is a valid probe, and VID:PID is either a BMP or the "not specified" convention.
+        vec![DebugProbeInfo {
+            identifier: format!("{}:{}", ip_port.ip(), ip_port.port()),
+            vendor_id: BLACK_MAGIC_PROBE_VID,
+            product_id: BLACK_MAGIC_PROBE_PID,
+            serial_number: Some(ip_port.to_string()),
+            probe_factory: &BlackMagicProbeFactory,
+            hid_interface: None,
+        }]
     }
 }

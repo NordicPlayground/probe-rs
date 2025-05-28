@@ -1,26 +1,26 @@
 #![allow(missing_docs)] // Don't require docs for test code
 use crate::{
+    Error, MemoryInterface, MemoryMappedRegister,
     architecture::arm::{
+        ArmError, ArmProbeInterface, DapAccess, FullyQualifiedApAddress, RawDapAccess,
+        RegisterAddress, SwoAccess,
         ap::memory_ap::mock::MockMemoryAp,
         armv8m::Dhcsr,
         communication_interface::{
-            ArmDebugState, Initialized, SwdSequence, Uninitialized, UninitializedArmProbe,
+            ArmDebugState, DapProbe, Initialized, SwdSequence, Uninitialized, UninitializedArmProbe,
         },
         dp::{DpAddress, DpRegisterAddress},
         memory::{ADIMemoryInterface, ArmMemoryInterface},
         sequences::ArmDebugSequence,
-        ArmError, ArmProbeInterface, DapAccess, FullyQualifiedApAddress, RawDapAccess,
-        RegisterAddress, SwoAccess,
     },
     probe::{DebugProbe, DebugProbeError, Probe, WireProtocol},
-    Error, MemoryInterface, MemoryMappedRegister,
 };
 use object::{
+    Endianness, Object, ObjectSection,
     elf::{FileHeader32, FileHeader64, PT_LOAD},
     read::elf::{ElfFile, FileHeader, ProgramHeader},
-    Endianness, Object, ObjectSection,
 };
-use probe_rs_target::{MemoryRange, ScanChainElement};
+use probe_rs_target::MemoryRange;
 use std::{
     cell::RefCell,
     collections::{BTreeSet, VecDeque},
@@ -34,7 +34,6 @@ use std::{
 pub struct FakeProbe {
     protocol: WireProtocol,
     speed: u32,
-    scan_chain: Option<Vec<ScanChainElement>>,
 
     dap_register_read_handler: Option<Box<dyn Fn(RegisterAddress) -> Result<u32, ArmError> + Send>>,
 
@@ -318,7 +317,6 @@ impl FakeProbe {
         FakeProbe {
             protocol: WireProtocol::Swd,
             speed: 1000,
-            scan_chain: None,
 
             dap_register_read_handler: None,
             dap_register_write_handler: None,
@@ -340,7 +338,7 @@ impl FakeProbe {
     /// Fake probe with a mocked core
     /// with access to an actual binary file.
     pub fn with_mocked_core_and_binary(program_binary: &Path) -> Self {
-        let file_data = std::fs::read(program_binary).unwrap().to_owned();
+        let file_data = std::fs::read(program_binary).unwrap();
         let file_data_slice = file_data.as_slice();
 
         let file_kind = object::FileKind::parse(file_data.as_slice()).unwrap();
@@ -409,7 +407,9 @@ impl FakeProbe {
 
                 Ok(result)
             }
-            None => panic!("No more operations expected, but got read_raw_ap_register ap={expected_ap:?}, address:{expected_address}"),
+            None => panic!(
+                "No more operations expected, but got read_raw_ap_register ap={expected_ap:?}, address:{expected_address}"
+            ),
             //other => panic!("Unexpected operation: {:?}", other),
         }
     }
@@ -485,20 +485,6 @@ impl DebugProbe for FakeProbe {
 
     fn speed_khz(&self) -> u32 {
         self.speed
-    }
-
-    fn set_scan_chain(&mut self, scan_chain: Vec<ScanChainElement>) -> Result<(), DebugProbeError> {
-        self.scan_chain = Some(scan_chain);
-        Ok(())
-    }
-
-    fn scan_chain(&self) -> Result<&[ScanChainElement], DebugProbeError> {
-        match &self.scan_chain {
-            Some(chain) => Ok(chain),
-            None => Err(DebugProbeError::Other(
-                "No scan chain set for fake probe".to_string(),
-            )),
-        }
     }
 
     fn set_speed(&mut self, speed_khz: u32) -> Result<u32, DebugProbeError> {
@@ -767,6 +753,14 @@ impl DapAccess for FakeArmInterface<Initialized> {
         _values: &[u32],
     ) -> Result<(), ArmError> {
         todo!()
+    }
+
+    fn try_dap_probe(&self) -> Option<&dyn DapProbe> {
+        None
+    }
+
+    fn try_dap_probe_mut(&mut self) -> Option<&mut dyn DapProbe> {
+        None
     }
 }
 

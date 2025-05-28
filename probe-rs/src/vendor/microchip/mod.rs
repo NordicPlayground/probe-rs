@@ -1,15 +1,18 @@
 //! Microchip vendor support.
 
-use probe_rs_target::{chip_detection::ChipDetectionMethod, Chip};
+use probe_rs_target::{Chip, chip_detection::ChipDetectionMethod};
 
 use crate::{
-    architecture::arm::{ArmChipInfo, ArmProbeInterface, FullyQualifiedApAddress},
-    config::{registry, DebugSequence},
-    vendor::{
-        microchip::sequences::atsam::{AtSAM, DsuDid},
-        Vendor,
-    },
     Error,
+    architecture::arm::{ArmChipInfo, ArmProbeInterface, FullyQualifiedApAddress},
+    config::{DebugSequence, Registry},
+    vendor::{
+        Vendor,
+        microchip::sequences::{
+            atsam::{AtSAM, DsuDid},
+            mec17xx::Mec172x,
+        },
+    },
 };
 
 pub mod sequences;
@@ -27,6 +30,8 @@ impl Vendor for Microchip {
             || chip.name.starts_with("ATSAME5")
         {
             DebugSequence::Arm(AtSAM::create())
+        } else if chip.name.starts_with("MEC172") {
+            DebugSequence::Arm(Mec172x::create())
         } else {
             return None;
         };
@@ -36,6 +41,7 @@ impl Vendor for Microchip {
 
     fn try_detect_arm_chip(
         &self,
+        registry: &Registry,
         interface: &mut dyn ArmProbeInterface,
         chip_info: ArmChipInfo,
     ) -> Result<Option<String>, Error> {
@@ -52,8 +58,7 @@ impl Vendor for Microchip {
                 .read_word_32(DsuDid::ADDRESS)?,
         );
 
-        let families = registry::families_ref();
-        for family in families.iter() {
+        for family in registry.families() {
             for info in family
                 .chip_detection
                 .iter()

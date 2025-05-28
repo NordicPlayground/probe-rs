@@ -1,6 +1,6 @@
 [workspace.package]
-version = "0.27.0+nordic"
-edition = "2021"
+version = "0.28.0+nordic"
+edition = "2024"
 
 documentation = "https://docs.rs/probe-rs/"
 homepage = "https://github.com/NordicPlayground/probe-rs"
@@ -26,8 +26,8 @@ members = [
 exclude = ["probe-rs/tests/gpio-hal-blinky"]
 
 [workspace.dependencies]
-probe-rs = { path = "probe-rs", version = "0.27.0", package = "probe-rs-nordic" }
-probe-rs-target = { path = "probe-rs-target", version = "0.27.0", package = "probe-rs-target-nordic", registry = "nordic-artifactory" }
+probe-rs = { path = "probe-rs", version = "0.28.0", package = "probe-rs-nordic" }
+probe-rs-target = { path = "probe-rs-target", version = "0.28.0", package = "probe-rs-target-nordic", registry = "nordic-artifactory" }
 probe-rs-mi = { path = "probe-rs-mi", version = "0.1.0" }
 
 docsplay = "0.1.1"

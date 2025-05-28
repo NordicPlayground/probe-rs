@@ -1,7 +1,7 @@
 use crate::util::common_options::ProbeOptions;
 use crate::util::rtt;
-use crate::{cmd::dap_server::DebuggerError, FormatOptions};
-use anyhow::{anyhow, Result};
+use crate::{FormatOptions, cmd::dap_server::DebuggerError};
+use anyhow::{Result, anyhow};
 use probe_rs::probe::{DebugProbeSelector, WireProtocol};
 use serde::{Deserialize, Serialize};
 use std::{env::current_dir, path::PathBuf};
@@ -93,8 +93,8 @@ impl SessionConfig {
                 }
                 Err(error) => {
                     return Err(DebuggerError::Other(anyhow!(
-                            "Please use the `program-binary` option to specify an executable for this target core. {error:?}"
-                        )));
+                        "Please use the `program-binary` option to specify an executable for this target core. {error:?}"
+                    )));
                 }
             };
             // Update the `svd_file` and validate that the file exists, or else warn the user and continue.
@@ -145,7 +145,9 @@ impl SessionConfig {
                 if let Ok(current_dir) = current_dir() {
                     Some(current_dir)
                 } else {
-                    tracing::error!("Cannot use current working directory. Please check existence and permissions.");
+                    tracing::error!(
+                        "Cannot use current working directory. Please check existence and permissions."
+                    );
                     None
                 }
             }
@@ -206,6 +208,10 @@ pub struct FlashingConfig {
     #[serde(default)]
     pub(crate) halt_after_reset: bool,
 
+    /// Verify chip contents before erasing, to prevent unnecessary reprogramming
+    #[serde(default)]
+    pub(crate) verify_before_flashing: bool,
+
     /// Do a full chip erase, versus page-by-page erase
     #[serde(default)]
     pub(crate) full_chip_erase: bool,
@@ -213,6 +219,10 @@ pub struct FlashingConfig {
     /// Restore erased bytes that will not be rewritten from ELF
     #[serde(default)]
     pub(crate) restore_unwritten_bytes: bool,
+
+    /// Verify chip contents after flashing
+    #[serde(default)]
+    pub(crate) verify_after_flashing: bool,
 
     /// [`FormatOptions`] to control the flashing operation, depending on the type of binary ( [`probe_rs::flashing::Format`] ) to be flashed.
     #[serde(default)]
@@ -235,10 +245,22 @@ pub struct CoreConfig {
 
     #[serde(flatten)]
     pub(crate) rtt_config: rtt::RttConfig,
+
+    /// Enable reset vector catch if its supported on the target.
+    #[serde(default = "default_true")]
+    pub(crate) catch_reset: bool,
+
+    /// Enable hardfault vector catch if its supported on the target.
+    #[serde(default = "default_true")]
+    pub(crate) catch_hardfault: bool,
 }
 
 fn default_console_log() -> Option<ConsoleLog> {
     Some(ConsoleLog::Console)
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// The level of information to be logged to the debugger console.

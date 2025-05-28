@@ -1,21 +1,21 @@
 use crate::cmd::dap_server::{
-    debug_adapter::{dap::adapter::DebugAdapter, protocol::ProtocolAdapter},
     DebuggerError,
+    debug_adapter::{dap::adapter::DebugAdapter, protocol::ProtocolAdapter},
 };
 use parking_lot::{Mutex, MutexGuard};
 use std::{
     fs::File,
-    io::{stderr, Write},
+    io::{Write, stderr},
     path::Path,
     sync::Arc,
 };
 
 use tracing::{level_filters::LevelFilter, subscriber::DefaultGuard};
 use tracing_subscriber::{
-    fmt::{format::FmtSpan, MakeWriter},
+    EnvFilter, Layer,
+    fmt::{MakeWriter, format::FmtSpan},
     prelude::__tracing_subscriber_SubscriberExt,
     util::SubscriberInitExt,
-    EnvFilter, Layer,
 };
 
 /// DebugLogger manages the temporary file that is used to store the tracing messages that are generated during the DAP sessions.
@@ -85,12 +85,11 @@ impl DebugLogger {
     }
 
     fn process_new_log_lines(&self, mut callback: impl FnMut(&str)) -> Result<(), DebuggerError> {
-        let new = {
+        let new_bytes = {
             let mut locked_log = self.buffer.lock();
-            let new_bytes = std::mem::take(&mut *locked_log);
-
-            String::from_utf8_lossy(&new_bytes).to_string()
+            std::mem::take(&mut *locked_log)
         };
+        let new = String::from_utf8_lossy(&new_bytes);
 
         let buffer_lines = new.lines();
         for next_line in buffer_lines {
@@ -117,10 +116,10 @@ impl DebugLogger {
 
     /// Setup logging, according to the following rules.
     /// 1. If the RUST_LOG environment variable is set, use it as a `LevelFilter` to configure a subscriber that
-    ///     logs to the given destination, or default to `RUST_LOG=probe_rs_debug=warn`
+    ///    logs to the given destination, or default to `RUST_LOG=probe_rs_debug=warn`
     /// 2. If no `log_file` destination is supplied, output will be written to the DAP client's Debug Console,
     /// 3. Irrespective of the RUST_LOG environment variable, configure a subscriber that will write with `LevelFilter::ERROR` to stderr,
-    ///     because these errors are picked up and reported to the user by the VSCode extension, when no DAP session is available.
+    ///    because these errors are picked up and reported to the user by the VSCode extension, when no DAP session is available.
     pub fn setup_logging(
         &mut self,
         log_file: Option<&Path>,

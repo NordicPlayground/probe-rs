@@ -8,32 +8,32 @@ use super::{
     },
 };
 use crate::cmd::dap_server::{
+    DebuggerError,
     debug_adapter::protocol::{ProtocolAdapter, ProtocolHelper},
     server::{
         configuration::ConsoleLog,
         core_data::CoreHandle,
         session_data::{BreakpointType, SourceLocationScope},
     },
-    DebuggerError,
 };
 use crate::util::rtt;
-use anyhow::{anyhow, Result};
-use base64::{engine::general_purpose as base64_engine, Engine as _};
+use anyhow::{Context, Result, anyhow};
+use base64::{Engine as _, engine::general_purpose as base64_engine};
 use dap_types::*;
 use parse_int::parse;
 use probe_rs::{
+    Architecture::Riscv,
+    CoreStatus, Error, HaltReason, MemoryInterface, RegisterValue,
     architecture::{
         arm::ArmError, riscv::communication_interface::RiscvError,
         xtensa::communication_interface::XtensaError,
     },
-    Architecture::Riscv,
-    CoreStatus, Error, HaltReason, MemoryInterface, RegisterValue,
 };
 use probe_rs_debug::{
-    stack_frame::StackFrameInfo, ColumnType, ObjectRef, SourceLocation, SteppingMode, VariableName,
-    VerifiedBreakpoint,
+    ColumnType, ObjectRef, SourceLocation, SteppingMode, VariableName, VerifiedBreakpoint,
+    stack_frame::StackFrameInfo,
 };
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use typed_path::NativePathBuf;
 
 use std::{fmt::Display, str, time::Duration};
@@ -320,91 +320,56 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             if context == "clipboard" {
                 response_body.result = arguments.expression;
             } else if context == "repl" {
-                // While the target is running, we only allow a 'break' command.
-                // Override clippy, because the recommendation would change the logic.
-                #[allow(clippy::nonminimal_bool)]
-                if !target_core.core.core_halted()?
-                    && !(arguments.expression.starts_with("break")
-                        || arguments.expression.starts_with("quit"))
-                {
-                    response_body.result =
-                        "The target is running. Only the 'break' or 'quit' commands are allowed."
-                            .to_string();
-                } else {
-                    // The target is halted, so we can allow any repl command.
-                    //TODO: Do we need to look for '/' in the expression, before we split it?
-                    // Now we can make sure we have a valid expression and evaluate it.
-                    let (command_root, repl_commands) =
-                        build_expanded_commands(arguments.expression.trim());
-                    if let Some(repl_command) = repl_commands.first() {
-                        // We have a valid repl command, so we can evaluate it.
-                        // First, let's extract the remainder of the arguments, so that we can pass them to the handler.
-                        let argument_string = arguments
-                            .expression
-                            .trim_start_matches(&command_root)
-                            .trim_start()
-                            .trim_start_matches(repl_command.command)
-                            .trim_start();
-                        match (repl_command.handler)(target_core, argument_string, &arguments) {
-                            Ok(repl_response) => {
-                                // Perform any special post-processing of the response.
-                                match repl_response.command.as_str() {
-                                    "terminate" => {
-                                        // This is a special case, where a repl command has requested that the debug session be terminated.
-                                        response_body.result = repl_response
-                                            .message
-                                            .unwrap_or_else(|| "Success.".to_string());
-                                        self.send_event(
-                                            "terminated",
-                                            Some(TerminatedEventBody { restart: None }),
-                                        )?;
-                                    }
-                                    "variables" => {
-                                        // This is a special case, where a repl command has requested that the variables be displayed.
-                                        if let Some(repl_response_body) = repl_response.body {
-                                            if let Ok(evaluate_response) =
-                                                serde_json::from_value(repl_response_body.clone())
-                                            {
-                                                response_body = evaluate_response;
-                                            } else {
-                                                response_body.result = format!("Error: Could not parse response body: {repl_response_body:?}");
-                                            };
-                                        } else {
-                                            response_body.result = repl_response
-                                                .message
-                                                .unwrap_or_else(|| "Success.".to_string());
-                                        };
-                                    }
-                                    "setBreakpoints" => {
-                                        response_body.result = repl_response
-                                            .message
-                                            // This should always have a value, but just in case someone was lazy ...
-                                            .unwrap_or_else(|| "Success.".to_string()); // This is a special case, where we've added a breakpoint, and need to synch the DAP client UI.
-                                        self.send_event("breakpoint", repl_response.body)?;
-                                    }
-                                    _other_commands => {
-                                        // In all other cases, the response would have been updated by the repl command handler.
-                                        if repl_response.success {
-                                            response_body.result = repl_response
-                                                .message
-                                                // This should always have a value, but just in case someone was lazy ...
-                                                .unwrap_or_else(|| "Success.".to_string());
-                                        } else {
-                                            response_body.result = format!(
-                                                "Error: {:?} {:?}",
-                                                repl_response.command, repl_response.message
-                                            );
-                                        }
+                match self.handle_repl(target_core, &arguments) {
+                    Ok(repl_response) => {
+                        // In all other cases, the response would have been updated by the repl command handler.
+                        response_body.result = if repl_response.success {
+                            repl_response
+                                .message
+                                // This should always have a value, but just in case someone was lazy ...
+                                .unwrap_or_else(|| "Success.".to_string())
+                        } else {
+                            format!(
+                                "Error: {:?} {:?}",
+                                repl_response.command, repl_response.message
+                            )
+                        };
+
+                        // Perform any special post-processing of the response.
+                        match repl_response.command.as_str() {
+                            "terminate" => {
+                                // This is a special case, where a repl command has requested that the debug session be terminated.
+                                self.send_event(
+                                    "terminated",
+                                    Some(TerminatedEventBody { restart: None }),
+                                )?;
+                            }
+                            "variables" => {
+                                // This is a special case, where a repl command has requested that the variables be displayed.
+                                if let Some(repl_response_body) = repl_response.body {
+                                    if let Ok(evaluate_response) =
+                                        serde_json::from_value(repl_response_body.clone())
+                                    {
+                                        response_body = evaluate_response;
+                                    } else {
+                                        response_body.result = format!(
+                                            "Error: Could not parse response body: {repl_response_body:?}"
+                                        );
                                     }
                                 }
                             }
-                            Err(error) => match &error {
-                                DebuggerError::UserMessage(repl_message) => {
-                                    repl_message.clone_into(&mut response_body.result)
-                                }
-                                other_error => response_body.result = format!("{other_error:?}",),
-                            },
+                            "setBreakpoints" => {
+                                // This is a special case, where we've added a breakpoint, and need to synch the DAP client UI.
+                                self.send_event("breakpoint", repl_response.body)?;
+                            }
+                            _other_commands => {}
                         }
+                    }
+                    Err(error) => {
+                        response_body.result = match error {
+                            DebuggerError::UserMessage(repl_message) => repl_message,
+                            other_error => format!("{other_error:?}"),
+                        };
                     }
                 }
             } else {
@@ -528,6 +493,46 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             }
         }
         self.send_response(request, Ok(Some(response_body)))
+    }
+
+    fn handle_repl(
+        &mut self,
+        target_core: &mut CoreHandle<'_>,
+        arguments: &EvaluateArguments,
+    ) -> Result<Response, DebuggerError> {
+        if !target_core.core.core_halted()?
+            && !arguments.expression.starts_with("break")
+            && !arguments.expression.starts_with("quit")
+            && !arguments.expression.starts_with("help")
+        {
+            return Err(DebuggerError::UserMessage(
+                "The target is running. Only the 'break', 'help' or 'quit' commands are allowed."
+                    .to_string(),
+            ));
+        }
+
+        // The target is halted, so we can allow any repl command.
+        //TODO: Do we need to look for '/' in the expression, before we split it?
+        // Now we can make sure we have a valid expression and evaluate it.
+        let (command_root, repl_commands) = build_expanded_commands(arguments.expression.trim());
+
+        let Some(repl_command) = repl_commands.first() else {
+            return Err(DebuggerError::UserMessage(format!(
+                "Invalid REPL command: {:?}.",
+                command_root
+            )));
+        };
+
+        // We have a valid repl command, so we can evaluate it.
+        // First, let's extract the remainder of the arguments, so that we can pass them to the handler.
+        let argument_string = arguments
+            .expression
+            .trim_start_matches(&command_root)
+            .trim_start()
+            .trim_start_matches(repl_command.command)
+            .trim_start();
+
+        (repl_command.handler)(target_core, argument_string, arguments)
     }
 
     /// Works in tandem with the `evaluate` request, to provide possible completions in the Debug Console REPL window.
@@ -817,7 +822,9 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                 });
                 self.send_event("stopped", event_body)?;
             } else {
-                tracing::debug!("Core is halted, but not due to a breakpoint and halt_after_reset is not set. Continuing.");
+                tracing::debug!(
+                    "Core is halted, but not due to a breakpoint and halt_after_reset is not set. Continuing."
+                );
                 self.r#continue(target_core, request)?;
             }
         }
@@ -839,7 +846,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             // Always clear existing breakpoints for the specified `[crate::debug_adapter::dap_types::Source]` before setting new ones.
             // The DAP Specification doesn't make allowances for deleting and setting individual breakpoints for a specific `Source`.
             match target_core.clear_breakpoints(BreakpointType::SourceBreakpoint {
-                source: args.source.clone(),
+                source: Box::new(args.source.clone()),
                 location: SourceLocationScope::All,
             }) {
                 Ok(_) => {}
@@ -850,7 +857,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                             "Failed to clear existing breakpoints before setting new ones : {}",
                             error
                         ))),
-                    )
+                    );
                 }
             }
 
@@ -1010,7 +1017,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                 }
             }
             Err(error) => {
-                return self.send_response::<()>(request, Err(&DebuggerError::ProbeRs(error)))
+                return self.send_response::<()>(request, Err(&DebuggerError::ProbeRs(error)));
             }
         };
 
@@ -1162,7 +1169,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
 
         let mut dap_scopes: Vec<Scope> = vec![];
 
-        if let Some(core_peripherals) = &mut target_core.core_data.core_peripherals {
+        if let Some(core_peripherals) = &target_core.core_data.core_peripherals {
             let peripherals_root_variable = core_peripherals.svd_variable_cache.root_variable_key();
             dap_scopes.push(Scope {
                 line: None,
@@ -1246,7 +1253,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                     source: None,
                     variables_reference: locals_root_variable.variable_key().into(),
                 });
-            };
+            }
         }
         self.send_response(request, Ok(Some(ScopesResponseBody { scopes: dap_scopes })))
     }
@@ -1369,12 +1376,13 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                             get_svd_variable_reference(variable, svd_cache);
 
                         // We use fully qualified Peripheral.Register.Field form to ensure the `evaluate` request can find the right registers and fields by name.
-                        let name =
-                            if let Some(last_part) = variable.name().split_terminator('.').last() {
-                                last_part.to_string()
-                            } else {
-                                variable.name().to_string()
-                            };
+                        let name = if let Some(last_part) =
+                            variable.name().split_terminator('.').next_back()
+                        {
+                            last_part.to_string()
+                        } else {
+                            variable.name().to_string()
+                        };
 
                         Variable {
                             name,
@@ -1484,7 +1492,10 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                             frame_info,
                         )?;
                     } else {
-                        tracing::error!("Could not cache deferred child variables for variable: {}. No register data available.", parent_variable.name);
+                        tracing::error!(
+                            "Could not cache deferred child variables for variable: {}. No register data available.",
+                            parent_variable.name
+                        );
                     }
                 }
             }
@@ -1654,22 +1665,20 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             .step(&mut target_core.core, &target_core.core_data.debug_info)
         {
             Ok((new_status, program_counter)) => (new_status, program_counter),
-            Err(error) => match &error {
-                probe_rs_debug::DebugError::WarnAndContinue { message } => {
-                    let pc_at_error = target_core
-                        .core
-                        .read_core_reg(target_core.core.program_counter())?;
-                    self.show_message(
-                        MessageSeverity::Information,
-                        format!("Step error @{pc_at_error:#010X}: {message}"),
-                    );
-                    (target_core.core.status()?, pc_at_error)
-                }
-                other_error => {
-                    target_core.core.halt(Duration::from_millis(100)).ok();
-                    return Err(anyhow!("Unexpected error during stepping :{}", other_error));
-                }
-            },
+            Err(probe_rs_debug::DebugError::WarnAndContinue { message }) => {
+                let pc_at_error = target_core
+                    .core
+                    .read_core_reg(target_core.core.program_counter())?;
+                self.show_message(
+                    MessageSeverity::Information,
+                    format!("Step error @{pc_at_error:#010X}: {message}"),
+                );
+                (target_core.core.status()?, pc_at_error)
+            }
+            Err(other_error) => {
+                target_core.core.halt(Duration::from_millis(100)).ok();
+                return Err(other_error).context("Unexpected error during stepping");
+            }
         };
 
         self.send_response::<()>(request, Ok(None))?;
@@ -1773,7 +1782,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
     /// Send a custom `probe-rs-rtt-channel-config` event to the MS DAP Client, to create a window for a specific RTT channel.
     pub fn rtt_window(
         &mut self,
-        channel_number: usize,
+        channel_number: u32,
         channel_name: String,
         data_format: rtt::DataFormat,
     ) -> bool {
@@ -1790,7 +1799,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
     }
 
     /// Send a custom `probe-rs-rtt-data` event to the MS DAP Client, to
-    pub fn rtt_output(&mut self, channel_number: usize, rtt_data: String) -> bool {
+    pub fn rtt_output(&mut self, channel_number: u32, rtt_data: String) -> bool {
         let Ok(event_body) = serde_json::to_value(RttDataEventBody {
             channel_number,
             data: rtt_data,
@@ -1872,7 +1881,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             Some(ProgressUpdateEventBody {
                 message: message.map(|msg| match percentage {
                     None => msg.to_string(),
-                    Some(percentage) if percentage == 100.0 => msg.to_string(),
+                    Some(100.0) => msg.to_string(),
                     Some(percentage) => format!("{msg} ({percentage:02.0}%)"),
                 }),
                 percentage,

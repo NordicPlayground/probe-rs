@@ -2,12 +2,12 @@
 
 use anyhow::Result;
 use probe_rs::{
-    architecture::arm::{dp::DpAddress, sequences::DefaultArmSequence, FullyQualifiedApAddress},
+    architecture::arm::{FullyQualifiedApAddress, dp::DpAddress, sequences::DefaultArmSequence},
     probe::list::Lister,
 };
 
 fn main() -> Result<()> {
-    pretty_env_logger::init();
+    env_logger::init();
 
     let lister = Lister::new();
 

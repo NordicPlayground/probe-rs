@@ -1,12 +1,12 @@
 use crate::cmd::dap_server::{
+    DebuggerError,
     debug_adapter::dap::dap_types::{
         ErrorResponseBody, Event, Message, MessageSeverity, OutputEventBody, ProtocolMessage,
         Request, Response, ShowMessageEventBody,
     },
     server::configuration::ConsoleLog,
-    DebuggerError,
 };
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -474,10 +474,7 @@ mod test {
             if let Some(response) = self.response.take() {
                 response
             } else {
-                Err(io::Error::new(
-                    ErrorKind::Other,
-                    "Repeated use of test reader",
-                ))
+                Err(io::Error::other("Repeated use of test reader"))
             }
         }
     }
@@ -580,11 +577,11 @@ mod test {
 
     impl std::io::Write for FailingWriter {
         fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-            Err(io::Error::new(ErrorKind::Other, "FailingWriter"))
+            Err(io::Error::other("FailingWriter"))
         }
 
         fn flush(&mut self) -> io::Result<()> {
-            Err(io::Error::new(ErrorKind::Other, "FailingWriter"))
+            Err(io::Error::other("FailingWriter"))
         }
     }
 

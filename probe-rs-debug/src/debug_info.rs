@@ -1,17 +1,14 @@
 use super::{
+    DebugError, DebugRegisters, StackFrame, VariableCache,
     exception_handling::ExceptionInterface,
     function_die::{Die, FunctionDie},
     get_object_reference,
     unit_info::UnitInfo,
     variable::*,
-    DebugError, DebugRegisters, StackFrame, VariableCache,
 };
-use crate::{
-    registers, stack_frame::StackFrameInfo, unit_info::RangeExt, SourceLocation, VerifiedBreakpoint,
-};
+use crate::{SourceLocation, VerifiedBreakpoint, stack_frame::StackFrameInfo, unit_info::RangeExt};
 use gimli::{
-    BaseAddresses, DebugFrame, DebugInfoOffset, RunTimeEndian, UnwindContext, UnwindSection,
-    UnwindTableRow,
+    BaseAddresses, DebugFrame, RunTimeEndian, UnwindContext, UnwindSection, UnwindTableRow,
 };
 use object::read::{Object, ObjectSection};
 use probe_rs::{Error, MemoryInterface, RegisterDataType, RegisterRole, RegisterValue, UnwindRule};
@@ -39,14 +36,18 @@ pub struct DebugInfo {
 
     pub(crate) unit_infos: Vec<UnitInfo>,
     pub(crate) endianness: gimli::RunTimeEndian,
+
+    pub(crate) addr2line: Option<addr2line::Loader>,
 }
 
 impl DebugInfo {
     /// Read debug info directly from a ELF file.
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<DebugInfo, DebugError> {
-        let data = std::fs::read(path)?;
+        let data = std::fs::read(path.as_ref())?;
 
-        DebugInfo::from_raw(&data)
+        let mut this = DebugInfo::from_raw(&data)?;
+        this.addr2line = addr2line::Loader::new(path).ok();
+        Ok(this)
     }
 
     /// Parse debug information directly from a buffer containing an ELF file.
@@ -109,6 +110,7 @@ impl DebugInfo {
             debug_line_section,
             unit_infos,
             endianness,
+            addr2line: None,
         })
     }
 
@@ -253,30 +255,20 @@ impl DebugInfo {
         }
 
         match parent_variable.variable_node_type {
-            VariableNodeType::TypeOffset(header_offset, type_offset) => {
-                let unit_header = self.dwarf.debug_info.header_from_offset(header_offset)?;
-                let unit_info = UnitInfo::new(gimli::Unit::new(&self.dwarf, unit_header)?);
-
-                // Find the parent node
-                let mut type_tree = unit_info.unit.entries_tree(Some(type_offset))?;
-                let parent_node = type_tree.root()?;
-
-                unit_info.process_tree(
-                    self,
-                    parent_node,
-                    parent_variable,
-                    memory,
-                    cache,
-                    frame_info,
-                )?;
-            }
-            VariableNodeType::DirectLookup(header_offset, unit_offset) => {
-                let unit_header = self.dwarf.debug_info.header_from_offset(header_offset)?;
-                let unit_info = UnitInfo::new(gimli::Unit::new(&self.dwarf, unit_header)?);
+            VariableNodeType::TypeOffset(header_offset, unit_offset)
+            | VariableNodeType::DirectLookup(header_offset, unit_offset) => {
+                let Some(unit_info) = self
+                    .unit_infos
+                    .iter()
+                    .find(|unit_info| unit_info.unit.header.offset() == header_offset.into())
+                else {
+                    return Err(DebugError::Other(
+                        "Failed to find unit info for offset lookup.".to_string(),
+                    ));
+                };
 
                 // Find the parent node
                 let mut type_tree = unit_info.unit.entries_tree(Some(unit_offset))?;
-
                 let parent_node = type_tree.root()?;
 
                 unit_info.process_tree(
@@ -289,43 +281,26 @@ impl DebugInfo {
                 )?;
             }
             VariableNodeType::UnitsLookup => {
-                // Look up static variables from all units
-                let mut unit_infos = self.unit_infos.iter();
-
-                let Some(unit_info) = unit_infos.next() else {
+                if self.unit_infos.is_empty() {
                     // No unit infos
                     return Err(DebugError::Other("Missing unit infos".to_string()));
-                };
+                }
 
-                let mut entries = unit_info.unit.entries();
-
-                // Only process statics for this unit header.
-                // Navigate the current unit from the header down.
-                let (_, unit_node) = entries.next_dfs()?.unwrap();
-
-                let mut tree = unit_info.unit.entries_tree(Some(unit_node.offset()))?;
-
-                unit_info.process_tree(
-                    self,
-                    tree.root()?,
-                    parent_variable,
-                    memory,
-                    cache,
-                    frame_info,
-                )?;
-
-                for unit in unit_infos {
-                    let mut entries = unit.unit.entries();
+                // Look up static variables from all units
+                for unit_info in self.unit_infos.iter() {
+                    let mut entries = unit_info.unit.entries();
 
                     // Only process statics for this unit header.
                     // Navigate the current unit from the header down.
                     let (_, unit_node) = entries.next_dfs()?.unwrap();
+                    let unit_offset = unit_node.offset();
 
-                    let mut tree = unit.unit.entries_tree(Some(unit_node.offset()))?;
+                    let mut type_tree = unit_info.unit.entries_tree(Some(unit_offset))?;
+                    let parent_node = type_tree.root()?;
 
-                    unit.process_tree(
+                    unit_info.process_tree(
                         self,
-                        tree.root()?,
+                        parent_node,
                         parent_variable,
                         memory,
                         cache,
@@ -340,6 +315,49 @@ impl DebugInfo {
         Ok(())
     }
 
+    /// Best-effort way to look up a function name without debuginfo.
+    fn get_stackframe_from_symbols(
+        &self,
+        address: u64,
+        unwind_registers: &DebugRegisters,
+    ) -> Result<Vec<StackFrame>, DebugError> {
+        let Some(ref addr2line) = self.addr2line else {
+            return Ok(vec![]);
+        };
+        let Some(fn_name) = addr2line.find_symbol(address) else {
+            return Ok(vec![]);
+        };
+
+        let mut fn_name = fn_name.to_string();
+        for lang in [
+            gimli::DW_LANG_Rust,
+            gimli::DW_LANG_C_plus_plus,
+            gimli::DW_LANG_C_plus_plus_03,
+            gimli::DW_LANG_C_plus_plus_11,
+            gimli::DW_LANG_C_plus_plus_14,
+        ] {
+            if let Some(demangle) = addr2line::demangle(&fn_name, lang) {
+                fn_name = demangle;
+                break;
+            }
+        }
+
+        Ok(vec![StackFrame {
+            id: get_object_reference(),
+            function_name: format!(
+                "{fn_name} @ {address:#0width$x}>",
+                width = (unwind_registers.get_address_size_bytes() * 2 + 2)
+            ),
+            source_location: None,
+            registers: unwind_registers.clone(),
+            pc: RegisterValue::from(address),
+            frame_base: None,
+            is_inlined: false,
+            local_variables: None,
+            canonical_frame_address: None,
+        }])
+    }
+
     /// Returns a populated (resolved) [`StackFrame`] struct.
     /// This function will also populate the `DebugInfo::VariableCache` with in scope `Variable`s for each `StackFrame`,
     /// while taking into account the appropriate strategy for lazy-loading of variables.
@@ -348,25 +366,24 @@ impl DebugInfo {
         memory: &mut impl MemoryInterface,
         address: u64,
         cfa: Option<u64>,
-        unwind_registers: &registers::DebugRegisters,
+        unwind_registers: &DebugRegisters,
     ) -> Result<Vec<StackFrame>, DebugError> {
         // When reporting the address, we format it as a hex string, with the width matching
         // the configured size of the datatype used in the `RegisterValue` address.
         let unknown_function = || {
             format!(
-                "<unknown function @ {:#0width$x}>",
-                address,
+                "<unknown function @ {address:#0width$x}>",
                 width = (unwind_registers.get_address_size_bytes() * 2 + 2)
             )
         };
 
         let Ok((unit_info, functions)) = self.get_function_dies(address) else {
             // No function found at the given address.
-            return Ok(vec![]);
+            return self.get_stackframe_from_symbols(address, unwind_registers);
         };
         if functions.is_empty() {
             // No function found at the given address.
-            return Ok(vec![]);
+            return self.get_stackframe_from_symbols(address, unwind_registers);
         }
 
         // The first function is the non-inlined function, and the rest are inlined functions.
@@ -531,7 +548,7 @@ impl DebugInfo {
 
     pub(crate) fn unwind_impl(
         &self,
-        initial_registers: registers::DebugRegisters,
+        initial_registers: DebugRegisters,
         memory: &mut impl MemoryInterface,
         exception_handler: &dyn ExceptionInterface,
         instruction_set: Option<InstructionSet>,
@@ -560,7 +577,9 @@ impl DebugInfo {
             // PART 1: Construct the `StackFrame`s for the current program counter.
             //
             //         Multiple stack frames can be constructed if we are inside inlined functions.
-            tracing::trace!("UNWIND: Will generate `StackFrame` for function at address (PC) {frame_pc_register_value:#}");
+            tracing::trace!(
+                "UNWIND: Will generate `StackFrame` for function at address (PC) {frame_pc_register_value:#}"
+            );
             let unwind_info = get_unwind_info(&mut unwind_context, &self.frame_section, frame_pc);
 
             // Determining the frame base may need the CFA (Canonical Frame Address) to be calculated first.
@@ -618,6 +637,10 @@ impl DebugInfo {
             // PART 2: Setup the registers for the next iteration (a.k.a. unwind previous frame, a.k.a. "callee", in the call stack).
             tracing::trace!("UNWIND - Preparing to unwind the registers for the previous frame.");
 
+            // Because we will be updating the `unwind_registers` with previous frame unwind info,
+            // we need to keep a copy of the current frame's registers that can be used to resolve [DWARF](https://dwarfstd.org) expressions.
+            let callee_frame_registers = unwind_registers.clone();
+
             // PART 2-a: get the `gimli::FrameDescriptorEntry` for the program counter
             // and then the unwind info associated with this row.
             let unwind_info = match unwind_info {
@@ -646,13 +669,14 @@ impl DebugInfo {
                         }
                         break 'unwind;
                     }
+
+                    if callee_frame_registers == unwind_registers {
+                        tracing::debug!("No change, preventing infinite loop");
+                        break;
+                    }
                     continue 'unwind;
                 }
             };
-
-            // Because we will be updating the `unwind_registers` with previous frame unwind info,
-            // we need to keep a copy of the current frame's registers that can be used to resolve [DWARF](https://dwarfstd.org) expressions.
-            let callee_frame_registers = unwind_registers.clone();
 
             // PART 2-b: Unwind registers for the "previous/calling" frame.
             for debug_register in unwind_registers.0.iter_mut() {
@@ -713,7 +737,9 @@ impl DebugInfo {
                         );
                     }
                     Err(e) => {
-                        let message = format!("UNWIND: Error while checking for exception context. The stack trace will not include the calling frames. : {e:?}");
+                        let message = format!(
+                            "UNWIND: Error while checking for exception context. The stack trace will not include the calling frames. : {e:?}"
+                        );
                         tracing::warn!("{message}");
                         stack_frames.push(StackFrame {
                             id: get_object_reference(),
@@ -882,7 +908,9 @@ impl DebugInfo {
             };
         }
         Err(DebugError::WarnAndContinue {
-            message: format!("No debug information available for the instruction at {address:#010x}. Please consider using instruction level stepping.")
+            message: format!(
+                "No debug information available for the instruction at {address:#010x}. Please consider using instruction level stepping."
+            ),
         })
     }
 
@@ -906,25 +934,6 @@ impl DebugInfo {
         )))
     }
 
-    /// Get the DIE at the given offset into the debug info section.
-    pub(crate) fn get_die_at_offset(&self, offset: DebugInfoOffset) -> Result<Die, DebugError> {
-        for unit_info in &self.unit_infos {
-            if let Some(unit_offset) = offset.to_unit_offset(&unit_info.unit.header) {
-                return unit_info.unit.entry(unit_offset).map_err(|error| {
-                    DebugError::Other(format!(
-                        "Error reading DIE at debug info offset {:#x} : {}",
-                        offset.0, error
-                    ))
-                });
-            }
-        }
-
-        Err(DebugError::Other(format!(
-            "DIE at debug info offset {:#010x} not found",
-            offset.0
-        )))
-    }
-
     /// Look up the DIE reference for the given attribute, if it exists.
     pub(crate) fn resolve_die_reference<'debug_info, 'unit_info>(
         &'debug_info self,
@@ -935,26 +944,55 @@ impl DebugInfo {
     where
         'unit_info: 'debug_info,
     {
-        let value = die.attr_value(attribute).ok().flatten()?;
+        let attr = die.attr(attribute).ok().flatten()?;
 
-        match value {
-            gimli::AttributeValue::UnitRef(unit_ref) => unit_info.unit.entry(unit_ref).ok(),
-            gimli::AttributeValue::DebugInfoRef(debug_info_ref) => {
-                self.get_die_at_offset(debug_info_ref).ok()
-            }
-            other_value => {
-                tracing::warn!(
-                    "Unsupported {:?} value: {other_value:?}",
-                    attribute.static_string(),
-                );
-                None
-            }
-        }
+        self.resolve_die_reference_with_unit(&attr, unit_info)
+            .ok()
+            .map(|(_, die)| die)
     }
 
     /// The program binary's (and core's) endianness.
     pub fn endianness(&self) -> RunTimeEndian {
         self.endianness
+    }
+
+    /// Returns the UnitInfo and DIE for the given attribute.
+    pub(crate) fn resolve_die_reference_with_unit<'debug_info, 'unit_info>(
+        &'debug_info self,
+        attr: &gimli::Attribute<GimliReader>,
+        unit_info: &'unit_info UnitInfo,
+    ) -> Result<(&'debug_info UnitInfo, Die<'debug_info, 'debug_info>), DebugError>
+    where
+        'unit_info: 'debug_info,
+    {
+        match attr.value() {
+            gimli::AttributeValue::UnitRef(unit_ref) => {
+                Ok((unit_info, unit_info.unit.entry(unit_ref)?))
+            }
+            gimli::AttributeValue::DebugInfoRef(offset) => {
+                for unit_info in &self.unit_infos {
+                    let Some(unit_offset) = offset.to_unit_offset(&unit_info.unit.header) else {
+                        continue;
+                    };
+
+                    let entry = unit_info.unit.entry(unit_offset).map_err(|error| {
+                        DebugError::Other(format!(
+                            "Error reading DIE at debug info offset {:#x} : {}",
+                            offset.0, error
+                        ))
+                    })?;
+                    return Ok((unit_info, entry));
+                }
+
+                Err(DebugError::Other(format!(
+                    "Unable to find unit info for debug info offset {:#x}",
+                    offset.0
+                )))
+            }
+            other_attribute_value => Err(DebugError::Other(format!(
+                "Unimplemented attribute value {other_attribute_value:?}"
+            ))),
+        }
     }
 }
 
@@ -1011,7 +1049,10 @@ pub fn determine_cfa<R: gimli::ReaderOffset>(
 
     let cfa = match reg_val {
         None => {
-            tracing::error!("UNWIND: `StackFrameIterator` unable to determine the unwind CFA: Missing value of register {}", register.0);
+            tracing::error!(
+                "UNWIND: `StackFrameIterator` unable to determine the unwind CFA: Missing value of register {}",
+                register.0
+            );
             None
         }
 
@@ -1045,7 +1086,7 @@ pub fn determine_cfa<R: gimli::ReaderOffset>(
 /// Unwind the program counter for the caller frame, using the LR value from the callee frame.
 pub fn unwind_pc_without_debuginfo(
     unwind_registers: &mut DebugRegisters,
-    frame_pc: u64,
+    _frame_pc: u64,
     instruction_set: Option<probe_rs::InstructionSet>,
 ) -> ControlFlow<Option<DebugError>> {
     // For non exception frames, we cannot do stack unwinding if we do not have debug info.
@@ -1074,7 +1115,7 @@ pub fn unwind_pc_without_debuginfo(
         };
         // NOTE: PC = Value of the unwound LR, i.e. the first instruction after the one that called this function.
         // If both the LR and PC registers have undefined rules, this will prevent the unwind from continuing.
-        unwound_return_address.and_then(|return_address| {
+        calling_pc.value = unwound_return_address.and_then(|return_address| {
             unwind_program_counter_register(
                 return_address,
                 current_pc,
@@ -1082,17 +1123,6 @@ pub fn unwind_pc_without_debuginfo(
                 &mut register_rule_string,
             )
         });
-
-        if calling_pc
-            .value
-            .map(|calling_pc_value| calling_pc_value == RegisterValue::from(frame_pc))
-            .unwrap_or(false)
-        {
-            // Typically if we have to infer the PC value, it might happen that we are in
-            // a function that has no debug info, and the code is in a tight loop (typical of exception handlers).
-            // In such cases, we will not be able to unwind the stack beyond this frame.
-            return ControlFlow::Break(None);
-        }
     }
 
     ControlFlow::Continue(())
@@ -1274,15 +1304,13 @@ fn unwind_register_using_rule(
                         unwind_cfa
                     );
 
-                    return Err(
-                        Error::Other(format!(
-                            "UNWIND: Failed to read value for register {} from address {} ({} bytes): {}",
-                            debug_register,
-                            RegisterValue::from(previous_frame_register_address),
-                            4,
-                            error
-                        ),
-                    ));
+                    return Err(Error::Other(format!(
+                        "UNWIND: Failed to read value for register {} from address {} ({} bytes): {}",
+                        debug_register,
+                        RegisterValue::from(previous_frame_register_address),
+                        4,
+                        error
+                    )));
                 }
             }
         }
@@ -1311,7 +1339,9 @@ fn unwind_program_counter_register(
     register_rule_string: &mut String,
 ) -> Option<RegisterValue> {
     if return_address.is_max_value() || return_address.is_zero() {
-        tracing::warn!("No reliable return address is available, so we cannot determine the program counter to unwind the previous frame.");
+        tracing::warn!(
+            "No reliable return address is available, so we cannot determine the program counter to unwind the previous frame."
+        );
         return None;
     }
 
@@ -1335,7 +1365,6 @@ fn unwind_program_counter_register(
                     Some(RegisterValue::U32(return_address - 4))
                 }
                 Some(InstructionSet::Xtensa) => {
-                    // TODO: detect CALL0
                     let upper_bits = (current_pc as u32) & 0xC000_0000;
                     *register_rule_string = "PC=(unwound x0 - 3) (dwarf Undefined)".to_string();
                     Some(RegisterValue::U32(
@@ -1391,20 +1420,20 @@ fn add_to_address(address: u64, offset: i64, address_size_in_bytes: usize) -> u6
 #[cfg(test)]
 mod test {
     use crate::{
+        DebugInfo, DebugRegister, DebugRegisters,
         exception_handling::{
             armv6m::ArmV6MExceptionHandler, armv7m::ArmV7MExceptionHandler,
             exception_handler_for_core,
         },
         stack_frame::{StackFrameInfo, TestFormatter},
         test::debug_registers,
-        DebugInfo, DebugRegister, DebugRegisters,
     };
 
     use gimli::RegisterRule;
     use probe_rs::{
+        CoreDump, RegisterValue,
         architecture::arm::core::registers::cortex_m::{self, CORTEX_M_CORE_REGISTERS},
         test::MockMemory,
-        CoreDump, RegisterValue,
     };
     use std::path::{Path, PathBuf};
     use test_case::test_case;
@@ -1423,8 +1452,9 @@ mod test {
     /// `elf_file` should be the name of a file(or relative path) in the `tests` directory.
     fn load_test_elf_as_debug_info(elf_file: &str) -> DebugInfo {
         let path = get_path_for_test_files(elf_file);
-        DebugInfo::from_file(&path)
-            .unwrap_or_else(|err| panic!("Failed to open file {}: {:?}", path.display(), err))
+        DebugInfo::from_file(&path).unwrap_or_else(|err: crate::DebugError| {
+            panic!("Failed to open file {}: {:?}", path.display(), err)
+        })
     }
 
     #[test]
@@ -1943,6 +1973,7 @@ mod test {
     #[test_case("nRF52833_xxAA_hardfault_in_systick"; "hardfault_in_systick Armv7-m using nRF52833_xxAA")]
     #[test_case("atsamd51p19a"; "Armv7-em from C source code")]
     #[test_case("esp32c3_full_unwind"; "full_unwind RISC-V32E using esp32c3")]
+    #[test_case("esp32s3_esp_hal_panic"; "Xtensa unwinding on an esp32s3 in a panic handler")]
     fn full_unwind(test_name: &str) {
         // TODO: Add RISC-V tests.
 

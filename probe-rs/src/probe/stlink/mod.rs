@@ -5,34 +5,35 @@ mod tools;
 mod usb_interface;
 
 use crate::{
+    Error as ProbeRsError, MemoryInterface,
     architecture::arm::{
+        ArmError, DapAccess, FullyQualifiedApAddress, Pins, SwoAccess, SwoConfig, SwoMode,
         ap::{
+            AccessPortType,
             memory_ap::{MemoryAp, MemoryApType},
             v1::valid_access_ports,
-            AccessPortType,
         },
-        communication_interface::{ArmProbeInterface, SwdSequence, UninitializedArmProbe},
+        communication_interface::{
+            ArmProbeInterface, DapProbe, SwdSequence, UninitializedArmProbe,
+        },
         dp::{DpAddress, DpRegisterAddress},
         memory::ArmMemoryInterface,
         sequences::ArmDebugSequence,
-        valid_32bit_arm_address, ArmError, DapAccess, FullyQualifiedApAddress, Pins, SwoAccess,
-        SwoConfig, SwoMode,
+        valid_32bit_arm_address,
     },
     probe::{
         DebugProbe, DebugProbeError, DebugProbeInfo, DebugProbeSelector, Probe, ProbeError,
         ProbeFactory, WireProtocol,
     },
-    Error as ProbeRsError, MemoryInterface,
 };
 
-use probe_rs_target::ScanChainElement;
-use scroll::{Pread, Pwrite, BE, LE};
+use scroll::{BE, LE, Pread, Pwrite};
 
 use std::collections::BTreeSet;
 use std::thread;
 use std::{cmp::Ordering, sync::Arc, time::Duration};
 
-use constants::{commands, JTagFrequencyToDivider, Mode, Status, SwdFrequencyToDelayCount};
+use constants::{JTagFrequencyToDivider, Mode, Status, SwdFrequencyToDelayCount, commands};
 use usb_interface::{StLinkUsb, StLinkUsbDevice, TIMEOUT};
 
 /// Maximum length of 32 bit reads in bytes.
@@ -60,6 +61,7 @@ impl std::fmt::Display for StLinkFactory {
 
 impl ProbeFactory for StLinkFactory {
     fn open(&self, selector: &DebugProbeSelector) -> Result<Box<dyn DebugProbe>, DebugProbeError> {
+        tracing::debug!("Opening ST-Link: {selector:?}");
         let device = StLinkUsbDevice::new_from_selector(selector)?;
         let mut stlink = StLink {
             name: format!("ST-Link {}", &device.info.version_name),
@@ -70,7 +72,6 @@ impl ProbeFactory for StLinkFactory {
             swd_speed_khz: 1_800,
             jtag_speed_khz: 1_120,
             swo_enabled: false,
-            scan_chain: None,
 
             opened_aps: vec![],
         };
@@ -96,7 +97,6 @@ pub struct StLink<D: StLinkUsb> {
     swd_speed_khz: u32,
     jtag_speed_khz: u32,
     swo_enabled: bool,
-    scan_chain: Option<Vec<ScanChainElement>>,
 
     /// List of opened APs
     opened_aps: Vec<u8>,
@@ -162,27 +162,6 @@ impl DebugProbe for StLink<StLinkUsbDevice> {
 
                 Ok(actual_speed_khz)
             }
-        }
-    }
-
-    fn set_scan_chain(&mut self, scan_chain: Vec<ScanChainElement>) -> Result<(), DebugProbeError> {
-        tracing::info!("Setting scan chain to {:?}", scan_chain);
-        self.scan_chain = Some(scan_chain);
-        Ok(())
-    }
-
-    fn scan_chain(&self) -> Result<&[ScanChainElement], DebugProbeError> {
-        match self.active_protocol() {
-            Some(WireProtocol::Jtag) => {
-                if let Some(ref scan_chain) = self.scan_chain {
-                    Ok(scan_chain)
-                } else {
-                    Ok(&[])
-                }
-            }
-            _ => Err(DebugProbeError::InterfaceNotAvailable {
-                interface_name: "JTAG",
-            }),
         }
     }
 
@@ -477,7 +456,7 @@ impl<D: StLinkUsb> StLink<D> {
         }
     }
 
-    /// Reads the ST-Links version.
+    /// Reads the ST-Link's version.
     /// Returns a tuple (hardware version, firmware version).
     /// This method stores the version data on the struct to make later use of it.
     fn get_version(&mut self) -> Result<(u8, u8), StlinkError> {
@@ -1280,7 +1259,15 @@ impl UninitializedArmProbe for UninitializedStLink {
         _sequence: Arc<dyn ArmDebugSequence>,
         dp: DpAddress,
     ) -> Result<Box<dyn ArmProbeInterface>, (Box<dyn UninitializedArmProbe>, ProbeRsError)> {
-        assert_eq!(dp, DpAddress::Default, "Multidrop not supported on ST-Link");
+        if dp != DpAddress::Default {
+            return Err((
+                self,
+                ProbeRsError::Probe(DebugProbeError::Other(String::from(
+                    "Multidrop is not supported on ST-Link",
+                ))),
+            ));
+        }
+
         let interface = StlinkArmDebug::new(self.probe)
             .map_err(|(s, e)| (s as Box<_>, ProbeRsError::from(e)))?;
 
@@ -1357,7 +1344,9 @@ impl StlinkArmDebug {
         };
 
         if bank != 0 && !self.probe.supports_dp_bank_selection() {
-            tracing::warn!("Trying to access DP register at address {address:#x?}, which is not supported on ST-Links.");
+            tracing::warn!(
+                "Trying to access DP register at address {address:#x?}, which is not supported on ST-Links."
+            );
             return Err(DebugProbeError::from(StlinkError::BanksNotAllowedOnDPRegister).into());
         }
 
@@ -1442,6 +1431,14 @@ impl DapAccess for StlinkArmDebug {
             .write_register(ap.ap_v1()? as u16, (address & 0xFF) as u8, value)?;
 
         Ok(())
+    }
+
+    fn try_dap_probe(&self) -> Option<&dyn DapProbe> {
+        None
+    }
+
+    fn try_dap_probe_mut(&mut self) -> Option<&mut dyn DapProbe> {
+        None
     }
 }
 
@@ -1828,9 +1825,7 @@ impl ArmMemoryInterface for StLinkMemoryInterface<'_> {
     }
 
     fn generic_status(&mut self) -> Result<crate::architecture::arm::ap::CSW, ArmError> {
-        Err(ArmError::Probe(DebugProbeError::InterfaceNotAvailable {
-            interface_name: "ARM",
-        }))
+        self.current_ap.generic_status(self.probe)
     }
 }
 
@@ -1890,7 +1885,6 @@ mod test {
                 jtag_version: 0,
                 swd_speed_khz: 0,
                 jtag_speed_khz: 0,
-                scan_chain: None,
                 swo_enabled: false,
                 opened_aps: vec![],
             }

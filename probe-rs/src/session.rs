@@ -1,12 +1,13 @@
 use crate::{
+    Core, CoreType, Error,
     architecture::{
         arm::{
+            ArmError, SwoReader,
             communication_interface::ArmProbeInterface,
-            component::{get_arm_components, TraceSink},
+            component::{TraceSink, get_arm_components},
             dp::DpAddress,
             memory::CoresightComponent,
             sequences::{ArmDebugSequence, DefaultArmSequence},
-            ArmError, SwoReader,
         },
         riscv::communication_interface::{
             RiscvCommunicationInterface, RiscvDebugInterfaceState, RiscvError,
@@ -15,13 +16,12 @@ use crate::{
             XtensaCommunicationInterface, XtensaDebugInterfaceState, XtensaError,
         },
     },
-    config::{CoreExt, DebugSequence, RegistryError, Target, TargetSelector},
+    config::{CoreExt, DebugSequence, RegistryError, Target, TargetSelector, registry::Registry},
     core::{Architecture, CombinedCoreState},
     probe::{
-        fake_probe::FakeProbe, list::Lister, AttachMethod, DebugProbeError, Probe,
-        ProbeCreationError,
+        AttachMethod, DebugProbeError, Probe, ProbeCreationError, WireProtocol,
+        fake_probe::FakeProbe, list::Lister,
     },
-    Core, CoreType, Error,
 };
 use std::ops::DerefMut;
 use std::{fmt, sync::Arc, time::Duration};
@@ -50,6 +50,23 @@ pub struct Session {
     interfaces: ArchitectureInterface,
     cores: Vec<CombinedCoreState>,
     configured_trace_sink: Option<TraceSink>,
+}
+
+/// The `SessionConfig` struct is used to configure a new `Session` during auto-attach.
+///
+/// ## Configuring auto attach
+/// The SessionConfig can be used to control the behavior of the auto-attach function.
+/// It should be used in the [Session::auto_attach()] method.
+/// This includes setting the speed of the probe and the protocol to use, as well as the permissions.
+///
+#[derive(Default, Debug)]
+pub struct SessionConfig {
+    /// Debug permissions
+    pub permissions: Permissions,
+    /// Speed of the WireProtocol in kHz
+    pub speed: Option<u32>,
+    /// WireProtocol to use
+    pub protocol: Option<WireProtocol>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -91,7 +108,7 @@ impl fmt::Debug for ArchitectureInterface {
         match self {
             ArchitectureInterface::Arm(_) => f.write_str("ArchitectureInterface::Arm(..)"),
             ArchitectureInterface::Jtag(_, ifaces) => f
-                .debug_tuple("ArchitectureInterface::Other(..)")
+                .debug_tuple("ArchitectureInterface::Jtag(..)")
                 .field(ifaces)
                 .finish(),
         }
@@ -108,7 +125,9 @@ impl ArchitectureInterface {
             ArchitectureInterface::Arm(interface) => combined_state.attach_arm(target, interface),
             ArchitectureInterface::Jtag(probe, ifaces) => {
                 let idx = combined_state.interface_idx();
-                probe.select_jtag_tap(idx)?;
+                if let Some(probe) = probe.try_as_jtag_probe() {
+                    probe.select_target(idx)?;
+                }
                 match &mut ifaces[idx] {
                     JtagInterface::Riscv(state) => {
                         let factory = probe.try_get_riscv_interface_builder()?;
@@ -137,8 +156,9 @@ impl Session {
         target: TargetSelector,
         attach_method: AttachMethod,
         permissions: Permissions,
+        registry: &Registry,
     ) -> Result<Self, Error> {
-        let (probe, target) = get_target_from_selector(target, attach_method, probe)?;
+        let (probe, target) = get_target_from_selector(target, attach_method, probe, registry)?;
 
         let cores = target
             .cores
@@ -204,13 +224,19 @@ impl Session {
 
         if let Some(jtag) = target.jtag.as_ref() {
             if let Some(scan_chain) = jtag.scan_chain.clone() {
-                probe.set_scan_chain(scan_chain)?;
+                if let Some(probe) = probe.try_as_jtag_probe() {
+                    probe.set_scan_chain(&scan_chain)?;
+                }
             }
         }
         probe.attach_to_unspecified()?;
-        if probe.scan_chain().iter().len() > 0 {
-            for core in &cores {
-                probe.select_jtag_tap(core.interface_idx())?;
+        if let Some(probe) = probe.try_as_jtag_probe() {
+            if let Ok(chain) = probe.scan_chain() {
+                if !chain.is_empty() {
+                    for core in &cores {
+                        probe.select_target(core.interface_idx())?;
+                    }
+                }
             }
         }
 
@@ -254,7 +280,9 @@ impl Session {
                     sequence_handle.reset_hardware_deassert(&mut *interface, &default_memory_ap)
                 {
                     if matches!(e, ArmError::Timeout) {
-                        tracing::warn!("Timeout while deasserting hardware reset pin. This indicates that the reset pin is not properly connected. Please check your hardware setup.");
+                        tracing::warn!(
+                            "Timeout while deasserting hardware reset pin. This indicates that the reset pin is not properly connected. Please check your hardware setup."
+                        );
                     }
 
                     return Err(e.into());
@@ -306,7 +334,9 @@ impl Session {
         // handle most of the setup in the same way.
         if let Some(jtag) = target.jtag.as_ref() {
             if let Some(scan_chain) = jtag.scan_chain.clone() {
-                probe.set_scan_chain(scan_chain)?;
+                if let Some(probe) = probe.try_as_jtag_probe() {
+                    probe.set_scan_chain(&scan_chain)?;
+                }
             }
         }
 
@@ -319,9 +349,13 @@ impl Session {
         // FIXME: This is terribly JTAG-specific. Since we don't really support anything else yet,
         // it should be fine for now.
         let highest_idx = cores.iter().map(|c| c.interface_idx()).max().unwrap_or(0);
-        let tap_count = match probe.scan_chain() {
-            Ok(scan_chain) => scan_chain.len().max(highest_idx + 1),
-            Err(_) => highest_idx + 1,
+        let tap_count = if let Some(probe) = probe.try_as_jtag_probe() {
+            match probe.scan_chain() {
+                Ok(scan_chain) => scan_chain.len().max(highest_idx + 1),
+                Err(_) => highest_idx + 1,
+            }
+        } else {
+            highest_idx + 1
         };
         let mut interfaces = std::iter::repeat_with(|| JtagInterface::Unknown)
             .take(tap_count)
@@ -343,8 +377,6 @@ impl Session {
                     "{core_arch:?} core can not be mixed with a {debug_arch:?} debug module.",
                 ))));
             }
-
-            probe.select_jtag_tap(iface_idx)?;
 
             interfaces[iface_idx] = match core_arch {
                 Architecture::Riscv => {
@@ -403,27 +435,56 @@ impl Session {
         Ok(session)
     }
 
-    /// Automatically creates a session with the first connected probe found.
-    #[tracing::instrument(skip(target))]
-    pub fn auto_attach(
-        target: impl Into<TargetSelector>,
-        permissions: Permissions,
-    ) -> Result<Session, Error> {
+    /// Automatically open a probe with the given session config.
+    fn auto_probe(session_config: &SessionConfig) -> Result<Probe, Error> {
         // Get a list of all available debug probes.
         let lister = Lister::new();
 
         let probes = lister.list_all();
 
         // Use the first probe found.
-        let probe = probes
+        let mut probe = probes
             .first()
             .ok_or(Error::Probe(DebugProbeError::ProbeCouldNotBeCreated(
                 ProbeCreationError::NotFound,
             )))?
             .open()?;
 
+        // If the caller has specified speed or protocol in SessionConfig, set them
+        if let Some(speed) = session_config.speed {
+            probe.set_speed(speed)?;
+        }
+
+        if let Some(protocol) = session_config.protocol {
+            probe.select_protocol(protocol)?;
+        }
+        Ok(probe)
+    }
+
+    /// Automatically creates a session with the first connected probe found.
+    #[tracing::instrument(skip(target))]
+    pub fn auto_attach(
+        target: impl Into<TargetSelector>,
+        session_config: SessionConfig,
+    ) -> Result<Session, Error> {
         // Attach to a chip.
-        probe.attach(target, permissions)
+        Self::auto_probe(&session_config)?.attach(target, session_config.permissions)
+    }
+
+    /// Automatically creates a session with the first connected probe found
+    /// using the registry that was provided.
+    #[tracing::instrument(skip(target, registry))]
+    pub fn auto_attach_with_registry(
+        target: impl Into<TargetSelector>,
+        session_config: SessionConfig,
+        registry: &Registry,
+    ) -> Result<Session, Error> {
+        // Attach to a chip.
+        Self::auto_probe(&session_config)?.attach_with_registry(
+            target,
+            session_config.permissions,
+            registry,
+        )
     }
 
     /// Lists the available cores with their number and their type.
@@ -434,7 +495,7 @@ impl Session {
     /// Get access to the session when all cores are halted.
     ///
     /// Any previously running cores will be resumed once the closure is executed.
-    pub(crate) fn halted_access<R>(
+    pub fn halted_access<R>(
         &mut self,
         f: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> Result<R, Error> {
@@ -564,7 +625,9 @@ impl Session {
     ) -> Result<RiscvCommunicationInterface, Error> {
         let tap_idx = self.interface_idx(core_id)?;
         if let ArchitectureInterface::Jtag(probe, ifaces) = &mut self.interfaces {
-            probe.select_jtag_tap(tap_idx)?;
+            if let Some(probe) = probe.try_as_jtag_probe() {
+                probe.select_target(tap_idx)?;
+            }
             if let JtagInterface::Riscv(state) = &mut ifaces[tap_idx] {
                 let factory = probe.try_get_riscv_interface_builder()?;
                 return Ok(factory.attach_auto(&self.target, state)?);
@@ -580,7 +643,9 @@ impl Session {
     ) -> Result<XtensaCommunicationInterface, Error> {
         let tap_idx = self.interface_idx(core_id)?;
         if let ArchitectureInterface::Jtag(probe, ifaces) = &mut self.interfaces {
-            probe.select_jtag_tap(tap_idx)?;
+            if let Some(probe) = probe.try_as_jtag_probe() {
+                probe.select_target(tap_idx)?;
+            }
             if let JtagInterface::Xtensa(state) = &mut ifaces[tap_idx] {
                 return Ok(probe.try_get_xtensa_interface(state)?);
             }
@@ -856,9 +921,10 @@ fn get_target_from_selector(
     target: TargetSelector,
     attach_method: AttachMethod,
     mut probe: Probe,
+    registry: &Registry,
 ) -> Result<(Probe, Target), Error> {
     let target = match target {
-        TargetSelector::Unspecified(name) => crate::config::get_target_by_name(name)?,
+        TargetSelector::Unspecified(name) => registry.get_target_by_name(name)?,
         TargetSelector::Specified(target) => target,
         TargetSelector::Auto => {
             // At this point we do not know what the target is, so we cannot use the chip specific reset sequence.
@@ -869,7 +935,8 @@ fn get_target_from_selector(
             }
             probe.attach_to_unspecified()?;
 
-            let (returned_probe, found_target) = crate::vendor::auto_determine_target(probe)?;
+            let (returned_probe, found_target) =
+                crate::vendor::auto_determine_target(registry, probe)?;
             probe = returned_probe;
 
             if AttachMethod::UnderReset == attach_method {

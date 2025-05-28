@@ -6,8 +6,8 @@
 
 use crate::architecture::riscv::dtm::dtm_access::DtmAccess;
 use crate::{
-    architecture::riscv::*, config::Target, memory_mapped_bitfield_register,
-    probe::DeferredResultIndex, Error as ProbeRsError,
+    Error as ProbeRsError, architecture::riscv::*, config::Target, memory_mapped_bitfield_register,
+    probe::DeferredResultIndex,
 };
 use std::any::Any;
 use std::collections::HashMap;
@@ -46,8 +46,15 @@ pub enum RiscvError {
     #[error("Program buffer register '{0}' is currently not supported.")]
     UnsupportedProgramBufferRegister(usize),
     /// The program buffer is too small for the supplied program.
-    #[error("Program buffer is too small for supplied program.")]
-    ProgramBufferTooSmall,
+    #[error(
+        "Program buffer is too small for supplied program. Required: {required}, Actual: {actual}"
+    )]
+    ProgramBufferTooSmall {
+        /// The required size of the program buffer.
+        required: usize,
+        /// The actual size of the program buffer.
+        actual: usize,
+    },
     /// Memory width larger than 32 bits is not supported yet.
     #[error("Memory width larger than 32 bits is not supported yet.")]
     UnsupportedBusAccessWidth(RiscvBusAccess),
@@ -526,9 +533,9 @@ impl<'state> RiscvCommunicationInterface<'state> {
             let confstrptr_2: Confstrptr2 = self.read_dm_register()?;
             let confstrptr_3: Confstrptr3 = self.read_dm_register()?;
             let confstrptr = (u32::from(confstrptr_0) as u128)
-                | (u32::from(confstrptr_1) as u128) << 8
-                | (u32::from(confstrptr_2) as u128) << 16
-                | (u32::from(confstrptr_3) as u128) << 32;
+                | ((u32::from(confstrptr_1) as u128) << 8)
+                | ((u32::from(confstrptr_2) as u128) << 16)
+                | ((u32::from(confstrptr_3) as u128) << 32);
             Some(confstrptr)
         } else {
             None
@@ -824,7 +831,10 @@ impl<'state> RiscvCommunicationInterface<'state> {
         // if not supported
         match self.abstract_cmd_register_read(address) {
             Err(RiscvError::AbstractCommand(AbstractCommandErrorKind::NotSupported)) => {
-                tracing::debug!("Could not read core register {:#x} with abstract command, falling back to program buffer", address);
+                tracing::debug!(
+                    "Could not read core register {:#x} with abstract command, falling back to program buffer",
+                    address
+                );
                 self.read_csr_progbuf(address)
             }
             other => other,
@@ -925,7 +935,10 @@ impl<'state> RiscvCommunicationInterface<'state> {
         };
 
         if required_len > self.state.progbuf_size as usize {
-            return Err(RiscvError::ProgramBufferTooSmall);
+            return Err(RiscvError::ProgramBufferTooSmall {
+                required: required_len,
+                actual: self.state.progbuf_size as usize,
+            });
         }
 
         if data == &self.state.progbuf_cache[..data.len()] {
@@ -1827,7 +1840,10 @@ impl<'state> RiscvCommunicationInterface<'state> {
 
         match self.abstract_cmd_register_write(0x7b0, dcsr.0) {
             Err(RiscvError::AbstractCommand(AbstractCommandErrorKind::NotSupported)) => {
-                tracing::debug!("Could not write core register {:#x} with abstract command, falling back to program buffer", 0x7b0);
+                tracing::debug!(
+                    "Could not write core register {:#x} with abstract command, falling back to program buffer",
+                    0x7b0
+                );
                 self.write_csr_progbuf(0x7b0, dcsr.0)
             }
             other => other,

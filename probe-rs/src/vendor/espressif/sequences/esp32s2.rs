@@ -7,12 +7,17 @@ use std::{
 
 use super::esp::EspFlashSizeDetector;
 use crate::{
+    MemoryInterface, Session,
     architecture::xtensa::{
-        communication_interface::{XtensaCommunicationInterface, XtensaError},
+        Xtensa,
+        communication_interface::{
+            MemoryRegionProperties, XtensaCommunicationInterface, XtensaError,
+        },
         sequences::XtensaDebugSequence,
         xdm::{self, DebugControlBits, DebugRegisterError},
     },
-    MemoryInterface, Session,
+    semihosting::{SemihostingCommand, UnknownCommandDetails},
+    vendor::espressif::sequences::esp::EspBreakpointHandler,
 };
 
 /// The debug sequence implementation for the ESP32-S2.
@@ -112,10 +117,8 @@ impl ESP32S2 {
     ) -> Result<(), crate::Error> {
         self.set_stall(false, core)
     }
-}
 
-impl XtensaDebugSequence for ESP32S2 {
-    fn on_connect(&self, core: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
+    fn disable_wdts(&self, core: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
         tracing::info!("Disabling ESP32-S2 watchdogs...");
 
         // disable super wdt
@@ -140,6 +143,44 @@ impl XtensaDebugSequence for ESP32S2 {
         core.write_word_32(Self::RTC_WRITE_PROT, 0x0)?; // write protection on
 
         Ok(())
+    }
+}
+
+impl XtensaDebugSequence for ESP32S2 {
+    fn on_connect(&self, interface: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
+        // Peripherals
+        interface.core_properties().memory_ranges.insert(
+            0x3F40_0000..0x3F50_0000,
+            MemoryRegionProperties {
+                unaligned_store: false,
+                unaligned_load: false,
+                fast_memory_access: true,
+            },
+        );
+        // Data
+        interface.core_properties().memory_ranges.insert(
+            0x3FF9_E000..0x4000_0000,
+            MemoryRegionProperties {
+                unaligned_store: true,
+                unaligned_load: true,
+                fast_memory_access: true,
+            },
+        );
+        // Instruction
+        interface.core_properties().memory_ranges.insert(
+            0x4000_0000..0x4007_2000,
+            MemoryRegionProperties {
+                unaligned_store: false,
+                unaligned_load: false,
+                fast_memory_access: true,
+            },
+        );
+
+        self.disable_wdts(interface)
+    }
+
+    fn on_halt(&self, interface: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
+        self.disable_wdts(interface)
     }
 
     fn detect_flash_size(&self, session: &mut Session) -> Result<Option<usize>, crate::Error> {
@@ -195,11 +236,11 @@ impl XtensaDebugSequence for ESP32S2 {
         }
 
         // Wait for reset to happen
-        let start = Instant::now();
         std::thread::sleep(Duration::from_millis(100));
+        let start = Instant::now();
         while !core.xdm.read_power_status()?.core_was_reset() {
             if start.elapsed() > timeout {
-                return Err(crate::Error::Timeout);
+                return Err(XtensaError::Timeout.into());
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -217,5 +258,13 @@ impl XtensaDebugSequence for ESP32S2 {
         })?;
 
         Ok(())
+    }
+
+    fn on_unknown_semihosting_command(
+        &self,
+        interface: &mut Xtensa,
+        details: UnknownCommandDetails,
+    ) -> Result<Option<SemihostingCommand>, crate::Error> {
+        EspBreakpointHandler::handle_xtensa_idf_semihosting(interface, details)
     }
 }

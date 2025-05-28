@@ -1,8 +1,9 @@
-use anyhow::{anyhow, bail, Context, Error, Result};
+use anyhow::{Context, Error, Result, anyhow, bail};
 use cmsis_pack::pdsc::{AccessPort, Algorithm, Core, Device, Package, Processor};
 use cmsis_pack::{pack_index::PdscRef, utils::FromElem};
 use futures::StreamExt;
 use jep106::JEP106Code;
+use probe_rs::config::Registry;
 use probe_rs::flashing::FlashAlgorithm;
 use probe_rs_target::{
     Architecture, ArmCoreAccessOptions, Chip, ChipFamily, Core as ProbeCore, CoreAccessOptions,
@@ -10,6 +11,7 @@ use probe_rs_target::{
     RiscvCoreAccessOptions, TargetDescriptionSource, XtensaCoreAccessOptions,
 };
 use std::collections::HashMap;
+use std::io::BufReader;
 use std::{fs, io::Read, path::Path};
 
 pub enum Kind<'a, T>
@@ -28,7 +30,7 @@ where
     fn read_bytes(&mut self, path: &Path) -> Result<Vec<u8>> {
         let buffer = match self {
             Kind::Archive(archive) => {
-                let reader = archive.by_name(&path.to_string_lossy())?;
+                let reader = BufReader::new(archive.by_name(&path.to_string_lossy())?);
                 reader.bytes().collect::<std::io::Result<Vec<u8>>>()?
             }
             Kind::Directory(dir) => fs::read(dir.join(path))?,
@@ -79,7 +81,8 @@ where
     devices.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Only process this, if this belongs to a supported family.
-    let currently_supported_chip_families = probe_rs::config::families();
+    let registry = Registry::from_builtin_families();
+    let currently_supported_chip_families = registry.families();
 
     for (device_name, device) in devices {
         if only_supported_familes
@@ -425,7 +428,7 @@ pub(crate) async fn visit_arm_file(
 /// Extracts the pdsc out of a ZIP archive.
 pub(crate) fn find_pdsc_in_archive<T>(
     archive: &mut zip::ZipArchive<T>,
-) -> Result<Option<zip::read::ZipFile>>
+) -> Result<Option<zip::read::ZipFile<T>>>
 where
     T: std::io::Seek + std::io::Read,
 {
@@ -546,7 +549,11 @@ pub(crate) fn get_mem_map(device: &Device, cores: &[probe_rs_target::Core]) -> V
     let mut mem_map = vec![];
     for region in device_memories {
         if is_multi_core && region.p_name.is_none() {
-            log::warn!("Device {}, memory region {} has no processor name, but this is required for a multicore device. Assigning memory to all cores!", device.name, region.name);
+            log::warn!(
+                "Device {}, memory region {} has no processor name, but this is required for a multicore device. Assigning memory to all cores!",
+                device.name,
+                region.name
+            );
         }
 
         let cores = region

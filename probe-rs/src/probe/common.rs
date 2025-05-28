@@ -7,8 +7,8 @@ use bitvec::prelude::*;
 use probe_rs_target::ScanChainElement;
 
 use crate::probe::{
-    BatchExecutionError, ChainParams, CommandResult, DebugProbe, DebugProbeError,
-    DeferredResultSet, JTAGAccess, JtagChainItem, JtagCommand, JtagCommandQueue,
+    AutoImplementJtagAccess, BatchExecutionError, ChainParams, CommandResult, DebugProbeError,
+    DeferredResultSet, JtagAccess, JtagCommand, JtagCommandQueue, JtagSequence, RawJtagIo,
 };
 
 pub(crate) fn bits_to_byte(bits: impl IntoIterator<Item = bool>) -> u32 {
@@ -106,8 +106,8 @@ fn starts_to_lengths(starts: &[usize], total: usize) -> Vec<usize> {
 /// a 32-bit IDCODE of all 1s, which comes after the last TAP in the chain.
 ///
 /// Returns `Vec<Option<IdCode>>`, with None for TAPs in BYPASS.
-pub(crate) fn extract_idcodes(
-    mut dr: &BitSlice<u8>,
+pub(crate) fn extract_idcodes<T: BitStore>(
+    mut dr: &BitSlice<T>,
 ) -> Result<Vec<Option<IdCode>>, ScanChainError> {
     let mut idcodes = Vec::new();
 
@@ -167,8 +167,8 @@ pub(crate) fn common_sequence<'a, S: BitStore>(
 /// <https://github.com/GlasgowEmbedded/glasgow/blob/30dc11b2/software/glasgow/applet/interface/jtag_probe/__init__.py#L712>
 ///
 /// Returns `Vec<usize>`, with an entry for each TAP.
-pub(crate) fn extract_ir_lengths(
-    ir: &BitSlice<u8>,
+pub(crate) fn extract_ir_lengths<T: BitStore>(
+    ir: &BitSlice<T>,
     n_taps: usize,
     expected: Option<&[usize]>,
 ) -> Result<Vec<usize>, ScanChainError> {
@@ -393,101 +393,6 @@ impl JtagState {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct JtagDriverState {
-    pub state: JtagState,
-    // The maximum IR address
-    pub max_ir_address: u32,
-    pub expected_scan_chain: Option<Vec<ScanChainElement>>,
-    pub scan_chain: Vec<JtagChainItem>,
-    pub chain_params: ChainParams,
-    /// Idle cycles necessary between consecutive
-    /// accesses to the DMI register
-    pub jtag_idle_cycles: usize,
-}
-
-impl Default for JtagDriverState {
-    fn default() -> Self {
-        Self {
-            state: JtagState::Reset,
-            max_ir_address: 0x0F,
-            expected_scan_chain: None,
-            scan_chain: Vec::new(),
-            chain_params: ChainParams::default(),
-            jtag_idle_cycles: 0,
-        }
-    }
-}
-
-/// A trait for implementing low-level JTAG interface operations.
-pub(crate) trait RawJtagIo {
-    /// Returns a mutable reference to the current state.
-    fn state_mut(&mut self) -> &mut JtagDriverState;
-
-    /// Returns the current state.
-    fn state(&self) -> &JtagDriverState;
-
-    /// Shifts a number of bits through the TAP.
-    fn shift_bits(
-        &mut self,
-        tms: impl IntoIterator<Item = bool>,
-        tdi: impl IntoIterator<Item = bool>,
-        cap: impl IntoIterator<Item = bool>,
-    ) -> Result<(), DebugProbeError> {
-        for ((tms, tdi), cap) in tms.into_iter().zip(tdi.into_iter()).zip(cap.into_iter()) {
-            self.shift_bit(tms, tdi, cap)?;
-        }
-
-        Ok(())
-    }
-
-    /// Shifts a single bit through the TAP.
-    ///
-    /// Drivers may choose, and are encouraged, to buffer bits and flush them
-    /// in batches for performance reasons.
-    fn shift_bit(&mut self, tms: bool, tdi: bool, capture: bool) -> Result<(), DebugProbeError>;
-
-    /// Returns the bits captured from TDO and clears the capture buffer.
-    fn read_captured_bits(&mut self) -> Result<BitVec<u8, Lsb0>, DebugProbeError>;
-
-    /// Resets the JTAG state machine by shifting out a number of high TMS bits.
-    fn reset_jtag_state_machine(&mut self) -> Result<(), DebugProbeError> {
-        tracing::debug!("Resetting JTAG chain by setting tms high for 5 bits");
-
-        // Reset JTAG chain (5 times TMS high), and enter idle state afterwards
-        let tms = [true, true, true, true, true, false];
-        let tdi = iter::repeat(true);
-
-        self.shift_bits(tms, tdi, iter::repeat(false))?;
-        let response = self.read_captured_bits()?;
-
-        tracing::debug!("Response to reset: {response}");
-
-        Ok(())
-    }
-
-    /// Configures the probe to address the given target.
-    fn select_target(&mut self, target: usize) -> Result<(), DebugProbeError> {
-        let state = self.state_mut();
-
-        let Some(params) = ChainParams::from_jtag_chain(&state.scan_chain, target) else {
-            return Err(DebugProbeError::TargetNotFound);
-        };
-
-        let max_ir_address = (1 << params.irlen) - 1;
-
-        tracing::debug!("Selecting JTAG TAP: {target}");
-        tracing::debug!("Setting chain params: {params:?}");
-        tracing::debug!("Setting max_ir_address to {max_ir_address}");
-
-        let state = self.state_mut();
-        state.max_ir_address = max_ir_address;
-        state.chain_params = params;
-
-        Ok(())
-    }
-}
-
 fn jtag_move_to_state(
     protocol: &mut impl RawJtagIo,
     target: JtagState,
@@ -530,25 +435,22 @@ fn shift_ir(
     // The last bit will be transmitted when exiting the shift state,
     // so we need to stay in the shift state for one period less than
     // we have bits to transmit.
-    let tms_data = iter::repeat(false).take(len - 1);
+    let tms_data = std::iter::repeat_n(false, len - 1);
 
     // Enter IR shift
     jtag_move_to_state(protocol, JtagState::Ir(RegisterState::Shift))?;
 
-    let tms = iter::repeat(false)
-        .take(pre_bits)
+    let tms = std::iter::repeat_n(false, pre_bits)
         .chain(tms_data)
-        .chain(iter::repeat(false).take(post_bits))
+        .chain(std::iter::repeat_n(false, post_bits))
         .chain(iter::once(true));
 
-    let tdi = iter::repeat(true)
-        .take(pre_bits)
+    let tdi = std::iter::repeat_n(true, pre_bits)
         .chain(data.as_bits::<Lsb0>()[..len].iter().map(|b| *b))
-        .chain(iter::repeat(true).take(post_bits));
+        .chain(std::iter::repeat_n(true, post_bits));
 
-    let capture = iter::repeat(false)
-        .take(pre_bits)
-        .chain(iter::repeat(capture_data).take(len))
+    let capture = std::iter::repeat_n(false, pre_bits)
+        .chain(std::iter::repeat_n(capture_data, len))
         .chain(iter::repeat(false));
 
     tracing::trace!("tms: {:?}", tms.clone());
@@ -578,7 +480,7 @@ fn shift_dr(
     }
 
     // Last bit of data is shifted out when we exit the SHIFT-DR State
-    let tms_shift_out_value = iter::repeat(false).take(register_bits - 1);
+    let tms_shift_out_value = std::iter::repeat_n(false, register_bits - 1);
 
     // Enter DR shift
     jtag_move_to_state(protocol, JtagState::Dr(RegisterState::Shift))?;
@@ -587,20 +489,17 @@ fn shift_dr(
     let pre_bits = protocol.state().chain_params.drpre;
     let post_bits = protocol.state().chain_params.drpost;
 
-    let tms = iter::repeat(false)
-        .take(pre_bits)
+    let tms = std::iter::repeat_n(false, pre_bits)
         .chain(tms_shift_out_value)
-        .chain(iter::repeat(false).take(post_bits))
+        .chain(std::iter::repeat_n(false, post_bits))
         .chain(iter::once(true));
 
-    let tdi = iter::repeat(false)
-        .take(pre_bits)
+    let tdi = std::iter::repeat_n(false, pre_bits)
         .chain(data.as_bits::<Lsb0>()[..register_bits].iter().map(|b| *b))
-        .chain(iter::repeat(false).take(post_bits));
+        .chain(std::iter::repeat_n(false, post_bits));
 
-    let capture = iter::repeat(false)
-        .take(pre_bits)
-        .chain(iter::repeat(capture_data).take(register_bits))
+    let capture = std::iter::repeat_n(false, pre_bits)
+        .chain(std::iter::repeat_n(capture_data, register_bits))
         .chain(iter::repeat(false));
 
     protocol.shift_bits(tms, tdi, capture)?;
@@ -612,8 +511,8 @@ fn shift_dr(
         jtag_move_to_state(protocol, JtagState::Idle)?;
 
         // We need to stay in the idle cycle a bit
-        let tms = iter::repeat(false).take(idle_cycles);
-        let tdi = iter::repeat(false).take(idle_cycles);
+        let tms = std::iter::repeat_n(false, idle_cycles);
+        let tdi = std::iter::repeat_n(false, idle_cycles);
 
         protocol.shift_bits(tms, tdi, iter::repeat(false))?;
     }
@@ -632,7 +531,7 @@ fn prepare_write_register(
     len: u32,
     capture: bool,
 ) -> Result<usize, DebugProbeError> {
-    if address > protocol.state().max_ir_address {
+    if address > protocol.state().max_ir_address() {
         return Err(DebugProbeError::Other(format!(
             "Invalid instruction register access: {}",
             address
@@ -646,15 +545,53 @@ fn prepare_write_register(
     shift_dr(protocol, data, len as usize, capture)
 }
 
-impl<Probe: DebugProbe + RawJtagIo + 'static> JTAGAccess for Probe {
-    fn scan_chain(&mut self) -> Result<(), DebugProbeError> {
+impl<Probe: AutoImplementJtagAccess> JtagAccess for Probe {
+    fn shift_raw_sequence(&mut self, sequence: JtagSequence) -> Result<BitVec, DebugProbeError> {
+        self.shift_bits(
+            std::iter::repeat(sequence.tms),
+            sequence.data.into_iter(),
+            std::iter::repeat(sequence.tdo_capture),
+        )?;
+        self.read_captured_bits()
+    }
+
+    fn set_scan_chain(&mut self, scan_chain: &[ScanChainElement]) -> Result<(), DebugProbeError> {
+        self.state_mut().expected_scan_chain = Some(scan_chain.to_vec());
+        Ok(())
+    }
+
+    /// Configures the probe to address the given target.
+    fn select_target(&mut self, target: usize) -> Result<(), DebugProbeError> {
+        if self.state().scan_chain.is_empty() {
+            self.scan_chain()?;
+        }
+
+        let state = self.state_mut();
+
+        let Some(params) = ChainParams::from_jtag_chain(&state.scan_chain, target) else {
+            return Err(DebugProbeError::TargetNotFound);
+        };
+
+        tracing::debug!("Selecting JTAG TAP: {target}");
+        tracing::debug!("Setting chain params: {params:?}");
+
+        state.chain_params = params;
+
+        Ok(())
+    }
+
+    fn scan_chain(&mut self) -> Result<&[ScanChainElement], DebugProbeError> {
+        if !self.state().scan_chain.is_empty() {
+            return Ok(self.state().scan_chain.as_slice());
+        }
+
         const MAX_CHAIN: usize = 8;
 
         self.reset_jtag_state_machine()?;
 
         self.state_mut().chain_params = ChainParams::default();
 
-        let input = vec![0xFF; 4 * MAX_CHAIN];
+        let input = [0xFF; 4 * MAX_CHAIN];
 
         shift_dr(self, &input, input.len() * 8, true)?;
         let response = self.read_captured_bits()?;
@@ -681,8 +618,7 @@ impl<Probe: DebugProbe + RawJtagIo + 'static> JTAGAccess for Probe {
         self.reset_jtag_state_machine()?;
 
         // Next, shift out same amount of zeros, then ones to make sure the IRs contain BYPASS.
-        let input = iter::repeat(0)
-            .take(idcodes.len())
+        let input = std::iter::repeat_n(0, idcodes.len())
             .chain(input.iter().copied())
             .collect::<Vec<_>>();
         shift_ir(self, &input, input.len() * 8, true)?;
@@ -717,27 +653,31 @@ impl<Probe: DebugProbe + RawJtagIo + 'static> JTAGAccess for Probe {
         let chain = idcodes
             .into_iter()
             .zip(ir_lens)
-            .map(|(idcode, irlen)| JtagChainItem { irlen, idcode })
+            .map(|(idcode, irlen)| ScanChainElement {
+                ir_len: Some(irlen as u8),
+                name: idcode.map(|i| i.to_string()),
+            })
             .collect::<Vec<_>>();
 
         self.state_mut().scan_chain = chain;
 
-        Ok(())
+        Ok(self.state().scan_chain.as_slice())
     }
 
     fn tap_reset(&mut self) -> Result<(), DebugProbeError> {
         self.reset_jtag_state_machine()
     }
 
-    fn set_idle_cycles(&mut self, idle_cycles: u8) {
+    fn set_idle_cycles(&mut self, idle_cycles: u8) -> Result<(), DebugProbeError> {
         self.state_mut().jtag_idle_cycles = idle_cycles as usize;
+        Ok(())
     }
 
     fn idle_cycles(&self) -> u8 {
         self.state().jtag_idle_cycles as u8
     }
 
-    fn read_register(&mut self, address: u32, len: u32) -> Result<Vec<u8>, DebugProbeError> {
+    fn read_register(&mut self, address: u32, len: u32) -> Result<BitVec, DebugProbeError> {
         let data = vec![0u8; len.div_ceil(8) as usize];
 
         self.write_register(address, &data, len)
@@ -748,30 +688,22 @@ impl<Probe: DebugProbe + RawJtagIo + 'static> JTAGAccess for Probe {
         address: u32,
         data: &[u8],
         len: u32,
-    ) -> Result<Vec<u8>, DebugProbeError> {
+    ) -> Result<BitVec, DebugProbeError> {
         prepare_write_register(self, address, data, len, true)?;
 
-        let mut response = self.read_captured_bits()?;
+        let response = self.read_captured_bits()?;
 
-        // Implementations don't need to align to keep the code simple
-        response.force_align();
-        let result = response.into_vec();
-
-        tracing::trace!("recieve_write_dr result: {:?}", result);
-        Ok(result)
+        tracing::trace!("recieve_write_dr result: {:?}", response);
+        Ok(response)
     }
 
-    fn write_dr(&mut self, data: &[u8], len: u32) -> Result<Vec<u8>, DebugProbeError> {
+    fn write_dr(&mut self, data: &[u8], len: u32) -> Result<BitVec, DebugProbeError> {
         shift_dr(self, data, len as usize, true)?;
 
-        let mut response = self.read_captured_bits()?;
+        let response = self.read_captured_bits()?;
 
-        // Implementations don't need to align to keep the code simple
-        response.force_align();
-        let result = response.into_vec();
-
-        tracing::trace!("recieve_write_dr result: {:?}", result);
-        Ok(result)
+        tracing::trace!("write_dr result: {:?}", response);
+        Ok(response)
     }
 
     #[tracing::instrument(skip(self, writes))]
@@ -816,10 +748,7 @@ impl<Probe: DebugProbe + RawJtagIo + 'static> JTAGAccess for Probe {
         let mut bitstream = bitstream.as_bitslice();
         for (idx, command, bits) in bits.into_iter() {
             if idx.should_capture() {
-                // TODO: this back-and-forth between BitVec and Vec is probably unnecessary
-                let mut reg_bits = bitstream[..bits].to_bitvec();
-                reg_bits.force_align();
-                let response = reg_bits.into_vec();
+                let response = &bitstream[..bits];
 
                 let result = match command {
                     JtagCommand::WriteRegister(command) => (command.transform)(command, response),
@@ -861,7 +790,7 @@ mod tests {
 
     #[test]
     fn extract_ir_lengths_with_one_tap() {
-        let ir = &bitvec![u8, Lsb0; 1,0,0,0];
+        let ir = bits![1, 0, 0, 0];
         let n_taps = 1;
         let expected = None;
 
@@ -875,7 +804,7 @@ mod tests {
         // The STM32F1xx and STM32F4xx are examples of MCUs that two serially connected JTAG TAPs,
         // the boundary scan TAP (IR is 5-bit wide) and the Cortex® -M4 with FPU TAP (IR is 4-bit wide).
         // This test ensures our scan chain interrogation handles this scenario.
-        let ir = &bitvec![u8, Lsb0; 1,0,0,0,1,0,0,0,0];
+        let ir = bits![1, 0, 0, 0, 1, 0, 0, 0, 0];
         let n_taps = 2;
         let expected = None;
 
@@ -888,7 +817,7 @@ mod tests {
     fn extract_ir_lengths_with_two_taps_101() {
         // Slightly contrived example where the IR scan starts with 101xx. In known real devices
         // the 101 TAP is 5 bits long, but this is an edge case that the algorithm should handle.
-        let ir = &bitvec![u8, Lsb0; 1,0,1,0,1,0,0,0,0];
+        let ir = bits![1, 0, 1, 0, 1, 0, 0, 0, 0];
         let n_taps = 2;
         let expected = None;
 
@@ -899,33 +828,33 @@ mod tests {
 
     #[test]
     fn extract_id_codes_one_tap() {
-        let mut dr = bitvec![u8, Lsb0; 0; 32];
+        let dr = bits![mut 0; 32];
         dr[0..32].store_le(ARM_TAP.0);
 
-        let idcodes = extract_idcodes(&dr).unwrap();
+        let idcodes = extract_idcodes(dr).unwrap();
 
         assert_eq!(idcodes, vec![Some(ARM_TAP)]);
     }
 
     #[test]
     fn extract_id_codes_two_taps() {
-        let mut dr = bitvec![u8, Lsb0; 0; 64];
+        let dr = bits![mut 0; 64];
         dr[0..32].store_le(ARM_TAP.0);
         dr[32..64].store_le(STM_BS_TAP.0);
 
-        let idcodes = extract_idcodes(&dr).unwrap();
+        let idcodes = extract_idcodes(dr).unwrap();
 
         assert_eq!(idcodes, vec![Some(ARM_TAP), Some(STM_BS_TAP)]);
     }
 
     #[test]
     fn extract_id_codes_tap_bypass_tap() {
-        let mut dr = bitvec![u8, Lsb0; 0; 65];
+        let dr = bits![mut 0; 65];
         dr[0..32].store_le(ARM_TAP.0);
         dr.set(32, false);
         dr[33..65].store_le(STM_BS_TAP.0);
 
-        let idcodes = extract_idcodes(&dr).unwrap();
+        let idcodes = extract_idcodes(dr).unwrap();
 
         assert_eq!(idcodes, vec![Some(ARM_TAP), None, Some(STM_BS_TAP)]);
     }

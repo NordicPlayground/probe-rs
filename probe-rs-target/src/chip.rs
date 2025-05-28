@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::memory::MemoryRegion;
-use crate::{serialize::hex_option, CoreType};
+use crate::{CoreType, serialize::hex_option};
 use serde::{Deserialize, Serialize};
 
 /// Represents a DAP scan chain element.
@@ -11,6 +11,13 @@ pub struct ScanChainElement {
     pub name: Option<String>,
     /// Specifies the IR length of the DAP (default value: 4).
     pub ir_len: Option<u8>,
+}
+
+impl ScanChainElement {
+    /// Returns the IR length, or 4 if not specified.
+    pub fn ir_len(&self) -> u8 {
+        self.ir_len.unwrap_or(4)
+    }
 }
 
 /// Configuration for JTAG tunneling.

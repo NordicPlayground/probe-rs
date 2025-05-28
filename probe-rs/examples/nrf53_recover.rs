@@ -3,15 +3,15 @@
 use anyhow::Result;
 use probe_rs::{
     architecture::arm::{
+        FullyQualifiedApAddress,
         ap::{ApRegister, IDR},
         dp::DpAddress,
-        FullyQualifiedApAddress,
     },
     probe::list::Lister,
 };
 
 fn main() -> Result<()> {
-    pretty_env_logger::init();
+    env_logger::init();
 
     let lister = Lister::new();
 

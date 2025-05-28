@@ -3,13 +3,15 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bitvec::{field::BitField, slice::BitSlice};
+
 use crate::{
+    Error as ProbeRsError,
     architecture::xtensa::arch::instruction::{Instruction, InstructionEncoding},
     probe::{
-        CommandResult, DeferredResultIndex, DeferredResultSet, JTAGAccess, JtagCommandQueue,
+        CommandResult, DeferredResultIndex, DeferredResultSet, JtagAccess, JtagCommandQueue,
         JtagWriteCommand, ShiftDrCommand,
     },
-    Error as ProbeRsError,
 };
 
 use super::communication_interface::XtensaError;
@@ -52,19 +54,6 @@ impl TapInstruction {
             TapInstruction::PowerControl => 8,
             TapInstruction::PowerStatus => 8,
             TapInstruction::Idcode => 32,
-        }
-    }
-
-    fn capture_to_u8(self, capture: &[u8]) -> u8 {
-        capture[0]
-    }
-
-    fn capture_to_u32(self, capture: &[u8]) -> u32 {
-        match self {
-            TapInstruction::Ndr | TapInstruction::Idcode => {
-                u32::from_le_bytes(capture.try_into().unwrap())
-            }
-            _ => capture[0] as u32,
         }
     }
 }
@@ -162,14 +151,14 @@ pub struct XdmState {
 #[derive(Debug)]
 pub struct Xdm<'probe> {
     /// The JTAG interface.
-    pub probe: &'probe mut dyn JTAGAccess,
+    pub probe: &'probe mut dyn JtagAccess,
 
     /// Debug module state.
     state: &'probe mut XdmState,
 }
 
 impl<'probe> Xdm<'probe> {
-    pub fn new(probe: &'probe mut dyn JTAGAccess, state: &'probe mut XdmState) -> Self {
+    pub fn new(probe: &'probe mut dyn JtagAccess, state: &'probe mut XdmState) -> Self {
         // TODO implement openocd's esp32_queue_tdi_idle() to prevent potentially damaging flash ICs
 
         Self { probe, state }
@@ -182,50 +171,48 @@ impl<'probe> Xdm<'probe> {
 
         self.probe.tap_reset()?;
 
+        // Reset PCM
         let mut pwr_control = PowerControl(0);
+        pwr_control.set_debug_reset(true);
+        pwr_control.set_debug_wakeup(true);
+        self.pwr_write(PowerDevice::PowerControl, pwr_control.0)?;
 
+        // Reset must be high for 10 CPU clocks.
+        std::thread::sleep(Duration::from_millis(1));
+
+        let mut pwr_control = PowerControl(0);
         pwr_control.set_debug_wakeup(true);
         pwr_control.set_mem_wakeup(true);
         pwr_control.set_core_wakeup(true);
-
-        // Wakeup and enable the JTAG
+        // Wakeup. We enable JTAG in a separate write.
         self.pwr_write(PowerDevice::PowerControl, pwr_control.0)?;
 
-        tracing::trace!("Waiting for power domain to turn on");
+        // Set JTAG_DEBUG_USE separately to ensure it doesn't get reset by a previous write.
+        // "any write to PWRCTL when JtagDebugUse is set also clears the bit".
+        pwr_control.set_jtag_debug_use(true);
+        self.pwr_write(PowerDevice::PowerControl, pwr_control.0)?;
+
+        // After software deasserts this bit (DebugReset), before reading other Debug registers,
+        // polling on bit 31 of the Debug Status Register (see Table 5-22) should be performed until
+        // it returns 1'b1.
         let now = Instant::now();
         loop {
-            let bits = self.pwr_write(PowerDevice::PowerStat, 0)?;
-            tracing::debug!("PowerStatus: {:?}", PowerStatus(bits));
-            if PowerStatus(bits).debug_domain_on() {
+            let status = self.status()?;
+            if status.dbgmod_power_on() {
                 break;
             }
 
-            if now.elapsed() > Duration::from_millis(500) {
+            if now.elapsed() > Duration::from_millis(100) {
                 return Err(XtensaError::CoreDisabled);
             }
         }
 
-        // Set JTAG_DEBUG_USE separately to ensure it doesn't get reset by a previous write.
-        // We don't reset anything but this is a good practice to avoid sneaky issues.
-        pwr_control.set_jtag_debug_use(true);
-        self.pwr_write(PowerDevice::PowerControl, pwr_control.0)?;
-
-        let idcode = self.read_idcode()?;
-        tracing::debug!("Read IDCODE: {:#010X}", idcode);
+        let mut reset_bits = PowerStatus(0);
+        reset_bits.set_core_was_reset(true);
+        reset_bits.set_debug_was_reset(true);
+        self.pwr_write(PowerDevice::PowerStat, reset_bits.0)?;
 
         self.check_enabled()?;
-
-        // enable the debug module
-        self.debug_control({
-            let mut reg = DebugControlBits(0);
-            reg.set_enable_ocd(true);
-            reg.set_break_in_en(true);
-            reg.set_break_out_en(true);
-            reg
-        })?;
-
-        let status = self.status()?;
-        tracing::debug!("{:?}", status);
 
         // we might find that an old instruction execution left the core with an exception
         // try to clear problematic bits
@@ -240,6 +227,13 @@ impl<'probe> Xdm<'probe> {
             status.set_debug_int_break(true);
 
             status
+        })?;
+
+        // configure the debug module
+        self.debug_control({
+            let mut reg = DebugControlBits(0);
+            reg.set_enable_ocd(true);
+            reg
         })?;
 
         Ok(())
@@ -287,29 +281,10 @@ impl<'probe> Xdm<'probe> {
         Ok(())
     }
 
-    fn power_status(&mut self, clear: PowerStatus) -> Result<PowerStatus, XtensaError> {
+    /// Read and clear the `PowerStatus` flags.
+    pub(crate) fn power_status(&mut self, clear: PowerStatus) -> Result<PowerStatus, XtensaError> {
         let bits = self.pwr_write(PowerDevice::PowerStat, clear.0)?;
         Ok(PowerStatus(bits))
-    }
-
-    /// Read and clear the `core_was_reset` flag.
-    pub(crate) fn core_was_reset(&mut self) -> Result<bool, XtensaError> {
-        self.power_status({
-            let mut clear_value = PowerStatus(0);
-            clear_value.set_core_was_reset(true);
-            clear_value
-        })
-        .map(|bits| bits.core_was_reset())
-    }
-
-    /// Read and clear the `debug_was_reset` flag.
-    pub(crate) fn debug_was_reset(&mut self) -> Result<bool, XtensaError> {
-        self.power_status({
-            let mut clear_value = PowerStatus(0);
-            clear_value.set_debug_was_reset(true);
-            clear_value
-        })
-        .map(|bits| bits.debug_was_reset())
     }
 
     /// Read and clear the `core_was_reset` flag.
@@ -347,6 +322,15 @@ impl<'probe> Xdm<'probe> {
                             // The instruction is still executing. Retry the Debug Status read.
                             to_consume -= 1;
                         }
+                        ProbeRsError::Xtensa(XtensaError::XdmError(Error::ExecExeception)) => {
+                            // Clear exception to allow executing further instructions.
+                            self.clear_exception_state()?;
+                            // TODO: in the future, we might want to bubble up the exception cause.
+                            // We might also want to store this error for each result that has not
+                            // yet been read.
+                            return Err(XtensaError::XdmError(Error::ExecExeception));
+                        }
+
                         ProbeRsError::Probe(error) => return Err(error.into()),
                         ProbeRsError::Xtensa(error) => return Err(error),
                         other => panic!("Unexpected error: {other}"),
@@ -385,7 +369,7 @@ impl<'probe> Xdm<'probe> {
             data: nar.to_le_bytes().to_vec(),
             len: TapInstruction::Nar.bits(),
             transform: |write, capture| {
-                let capture = TapInstruction::Nar.capture_to_u8(&capture);
+                let capture = capture.load_le::<u8>();
                 let nar = write.data[0] >> 1;
                 let write = write.data[0] & 1 == 1;
 
@@ -443,8 +427,7 @@ impl<'probe> Xdm<'probe> {
             .probe
             .write_register(instr.code(), &[value], instr.bits())?;
 
-        let res = instr.capture_to_u8(&capture);
-
+        let res = capture.load_le::<u8>();
         tracing::trace!("pwr_write response: {:?}", res);
 
         Ok(res)
@@ -457,7 +440,7 @@ impl<'probe> Xdm<'probe> {
             .probe
             .write_register(instr.code(), &[0, 0, 0, 0], instr.bits())?;
 
-        let res = instr.capture_to_u32(&capture);
+        let res = capture.load_le::<u32>();
 
         tracing::debug!("idcode response: {:x?}", res);
 
@@ -515,8 +498,6 @@ impl<'probe> Xdm<'probe> {
 
             control.set_enable_ocd(true);
             control.set_debug_interrupt(true);
-            control.set_break_in_en(true);
-            control.set_break_out_en(true);
 
             control
         }));
@@ -581,7 +562,12 @@ impl<'probe> Xdm<'probe> {
         });
 
         self.schedule_execute_instruction(Instruction::Rfdo(0));
-        self.execute()
+        match self.execute() {
+            Ok(_) => Ok(()),
+            // Core may just have resumed into a `waiti`
+            Err(XtensaError::XdmError(_)) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     pub(super) fn schedule_write_instruction(&mut self, instruction: Instruction) {
@@ -680,31 +666,41 @@ impl<'probe> Xdm<'probe> {
 
         Ok(())
     }
+
+    fn clear_exception_state(&mut self) -> Result<(), XtensaError> {
+        self.write_nexus_register({
+            let mut status = DebugStatus(0);
+
+            status.set_exec_exception(true);
+            status.set_exec_done(true);
+            status.set_exec_overrun(true);
+
+            status
+        })
+    }
 }
 
-type TransformFn = fn(&ShiftDrCommand, Vec<u8>) -> Result<CommandResult, ProbeRsError>;
+type TransformFn = fn(&ShiftDrCommand, &BitSlice) -> Result<CommandResult, ProbeRsError>;
 
 fn transform_u32(
     _command: &ShiftDrCommand,
-    capture: Vec<u8>,
+    capture: &BitSlice,
 ) -> Result<CommandResult, ProbeRsError> {
-    Ok(CommandResult::U32(
-        TapInstruction::Ndr.capture_to_u32(&capture),
-    ))
+    Ok(CommandResult::U32(capture.load_le::<u32>()))
 }
 
 fn transform_noop(
     _command: &ShiftDrCommand,
-    _capture: Vec<u8>,
+    _capture: &BitSlice,
 ) -> Result<CommandResult, ProbeRsError> {
     Ok(CommandResult::None)
 }
 
 fn transform_instruction_status(
     _command: &ShiftDrCommand,
-    capture: Vec<u8>,
+    capture: &BitSlice,
 ) -> Result<CommandResult, ProbeRsError> {
-    let status = DebugStatus(TapInstruction::Ndr.capture_to_u32(&capture));
+    let status = DebugStatus(capture.load_le::<u32>());
 
     if status.exec_overrun() {
         return Err(ProbeRsError::Xtensa(XtensaError::XdmError(
@@ -731,6 +727,7 @@ fn transform_instruction_status(
 bitfield::bitfield! {
     #[derive(Copy, Clone)]
     pub struct PowerControl(u8);
+    impl Debug;
 
     pub core_wakeup,    set_core_wakeup:    0;
     pub mem_wakeup,     set_mem_wakeup:     1;
@@ -870,7 +867,7 @@ impl NexusRegister for DebugControlSet {
     }
 
     fn bits(&self) -> u32 {
-        self.0 .0
+        self.0.0
     }
 }
 
@@ -887,7 +884,7 @@ impl NexusRegister for DebugControlClear {
     }
 
     fn bits(&self) -> u32 {
-        self.0 .0
+        self.0.0
     }
 }
 

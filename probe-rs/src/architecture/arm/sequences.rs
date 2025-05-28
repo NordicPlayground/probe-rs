@@ -11,28 +11,27 @@ use std::{
 use probe_rs_target::CoreType;
 
 use crate::{
-    architecture::arm::{
-        core::registers::cortex_m::{PC, SP},
-        dp::{DLPIDR, TARGETID},
-        ArmProbeInterface,
-    },
-    probe::{DebugProbeError, WireProtocol},
     MemoryInterface, MemoryMappedRegister, Session,
+    architecture::arm::{
+        ArmProbeInterface, DapError, RegisterAddress,
+        core::registers::cortex_m::{PC, SP},
+        dp::{Ctrl, DLPIDR, DebugPortError, DpRegister, TARGETID},
+    },
+    probe::WireProtocol,
 };
 
 use super::{
+    ArmError, DapAccess, FullyQualifiedApAddress, Pins,
     ap::AccessPortError,
     armv6m::Demcr,
-    communication_interface::{DapProbe, Initialized},
+    communication_interface::DapProbe,
     component::{TraceFunnel, TraceSink},
     core::cortex_m::{Dhcsr, Vtor},
-    dp::{Abort, Ctrl, DebugPortError, DpAccess, Select, DPIDR},
+    dp::{Abort, DPIDR, DpAccess, DpAddress, SelectV1},
     memory::{
-        romtable::{CoresightComponent, PeripheralType},
         ArmMemoryInterface,
+        romtable::{CoresightComponent, PeripheralType},
     },
-    ArmCommunicationInterface, ArmError, DpAddress, FullyQualifiedApAddress, Pins, PortType,
-    Register,
 };
 
 /// An error occurred when executing an ARM debug sequence
@@ -372,7 +371,7 @@ fn cortex_m_reset_catch_set(core: &mut dyn ArmMemoryInterface) -> Result<(), Arm
 
 /// ResetSystem for Cortex-M devices
 fn cortex_m_reset_system(interface: &mut dyn ArmMemoryInterface) -> Result<(), ArmError> {
-    use crate::architecture::arm::core::armv7m::{Aircr, Dhcsr};
+    use crate::architecture::arm::core::armv7m::Aircr;
 
     let mut aircr = Aircr(0);
     aircr.vectkey();
@@ -380,19 +379,41 @@ fn cortex_m_reset_system(interface: &mut dyn ArmMemoryInterface) -> Result<(), A
 
     interface.write_word_32(Aircr::get_mmio_address(), aircr.into())?;
 
+    cortex_m_wait_for_reset(interface)
+}
+
+/// Wait for Cortex-M device to reset
+pub(crate) fn cortex_m_wait_for_reset(
+    interface: &mut dyn ArmMemoryInterface,
+) -> Result<(), ArmError> {
+    use crate::architecture::arm::core::armv7m::Dhcsr;
+
     let start = Instant::now();
 
-    while start.elapsed() < Duration::from_millis(500) {
+    // PSOC 6 documentation states 600ms is the maximum possible time
+    // before the debug port becomes available again after reset
+    while start.elapsed() < Duration::from_millis(600) {
         let dhcsr = match interface.read_word_32(Dhcsr::get_mmio_address()) {
-            Ok(val) => Dhcsr(val),
             // Some combinations of debug probe and target (in
             // particular, hs-probe and ATSAMD21) result in
             // register read errors while the target is
             // resetting.
+            Ok(val) => Dhcsr(val),
             Err(ArmError::AccessPort {
-                source: AccessPortError::RegisterRead { .. },
+                source: AccessPortError::RegisterRead { source, .. },
                 ..
-            }) => continue,
+            }) => {
+                if let Some(ArmError::Dap(DapError::NoAcknowledge)) =
+                    source.downcast_ref::<ArmError>()
+                {
+                    // On PSOC 6, a system reset resets the SWD interface as well,
+                    // so we have to reinitialize.
+                    if let Ok(probe) = interface.get_arm_probe_interface() {
+                        probe.reinitialize()?;
+                    }
+                }
+                continue;
+            }
             Err(err) => return Err(err),
         };
         if !dhcsr.s_reset_st() {
@@ -541,7 +562,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
                 Some(WireProtocol::Swd) => {
                     if has_dormant {
                         // Select Dormant State (from JTAG)
-                        tracing::debug!("Select Dormant State (from JTAG)");
+                        tracing::debug!("SelectV1 Dormant State (from JTAG)");
                         interface.swj_sequence(31, 0x33BBBBBA)?;
 
                         // Leave dormant state
@@ -592,32 +613,73 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
     #[doc(alias = "DebugPortStart")]
     fn debug_port_start(
         &self,
-        interface: &mut ArmCommunicationInterface<Initialized>,
+        interface: &mut dyn DapAccess,
         dp: DpAddress,
     ) -> Result<(), ArmError> {
-        // Clear all errors.
-        // CMSIS says this is only necessary to do inside the `if powered_down`, but
-        // without it here, nRF52840 faults in the next access.
-        let mut abort = Abort(0);
-        abort.set_dapabort(true);
-        abort.set_orunerrclr(true);
-        abort.set_wderrclr(true);
-        abort.set_stkerrclr(true);
-        abort.set_stkcmpclr(true);
-        interface.write_dp_register(dp, abort)?;
+        interface.write_dp_register(dp, SelectV1(0))?;
+        let dpidr: DPIDR = interface.read_dp_register(dp)?;
 
-        interface.write_dp_register(dp, Select(0))?;
-
+        // Clear all errors and see if we need to power up the target
         let ctrl = interface.read_dp_register::<Ctrl>(dp)?;
+        let powered_down = if dpidr.version() == 0 || dpidr.designer() == 0 {
+            // Abort the current transaction. This is the only bit present in `Abort` in `DPv0`.
+            let mut abort = Abort(0);
+            abort.set_dapabort(true);
+            interface.write_dp_register(dp, abort)?;
 
-        let powered_down = !(ctrl.csyspwrupack() && ctrl.cdbgpwrupack());
+            // To clear errors on DPv0, we need to set W1C values for STICKYORUN, STICKYCMP, and STICKYERR
+            interface.write_dp_register::<Ctrl>(dp, Ctrl(0x32))?;
+
+            // DPv0 always needs to be powered up
+            true
+        } else {
+            // CMSIS says this is only necessary to do inside the `if powered_down`, but
+            // without it here, nRF52840 faults in the next access.
+            let mut abort = Abort(0);
+            abort.set_dapabort(true);
+            abort.set_orunerrclr(true);
+            abort.set_wderrclr(true);
+            abort.set_stkerrclr(true);
+            abort.set_stkcmpclr(true);
+            interface.write_dp_register(dp, abort)?;
+
+            !(ctrl.csyspwrupack() && ctrl.cdbgpwrupack())
+        };
 
         if powered_down {
             tracing::info!("Debug port {dp:x?} is powered down, powering up");
             let mut ctrl = Ctrl(0);
             ctrl.set_cdbgpwrupreq(true);
             ctrl.set_csyspwrupreq(true);
-            interface.write_dp_register(dp, ctrl)?;
+            if !dpidr.min() {
+                // Init AP Transfer Mode, Transaction Counter, and Lane Mask (Normal Transfer Mode,
+                // Include all Byte Lanes).
+                //
+                // Setting this on MINDP is unpredictable.
+                ctrl.set_mask_lane(0b1111);
+            }
+
+            match interface
+                .write_dp_register(dp, ctrl.clone())
+                .and_then(|_| interface.flush())
+            {
+                Ok(()) => {}
+                Err(e @ ArmError::Dap(DapError::NoAcknowledge)) => {
+                    // If we get a NACK from the power-up request, ignore the error & perform a line reset.
+                    // (CMSIS-DAP transports read DP.RDBUFF right after a write to DP.CTRL_STAT.
+                    //  This fails in some cases on PSOC 6, for example if the device is waking from DeepSleep.
+                    //  If something really went wrong, we'll hit an error or timeout in the polling loop below.)
+                    let Some(probe) = interface.try_dap_probe_mut() else {
+                        tracing::warn!(
+                            "Power-up request returned NACK, but we don't have a DapProbe, so we can't reconnect"
+                        );
+                        return Err(e);
+                    };
+                    tracing::info!("Power-up request returned NACK, reconnecting");
+                    self.debug_port_connect(probe, dp)?;
+                }
+                Err(e) => return Err(e),
+            }
 
             let start = Instant::now();
             loop {
@@ -634,11 +696,9 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
 
             // TODO: Only run the following code when the SWD protocol is used
 
-            // Init AP Transfer Mode, Transaction Counter, and Lane Mask (Normal Transfer Mode, Include all Byte Lanes)
-            let mut ctrl = Ctrl(0);
-            ctrl.set_cdbgpwrupreq(true);
-            ctrl.set_csyspwrupreq(true);
-            ctrl.set_mask_lane(0b1111);
+            // Write the CTRL register after powerup completes. It's unknown if this is required
+            // for all devices, but there's little harm in writing the same value back to the
+            // register after powerup.
             interface.write_dp_register(dp, ctrl)?;
 
             let ctrl_reg: Ctrl = interface.read_dp_register(dp)?;
@@ -844,15 +904,15 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
     fn debug_port_stop(&self, interface: &mut dyn DapProbe, dp: DpAddress) -> Result<(), ArmError> {
         tracing::info!("Powering down debug port {dp:x?}");
         // Select Bank 0
-        interface.raw_write_register(PortType::DebugPort, Select::ADDRESS, 0)?;
+        interface.raw_write_register(SelectV1::ADDRESS.into(), 0)?;
 
         // De-assert debug power request
-        interface.raw_write_register(PortType::DebugPort, Ctrl::ADDRESS, 0)?;
+        interface.raw_write_register(Ctrl::ADDRESS.into(), 0)?;
 
         // Wait for the power domains to go away
         let start = Instant::now();
         loop {
-            let ctrl = interface.raw_read_register(PortType::DebugPort, Ctrl::ADDRESS)?;
+            let ctrl = interface.raw_read_register(Ctrl::ADDRESS.into())?;
             let ctrl = Ctrl(ctrl);
             if !(ctrl.csyspwrupack() || ctrl.cdbgpwrupack()) {
                 return Ok(());
@@ -882,9 +942,6 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
         interface: &mut dyn DapProbe,
         dp: DpAddress,
     ) -> Result<(), ArmError> {
-        // Time guard for DPIDR register to become readable after line reset
-        const RESET_RECOVERY_TIMEOUT: Duration = Duration::from_secs(1);
-        const RESET_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(5);
         match interface.active_protocol() {
             Some(WireProtocol::Jtag) => {
                 tracing::debug!("JTAG: No special sequence needed to connect to debug port");
@@ -897,9 +954,13 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
                 return Err(ArmDebugSequenceError::SequenceSpecific(
                     "Cannot detect current protocol".into(),
                 )
-                .into())
+                .into());
             }
         }
+
+        // Time guard for DPIDR register to become readable after line reset
+        const RESET_RECOVERY_TIMEOUT: Duration = Duration::from_secs(1);
+        const RESET_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
         // Enter SWD Line Reset State, afterwards at least 2 idle cycles (SWDIO/TMS Low)
         // Guard gives time for the target to recover
@@ -916,19 +977,17 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
                 // The TARGETSEL write is not ACKed by design. We can't use a normal register write
                 // because many probes don't even send the data phase when NAK.
                 let parity = targetsel.count_ones() % 2;
-                let data = (parity as u64) << 45 | (targetsel as u64) << 13 | 0x1f99;
+                let data = ((parity as u64) << 45) | ((targetsel as u64) << 13) | 0x1f99;
 
                 // Should this be a swd_sequence?
                 // Technically we shouldn't drive SWDIO all the time when sending a request.
-                interface
-                    .swj_sequence(6 * 8, data)
-                    .map_err(DebugProbeError::from)?;
+                interface.swj_sequence(6 * 8, data)?;
             }
 
             tracing::debug!("Reading DPIDR to enable SWD interface");
 
             // Read DPIDR to enable SWD interface.
-            match interface.raw_read_register(PortType::DebugPort, DPIDR::ADDRESS) {
+            match interface.raw_read_register(RegisterAddress::DpRegister(DPIDR::ADDRESS)) {
                 Ok(x) => break x,
                 Err(z) => {
                     if guard.elapsed() > RESET_RECOVERY_TIMEOUT {
@@ -955,7 +1014,7 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
         abort.set_stkcmpclr(true);
 
         // DPBANKSEL does not matter for ABORT
-        interface.raw_write_register(PortType::DebugPort, Abort::ADDRESS, abort.0)?;
+        interface.raw_write_register(Abort::ADDRESS.into(), abort.0)?;
         interface.raw_flush()?;
 
         // Check that we are connected to the right DP
@@ -963,14 +1022,13 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
         if let DpAddress::Multidrop(targetsel) = dp {
             tracing::debug!("Checking TARGETID and DLPIDR match");
             // Select DP Bank 2
-            interface.raw_write_register(PortType::DebugPort, Select::ADDRESS, 2)?;
+            interface.raw_write_register(SelectV1::ADDRESS.into(), 2)?;
 
-            let target_id =
-                interface.raw_read_register(PortType::DebugPort, TARGETID::ADDRESS & 0xf)?;
+            let target_id = interface.raw_read_register(TARGETID::ADDRESS.into())?;
 
             // Select DP Bank 3
-            interface.raw_write_register(PortType::DebugPort, Select::ADDRESS, 3)?;
-            let dlpidr = interface.raw_read_register(PortType::DebugPort, DLPIDR::ADDRESS & 0xf)?;
+            interface.raw_write_register(SelectV1::ADDRESS.into(), 3)?;
+            let dlpidr = interface.raw_read_register(DLPIDR::ADDRESS.into())?;
 
             const TARGETID_MASK: u32 = 0x0FFF_FFFF;
             const DLPIDR_MASK: u32 = 0xF000_0000;
@@ -990,10 +1048,8 @@ pub trait ArmDebugSequence: Send + Sync + Debug {
             }
         }
 
-        interface.raw_write_register(PortType::DebugPort, Select::ADDRESS, 0)?;
-        let ctrl_stat = interface
-            .raw_read_register(PortType::DebugPort, Ctrl::ADDRESS & 0xf)
-            .map(Ctrl);
+        interface.raw_write_register(SelectV1::ADDRESS.into(), 0)?;
+        let ctrl_stat = interface.raw_read_register(Ctrl::ADDRESS.into()).map(Ctrl);
 
         match ctrl_stat {
             Ok(ctrl_stat) => {

@@ -2,14 +2,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::architecture::arm::ap::AccessPortType;
+use crate::MemoryMappedRegister;
 use crate::architecture::arm::armv7m::{Demcr, Dhcsr};
 use crate::architecture::arm::communication_interface::DapProbe;
 use crate::architecture::arm::memory::ArmMemoryInterface;
 use crate::architecture::arm::sequences::{ArmDebugSequence, ArmDebugSequenceError};
-use crate::architecture::arm::{ArmError, DpAddress};
+use crate::architecture::arm::{ArmError, dp::DpAddress};
 use crate::probe::{DebugProbeError, WireProtocol};
-use crate::MemoryMappedRegister;
 
 /// Marker struct indicating initialization sequencing for cc13xx_cc26xx family parts.
 #[derive(Debug)]
@@ -79,7 +78,7 @@ impl CC13xxCC26xx {
     /// * `cycles`    - Number of TCK cycles to shift in the data to IR
     /// * `reg`       - The value to shift into either IR
     /// * `state`     - The current state of the JTAG state machine. Note this will be updated by this function so that the
-    ///                state is correct after the function returns
+    ///   state is correct after the function returns
     /// * `end_state` - The state to end in, this can either be `JtagState::RunTestIdle` or `JtagState::SelectDRScan`
     fn shift_ir(
         &self,
@@ -109,7 +108,7 @@ impl CC13xxCC26xx {
     /// * `cycles`    - Number of TCK cycles to shift in the data to DR
     /// * `reg`       - The value to shift into either DR
     /// * `state`     - The current state of the JTAG state machine. Note this will be updated by this function so that the
-    ///                state is correct after the function returns
+    ///   state is correct after the function returns
     /// * `end_state` - The state to end in, this can either be `JtagState::RunTestIdle` or `JtagState::SelectDRScan`
     fn shift_dr(
         &self,
@@ -132,9 +131,9 @@ impl CC13xxCC26xx {
     /// * `cycles`    - Number of TCK cycles to shift in the data to either IR or DR
     /// * `reg`       - The value to shift into either IR or DR
     /// * `state`     - The current state of the JTAG state machine. Note this will be updated by this function so that the
-    ///                 state is correct after the function returns
+    ///   state is correct after the function returns
     /// * `action`    - Whether to load the IR or DR register, if IR is wanted then `JtagState::ShiftIR` should be passed
-    ///                 otherwise the default is to load DR.
+    ///   otherwise the default is to load DR.
     /// * `end_state` - The state to end in, this can either be `JtagState::RunTestIdle` or `JtagState::SelectDRScan`
     fn shift_reg(
         &self,
@@ -196,7 +195,7 @@ impl CC13xxCC26xx {
     /// * `register`  - The register to access
     /// * `payload`   - The data to write to the register
     /// * `state`     - The current state of the JTAG state machine. Note this will be updated by this function
-    ///                so that the state is correct after the function returns
+    ///   so that the state is correct after the function returns
     fn icepick_router(
         &self,
         interface: &mut dyn DapProbe,
@@ -362,8 +361,8 @@ impl ArmDebugSequence for CC13xxCC26xx {
         std::thread::sleep(Duration::from_millis(1));
 
         // Re-initializing the core(s) is on us.
-        let ap = probe.ap().ap_address().clone();
-        let interface = probe.get_arm_communication_interface()?;
+        let ap = probe.fully_qualified_address();
+        let interface = probe.get_arm_probe_interface()?;
         interface.reinitialize()?;
 
         assert!(debug_base.is_none());

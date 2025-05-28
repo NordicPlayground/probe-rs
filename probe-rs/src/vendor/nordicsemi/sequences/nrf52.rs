@@ -3,10 +3,10 @@
 use std::sync::Arc;
 
 use crate::architecture::arm::{
+    ArmError, ArmProbeInterface, FullyQualifiedApAddress,
     component::TraceSink,
     memory::CoresightComponent,
     sequences::{ArmDebugSequence, ArmDebugSequenceError},
-    ArmError, ArmProbeInterface, FullyQualifiedApAddress,
 };
 use crate::session::MissingPermissions;
 
@@ -22,10 +22,10 @@ pub enum ComponentError {
     NordicNoTraceMem,
 }
 
-const RESET: u8 = 0x00;
-const ERASEALL: u8 = 0x04;
-const ERASEALLSTATUS: u8 = 0x08;
-const APPROTECTSTATUS: u8 = 0x0C;
+const RESET: u64 = 0x00;
+const ERASEALL: u64 = 0x04;
+const ERASEALLSTATUS: u64 = 0x08;
+const APPROTECTSTATUS: u64 = 0x0C;
 
 /// Marker struct indicating initialization sequencing for nRF52 family parts.
 #[derive(Debug)]
@@ -48,7 +48,7 @@ impl Nrf52 {
 }
 
 mod clock {
-    use crate::architecture::arm::{memory::ArmMemoryInterface, ArmError};
+    use crate::architecture::arm::{ArmError, memory::ArmMemoryInterface};
     use bitfield::bitfield;
 
     /// The base address of the DBGMCU component

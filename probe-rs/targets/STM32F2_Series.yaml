@@ -12,7 +12,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -49,7 +49,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -61,6 +61,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x1fff7800
+      end: 0x1fff7a10
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM
     range:
@@ -87,7 +97,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -124,7 +134,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -163,7 +173,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -200,7 +210,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -237,7 +247,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -249,6 +259,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x1fff7800
+      end: 0x1fff7a10
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM
     range:
@@ -274,7 +294,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -311,7 +331,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -348,7 +368,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -385,7 +405,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -397,6 +417,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x1fff7800
+      end: 0x1fff7a10
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM
     range:
@@ -422,7 +452,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -459,7 +489,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -496,7 +526,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -534,7 +564,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -546,6 +576,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x1fff7800
+      end: 0x1fff7a10
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM
     range:
@@ -572,7 +612,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -610,7 +650,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -648,7 +688,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -685,7 +725,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -697,6 +737,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x1fff7800
+      end: 0x1fff7a10
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM
     range:
@@ -722,7 +772,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -759,7 +809,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -796,7 +846,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -833,7 +883,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -845,6 +895,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x1fff7800
+      end: 0x1fff7a10
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM
     range:
@@ -870,7 +930,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -907,7 +967,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -944,7 +1004,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -981,7 +1041,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1018,7 +1078,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1055,7 +1115,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1092,7 +1152,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1129,7 +1189,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1166,7 +1226,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1204,7 +1264,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1242,7 +1302,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1279,7 +1339,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1316,7 +1376,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1353,7 +1413,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1390,7 +1450,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1

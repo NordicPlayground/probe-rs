@@ -1,24 +1,24 @@
 //! Espressif vendor support.
 
 use probe_rs_target::{
-    chip_detection::{ChipDetectionMethod, EspressifDetection},
     Chip,
+    chip_detection::{ChipDetectionMethod, EspressifDetection},
 };
 
 use crate::{
+    Error, MemoryInterface,
     architecture::{
         riscv::communication_interface::RiscvCommunicationInterface,
         xtensa::communication_interface::XtensaCommunicationInterface,
     },
-    config::{registry, DebugSequence},
+    config::{DebugSequence, Registry},
     vendor::{
+        Vendor,
         espressif::sequences::{
             esp32::ESP32, esp32c2::ESP32C2, esp32c3::ESP32C3, esp32c6::ESP32C6, esp32h2::ESP32H2,
             esp32s2::ESP32S2, esp32s3::ESP32S3,
         },
-        Vendor,
     },
-    Error, MemoryInterface,
 };
 
 pub mod sequences;
@@ -41,9 +41,12 @@ fn get_target_by_magic(info: &EspressifDetection, read_magic: u32) -> Option<Str
     None
 }
 
-fn try_detect_espressif_chip(probe: &mut impl MemoryInterface, idcode: u32) -> Option<String> {
-    let families = registry::families_ref();
-    for family in families.iter() {
+fn try_detect_espressif_chip(
+    registry: &Registry,
+    probe: &mut impl MemoryInterface,
+    idcode: u32,
+) -> Option<String> {
+    for family in registry.families() {
         for info in family
             .chip_detection
             .iter()
@@ -94,19 +97,22 @@ impl Vendor for Espressif {
 
     fn try_detect_riscv_chip(
         &self,
+        registry: &Registry,
         probe: &mut RiscvCommunicationInterface,
         idcode: u32,
     ) -> Result<Option<String>, Error> {
-        let result = probe.halted_access(|probe| Ok(try_detect_espressif_chip(probe, idcode)))?;
+        let result =
+            probe.halted_access(|probe| Ok(try_detect_espressif_chip(registry, probe, idcode)))?;
 
         Ok(result)
     }
 
     fn try_detect_xtensa_chip(
         &self,
+        registry: &Registry,
         probe: &mut XtensaCommunicationInterface,
         idcode: u32,
     ) -> Result<Option<String>, Error> {
-        Ok(try_detect_espressif_chip(probe, idcode))
+        Ok(try_detect_espressif_chip(registry, probe, idcode))
     }
 }

@@ -4,12 +4,14 @@ use std::{sync::Arc, time::Duration};
 
 use super::esp::EspFlashSizeDetector;
 use crate::{
+    MemoryInterface, Session,
     architecture::riscv::{
+        Dmcontrol, Riscv32,
         communication_interface::{RiscvCommunicationInterface, Sbaddress0, Sbcs, Sbdata0},
         sequences::RiscvDebugSequence,
-        Dmcontrol,
     },
-    MemoryInterface, Session,
+    semihosting::{SemihostingCommand, UnknownCommandDetails},
+    vendor::espressif::sequences::esp::EspBreakpointHandler,
 };
 
 /// The debug sequence implementation for the ESP32H2.
@@ -31,16 +33,17 @@ impl ESP32H2 {
             },
         })
     }
-}
 
-impl RiscvDebugSequence for ESP32H2 {
-    fn on_connect(&self, interface: &mut RiscvCommunicationInterface) -> Result<(), crate::Error> {
-        tracing::info!("Disabling esp32h2 watchdogs...");
+    fn disable_wdts(
+        &self,
+        interface: &mut RiscvCommunicationInterface,
+    ) -> Result<(), crate::Error> {
+        tracing::info!("Disabling ESP32-H2 watchdogs...");
 
         // disable super wdt
         interface.write_word_32(0x600B1C24, 0x50D83AA1)?; // write protection off
         let current = interface.read_word_32(0x600B1C20)?;
-        interface.write_word_32(0x600B1C20, current | 1 << 18)?; // set RTC_CNTL_SWD_AUTO_FEED_EN
+        interface.write_word_32(0x600B1C20, current | (1 << 18))?; // set RTC_CNTL_SWD_AUTO_FEED_EN
         interface.write_word_32(0x600B1C24, 0x0)?; // write protection on
 
         // tg0 wdg
@@ -59,6 +62,16 @@ impl RiscvDebugSequence for ESP32H2 {
         interface.write_word_32(0x600B_1C1C, 0x0)?; // write protection on
 
         Ok(())
+    }
+}
+
+impl RiscvDebugSequence for ESP32H2 {
+    fn on_connect(&self, interface: &mut RiscvCommunicationInterface) -> Result<(), crate::Error> {
+        self.disable_wdts(interface)
+    }
+
+    fn on_halt(&self, interface: &mut RiscvCommunicationInterface) -> Result<(), crate::Error> {
+        self.disable_wdts(interface)
     }
 
     fn detect_flash_size(&self, session: &mut Session) -> Result<Option<usize>, crate::Error> {
@@ -105,5 +118,13 @@ impl RiscvDebugSequence for ESP32H2 {
         interface.reset_hart_and_halt(timeout)?;
 
         Ok(())
+    }
+
+    fn on_unknown_semihosting_command(
+        &self,
+        interface: &mut Riscv32,
+        details: UnknownCommandDetails,
+    ) -> Result<Option<SemihostingCommand>, crate::Error> {
+        EspBreakpointHandler::handle_riscv_idf_semihosting(interface, details)
     }
 }

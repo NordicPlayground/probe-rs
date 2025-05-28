@@ -3,21 +3,27 @@ use super::{
     core_data::{CoreData, CoreHandle},
 };
 use crate::{
+    FormatKind,
     cmd::dap_server::{
+        DebuggerError,
         debug_adapter::{
             dap::{adapter::DebugAdapter, dap_types::Source},
             protocol::ProtocolAdapter,
         },
-        DebuggerError,
     },
-    util::common_options::OperationError,
+    util::{common_options::OperationError, rtt},
 };
-use anyhow::{anyhow, Result};
-use probe_rs::{config::TargetSelector, probe::list::Lister, CoreStatus, Session};
+use anyhow::{Result, anyhow};
+use probe_rs::{
+    CoreStatus, Session, VectorCatchCondition,
+    config::{Registry, TargetSelector},
+    probe::list::Lister,
+    rtt::ScanRegion,
+};
 use probe_rs_debug::{
-    debug_info::DebugInfo, exception_handler_for_core, DebugRegisters, SourceLocation,
+    DebugRegisters, SourceLocation, debug_info::DebugInfo, exception_handler_for_core,
 };
-use std::env::set_current_dir;
+use std::{env::set_current_dir, time::Duration};
 use time::UtcOffset;
 
 /// The supported breakpoint types
@@ -28,7 +34,7 @@ pub(crate) enum BreakpointType {
     InstructionBreakpoint,
     /// A breakpoint that has a Source, and usually a result of a user requesting a breakpoint while in a 'source' view.
     SourceBreakpoint {
-        source: Source,
+        source: Box<Source>,
         location: SourceLocationScope,
     },
 }
@@ -64,15 +70,16 @@ pub(crate) struct SessionData {
 
 impl SessionData {
     pub(crate) fn new(
+        registry: &mut Registry,
         lister: &Lister,
         config: &mut configuration::SessionConfig,
         timestamp_offset: UtcOffset,
     ) -> Result<Self, DebuggerError> {
         let target_selector = TargetSelector::from(config.chip.as_deref());
 
-        let options = config.probe_options().load()?;
+        let options = config.probe_options().load(registry)?;
         let target_probe = options.attach_probe(lister)?;
-        let target_session = options
+        let mut target_session = options
             .attach_session(target_probe, target_selector)
             .map_err(|operation_error| {
                 match operation_error {
@@ -111,20 +118,52 @@ impl SessionData {
         // `CoreConfig` probe level initialization.
         if config.core_configs.len() != 1 {
             // TODO: For multi-core, allow > 1.
-            return Err(DebuggerError::Other(anyhow!("probe-rs-debugger requires that one, and only one, core be configured for debugging.")));
+            return Err(DebuggerError::Other(anyhow!(
+                "probe-rs-debugger requires that one, and only one, core be configured for debugging."
+            )));
         }
 
         // Filter `CoreConfig` entries based on those that match an actual core on the target probe.
-        let valid_core_configs = config.core_configs.iter().filter(|&core_config| {
-            target_session
-                .list_cores()
-                .iter()
-                .any(|(target_core_index, _)| *target_core_index == core_config.core_index)
-        });
+        let valid_core_configs = config
+            .core_configs
+            .iter()
+            .filter(|&core_config| {
+                target_session
+                    .list_cores()
+                    .iter()
+                    .any(|(target_core_index, _)| *target_core_index == core_config.core_index)
+            })
+            .collect::<Vec<_>>();
 
         let mut core_data_vec = vec![];
 
         for core_configuration in valid_core_configs {
+            if core_configuration.catch_hardfault || core_configuration.catch_reset {
+                let mut core = target_session.core(core_configuration.core_index)?;
+                let was_halted = core.core_halted()?;
+
+                if !was_halted {
+                    core.halt(Duration::from_millis(100))?;
+                }
+
+                if core_configuration.catch_hardfault {
+                    match core.enable_vector_catch(VectorCatchCondition::HardFault) {
+                        Ok(_) | Err(probe_rs::Error::NotImplemented(_)) => {} // Don't output an error if vector_catch hasn't been implemented
+                        Err(e) => tracing::error!("Failed to enable_vector_catch: {:?}", e),
+                    }
+                }
+                if core_configuration.catch_reset {
+                    match core.enable_vector_catch(VectorCatchCondition::CoreReset) {
+                        Ok(_) | Err(probe_rs::Error::NotImplemented(_)) => {} // Don't output an error if vector_catch hasn't been implemented
+                        Err(e) => tracing::error!("Failed to enable_vector_catch: {:?}", e),
+                    }
+                }
+
+                if was_halted {
+                    core.run()?;
+                }
+            }
+
             core_data_vec.push(CoreData {
                 core_index: core_configuration.core_index,
                 last_known_status: CoreStatus::Unknown,
@@ -138,16 +177,69 @@ impl SessionData {
                 core_peripherals: None,
                 stack_frames: vec![],
                 breakpoints: vec![],
+                rtt_scan_ranges: ScanRegion::Ranges(vec![]),
                 rtt_connection: None,
                 rtt_client: None,
+                clear_rtt_header: false,
+                rtt_header_cleared: false,
             })
         }
 
-        Ok(SessionData {
+        let mut this = SessionData {
             session: target_session,
             core_data: core_data_vec,
             timestamp_offset,
-        })
+        };
+
+        this.load_rtt_location(config)?;
+
+        Ok(this)
+    }
+
+    pub(crate) fn load_rtt_location(
+        &mut self,
+        config: &configuration::SessionConfig,
+    ) -> Result<(), DebuggerError> {
+        // Filter `CoreConfig` entries based on those that match an actual core on the target probe.
+        let valid_core_configs = config.core_configs.iter().filter(|&core_config| {
+            self.session
+                .list_cores()
+                .iter()
+                .any(|(target_core_index, _)| *target_core_index == core_config.core_index)
+        });
+
+        let image_format = config
+            .flashing_config
+            .format_options
+            .to_format_kind(self.session.target());
+
+        for core_configuration in valid_core_configs {
+            let Some(core_data) = self
+                .core_data
+                .iter_mut()
+                .find(|core_data| core_data.core_index == core_configuration.core_index)
+            else {
+                continue;
+            };
+
+            core_data.rtt_scan_ranges = match core_configuration.program_binary.as_ref() {
+                Some(program_binary)
+                    if matches!(image_format, FormatKind::Elf | FormatKind::Idf) =>
+                {
+                    let elf = std::fs::read(program_binary)
+                        .map_err(|error| anyhow!("Error attempting to attach to RTT: {error}"))?;
+
+                    match rtt::get_rtt_symbol_from_bytes(&elf) {
+                        Ok(address) => ScanRegion::Exact(address),
+                        // Do not scan the memory for the control block.
+                        _ => ScanRegion::Ranges(vec![]),
+                    }
+                }
+                _ => ScanRegion::Ranges(vec![]),
+            };
+        }
+
+        Ok(())
     }
 
     /// Reload the a specific core's debug info from the binary file.
@@ -205,7 +297,7 @@ impl SessionData {
     ///
     /// Return a Vec of [`CoreStatus`] (one entry per core) after this process has completed, as well as a boolean indicating whether we should consider a short delay before the next poll.
     #[tracing::instrument(level = "trace", skip_all)]
-    pub(crate) fn poll_cores<P: ProtocolAdapter>(
+    pub(crate) async fn poll_cores<P: ProtocolAdapter>(
         &mut self,
         session_config: &SessionConfig,
         debug_adapter: &mut DebugAdapter<P>,
@@ -239,7 +331,10 @@ impl SessionData {
             if core_config.rtt_config.enabled {
                 if let Some(core_rtt) = &mut target_core.core_data.rtt_connection {
                     // We should poll the target for rtt data, and if any RTT data was processed, we clear the flag.
-                    if core_rtt.process_rtt_data(debug_adapter, &mut target_core.core) {
+                    if core_rtt
+                        .process_rtt_data(debug_adapter, &mut target_core.core)
+                        .await
+                    {
                         suggest_delay_required = false;
                     }
                 } else if debug_adapter.configuration_is_done() {

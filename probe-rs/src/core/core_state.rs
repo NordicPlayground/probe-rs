@@ -1,16 +1,17 @@
 use crate::{
+    Core, CoreType, Error, Target,
     architecture::{
         arm::{
+            ApV2Address, ArmProbeInterface, FullyQualifiedApAddress,
             core::{CortexAState, CortexMState},
-            ArmProbeInterface, DpAddress, FullyQualifiedApAddress,
+            dp::DpAddress,
         },
         riscv::{
-            communication_interface::{RiscvCommunicationInterface, RiscvError},
             RiscvCoreState,
+            communication_interface::{RiscvCommunicationInterface, RiscvError},
         },
-        xtensa::{communication_interface::XtensaCommunicationInterface, XtensaCoreState},
+        xtensa::{XtensaCoreState, communication_interface::XtensaCommunicationInterface},
     },
-    Core, CoreType, Error, Target,
 };
 
 use super::ResolvedCoreOptions;
@@ -254,8 +255,12 @@ impl CoreState {
             None => DpAddress::Default,
             Some(x) => DpAddress::Multidrop(x),
         };
-
-        FullyQualifiedApAddress::v1_with_dp(dp, options.ap)
+        match &options.ap {
+            probe_rs_target::ApAddress::V1(ap) => FullyQualifiedApAddress::v1_with_dp(dp, *ap),
+            probe_rs_target::ApAddress::V2(ap) => {
+                FullyQualifiedApAddress::v2_with_dp(dp, ApV2Address::new(*ap))
+            }
+        }
     }
 }
 

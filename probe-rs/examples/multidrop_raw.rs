@@ -2,12 +2,12 @@
 
 use anyhow::Result;
 use probe_rs::{
-    architecture::arm::DpAddress,
-    probe::{list::Lister, Probe},
+    architecture::arm::dp::{DpAddress, DpRegisterAddress},
+    probe::{Probe, list::Lister},
 };
 
 fn main() -> Result<()> {
-    pretty_env_logger::init();
+    env_logger::init();
 
     // Get a list of all available debug probes.
 
@@ -35,22 +35,30 @@ fn main() -> Result<()> {
     // unconventional because each core has its own DP.
 
     let core1 = DpAddress::Multidrop(0x11002927);
+    const DPIDR: DpRegisterAddress = DpRegisterAddress {
+        address: 0x0,
+        bank: Some(0x0),
+    };
+    const TARGETID: DpRegisterAddress = DpRegisterAddress {
+        address: 0x4,
+        bank: Some(0x2),
+    };
 
     println!(
         "core0 DPIDR:    {:08x}",
-        iface.read_raw_dp_register(core0, 0x00)?
+        iface.read_raw_dp_register(core0, DPIDR)?
     );
     println!(
         "core0 TARGETID: {:08x}",
-        iface.read_raw_dp_register(core0, 0x24)?
+        iface.read_raw_dp_register(core0, TARGETID)?
     );
     println!(
         "core1 DPIDR:    {:08x}",
-        iface.read_raw_dp_register(core1, 0x00)?
+        iface.read_raw_dp_register(core1, DPIDR)?
     );
     println!(
         "core1 TARGETID: {:08x}",
-        iface.read_raw_dp_register(core1, 0x24)?
+        iface.read_raw_dp_register(core1, TARGETID)?
     );
 
     Ok(())

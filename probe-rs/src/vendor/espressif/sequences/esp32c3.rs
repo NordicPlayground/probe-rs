@@ -4,11 +4,13 @@ use std::{sync::Arc, time::Duration};
 
 use super::esp::EspFlashSizeDetector;
 use crate::{
-    architecture::riscv::{
-        communication_interface::RiscvCommunicationInterface, sequences::RiscvDebugSequence,
-        Dmcontrol, Dmstatus,
-    },
     MemoryInterface, Session,
+    architecture::riscv::{
+        Dmcontrol, Dmstatus, Riscv32, communication_interface::RiscvCommunicationInterface,
+        sequences::RiscvDebugSequence,
+    },
+    semihosting::{SemihostingCommand, UnknownCommandDetails},
+    vendor::espressif::sequences::esp::EspBreakpointHandler,
 };
 
 /// The debug sequence implementation for the ESP32C3.
@@ -30,11 +32,12 @@ impl ESP32C3 {
             },
         })
     }
-}
 
-impl RiscvDebugSequence for ESP32C3 {
-    fn on_connect(&self, interface: &mut RiscvCommunicationInterface) -> Result<(), crate::Error> {
-        tracing::info!("Disabling esp32c3 watchdogs...");
+    fn disable_wdts(
+        &self,
+        interface: &mut RiscvCommunicationInterface,
+    ) -> Result<(), crate::Error> {
+        tracing::info!("Disabling ESP32-C3 watchdogs...");
 
         // FIXME: this is a terrible hack because we should not need to halt to read memory.
         interface.sysbus_requires_halting(true);
@@ -42,7 +45,7 @@ impl RiscvDebugSequence for ESP32C3 {
         // disable super wdt
         interface.write_word_32(0x600080B0, 0x8F1D312A)?; // write protection off
         let current = interface.read_word_32(0x600080AC)?;
-        interface.write_word_32(0x600080AC, current | 1 << 31)?; // set RTC_CNTL_SWD_AUTO_FEED_EN
+        interface.write_word_32(0x600080AC, current | (1 << 31))?; // set RTC_CNTL_SWD_AUTO_FEED_EN
         interface.write_word_32(0x600080B0, 0x0)?; // write protection on
 
         // tg0 wdg
@@ -61,6 +64,16 @@ impl RiscvDebugSequence for ESP32C3 {
         interface.write_word_32(0x600080a8, 0x0)?; // write protection on
 
         Ok(())
+    }
+}
+
+impl RiscvDebugSequence for ESP32C3 {
+    fn on_connect(&self, interface: &mut RiscvCommunicationInterface) -> Result<(), crate::Error> {
+        self.disable_wdts(interface)
+    }
+
+    fn on_halt(&self, interface: &mut RiscvCommunicationInterface) -> Result<(), crate::Error> {
+        self.disable_wdts(interface)
     }
 
     fn detect_flash_size(&self, session: &mut Session) -> Result<Option<usize>, crate::Error> {
@@ -102,5 +115,13 @@ impl RiscvDebugSequence for ESP32C3 {
         self.on_connect(interface)?;
 
         Ok(())
+    }
+
+    fn on_unknown_semihosting_command(
+        &self,
+        interface: &mut Riscv32,
+        details: UnknownCommandDetails,
+    ) -> Result<Option<SemihostingCommand>, crate::Error> {
+        EspBreakpointHandler::handle_riscv_idf_semihosting(interface, details)
     }
 }

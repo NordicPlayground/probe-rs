@@ -3,8 +3,8 @@ pub mod configure;
 use std::iter;
 
 use super::{CommandId, Request, SendError};
-use crate::architecture::arm::PortType;
-use scroll::{Pread, Pwrite, LE};
+use crate::architecture::arm::RegisterAddress;
+use scroll::{LE, Pread, Pwrite};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum RW {
@@ -17,7 +17,7 @@ pub enum RW {
 #[derive(Clone, Debug)]
 struct InnerTransferRequest {
     /// 0 = Debug PortType (DP), 1 = Access PortType (AP).
-    pub APnDP: PortType,
+    pub APnDP: bool,
     /// 0 = Write Register, 1 = Read Register.
     pub RnW: RW,
     /// A2 Register Address bit 2.
@@ -37,12 +37,14 @@ struct InnerTransferRequest {
 }
 
 impl InnerTransferRequest {
-    pub fn new(port: PortType, rw: RW, address: u8, data: Option<u32>) -> Self {
+    pub fn new(address: RegisterAddress, rw: RW, data: Option<u32>) -> Self {
+        let a2and3 = address.a2_and_3();
+        //tracing::warn!("InnerTransferRequest: address_byte: {:x}", address_byte);
         Self {
-            APnDP: port,
+            APnDP: address.is_ap(),
             RnW: rw,
-            A2: (address >> 2) & 0x01 == 1,
-            A3: (address >> 3) & 0x01 == 1,
+            A2: (a2and3 >> 2) & 0x01 == 1,
+            A3: (a2and3 >> 3) & 0x01 == 1,
             value_match: false,
             match_mask: false,
             td_timestamp_request: false,
@@ -53,8 +55,8 @@ impl InnerTransferRequest {
 
 #[test]
 fn creating_inner_transfer_request() {
-    let req = InnerTransferRequest::new(PortType::DebugPort, RW::W, 0x8, None);
-
+    use crate::architecture::arm::dp::{DpRegister, SelectV1};
+    let req = InnerTransferRequest::new(SelectV1::ADDRESS.into(), RW::W, None);
     assert!(req.A3);
     assert!(!req.A2);
 }
@@ -62,12 +64,12 @@ fn creating_inner_transfer_request() {
 impl InnerTransferRequest {
     fn to_bytes(&self, buffer: &mut [u8]) -> Result<usize, SendError> {
         buffer[0] = (self.APnDP as u8)
-            | (self.RnW as u8) << 1
-            | u8::from(self.A2) << 2
-            | u8::from(self.A3) << 3
-            | u8::from(self.value_match) << 4
-            | u8::from(self.match_mask) << 5
-            | u8::from(self.td_timestamp_request) << 7;
+            | ((self.RnW as u8) << 1)
+            | (u8::from(self.A2) << 2)
+            | (u8::from(self.A3) << 3)
+            | (u8::from(self.value_match) << 4)
+            | (u8::from(self.match_mask) << 5)
+            | (u8::from(self.td_timestamp_request) << 7);
         if let Some(data) = self.data {
             let data = data.to_le_bytes();
             buffer[1..5].copy_from_slice(&data[..]);
@@ -149,26 +151,26 @@ impl TransferRequest {
         }
     }
 
-    pub fn read(port: PortType, addr: u8) -> Self {
+    pub fn read<T: Into<RegisterAddress>>(address: T) -> Self {
         let mut req = Self::empty();
-        req.add_read(port, addr);
+        req.add_read(address.into());
         req
     }
 
-    pub fn write(port: PortType, addr: u8, data: u32) -> Self {
+    pub fn write<T: Into<RegisterAddress>>(address: T, data: u32) -> Self {
         let mut req = Self::empty();
-        req.add_write(port, addr, data);
+        req.add_write(address.into(), data);
         req
     }
 
-    pub fn add_read(&mut self, port: PortType, addr: u8) {
+    pub fn add_read(&mut self, address: RegisterAddress) {
         self.transfers
-            .push(InnerTransferRequest::new(port, RW::R, addr, None));
+            .push(InnerTransferRequest::new(address, RW::R, None));
     }
 
-    pub fn add_write(&mut self, port: PortType, addr: u8, data: u32) {
+    pub fn add_write(&mut self, address: RegisterAddress, data: u32) {
         self.transfers
-            .push(InnerTransferRequest::new(port, RW::W, addr, Some(data)));
+            .push(InnerTransferRequest::new(address, RW::W, Some(data)));
     }
 }
 
@@ -218,8 +220,7 @@ impl Request for TransferRequest {
 
         let mut transfers = Vec::with_capacity(transfer_count);
         if transfer_count > 0 {
-            let acks = iter::repeat(Ack::Ok)
-                .take(transfer_count - 1)
+            let acks = std::iter::repeat_n(Ack::Ok, transfer_count - 1)
                 .chain(iter::once(last_transfer_response.ack))
                 .zip(self.transfers.iter());
 
@@ -349,12 +350,12 @@ impl Request for TransferBlockRequest {
 }
 
 impl TransferBlockRequest {
-    pub(crate) fn write_request(address: u8, port: PortType, data: Vec<u32>) -> Self {
+    pub(crate) fn write_request(address: RegisterAddress, data: Vec<u32>) -> Self {
         let inner = InnerTransferBlockRequest {
-            ap_n_dp: port,
+            ap_n_dp: address.is_ap(),
             r_n_w: RW::W,
-            a2: (address >> 2) & 0x01 == 1,
-            a3: (address >> 3) & 0x01 == 1,
+            a2: address.a2(),
+            a3: address.a3(),
         };
 
         TransferBlockRequest {
@@ -365,12 +366,12 @@ impl TransferBlockRequest {
         }
     }
 
-    pub(crate) fn read_request(address: u8, port: PortType, read_count: u16) -> Self {
+    pub(crate) fn read_request(address: RegisterAddress, read_count: u16) -> Self {
         let inner = InnerTransferBlockRequest {
-            ap_n_dp: port,
+            ap_n_dp: address.is_ap(),
             r_n_w: RW::R,
-            a2: (address >> 2) & 0x01 == 1,
-            a3: (address >> 3) & 0x01 == 1,
+            a2: address.a2(),
+            a3: address.a3(),
         };
 
         TransferBlockRequest {
@@ -384,7 +385,7 @@ impl TransferBlockRequest {
 
 #[derive(Debug, Copy, Clone)]
 pub(crate) struct InnerTransferBlockRequest {
-    ap_n_dp: PortType,
+    ap_n_dp: bool,
     r_n_w: RW,
     a2: bool,
     a3: bool,
@@ -393,9 +394,9 @@ pub(crate) struct InnerTransferBlockRequest {
 impl InnerTransferBlockRequest {
     fn as_bytes(&self, buffer: &mut [u8], offset: usize) -> Result<usize, SendError> {
         buffer[offset] = (self.ap_n_dp as u8)
-            | (self.r_n_w as u8) << 1
-            | u8::from(self.a2) << 2
-            | u8::from(self.a3) << 3;
+            | ((self.r_n_w as u8) << 1)
+            | (u8::from(self.a2) << 2)
+            | (u8::from(self.a3) << 3);
         Ok(1)
     }
 }

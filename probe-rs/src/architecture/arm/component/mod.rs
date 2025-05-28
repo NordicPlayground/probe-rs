@@ -9,12 +9,13 @@ mod tpiu;
 mod trace_funnel;
 
 use crate::{
-    architecture::arm::{
-        core::armv6m::Demcr,
-        memory::romtable::{CoresightComponent, PeripheralType, RomTableError},
-        ArmError, ArmProbeInterface, DpAddress, SwoConfig, SwoMode,
-    },
     Core, Error, MemoryInterface, MemoryMappedRegister,
+    architecture::arm::{
+        ArmError, ArmProbeInterface, SwoConfig, SwoMode,
+        core::armv6m::Demcr,
+        dp::DpAddress,
+        memory::romtable::{CoresightComponent, PeripheralType, RomTableError},
+    },
 };
 
 pub use self::itm::Itm;

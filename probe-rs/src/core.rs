@@ -1,4 +1,5 @@
 use crate::{
+    CoreType, InstructionSet, MemoryInterface, Target,
     architecture::{
         arm::sequences::ArmDebugSequence, riscv::sequences::RiscvDebugSequence,
         xtensa::sequences::XtensaDebugSequence,
@@ -6,7 +7,6 @@ use crate::{
     config::DebugSequence,
     error::Error,
     memory::CoreMemoryInterface,
-    CoreType, InstructionSet, MemoryInterface, Target,
 };
 pub use probe_rs_target::{Architecture, CoreAccessOptions};
 use probe_rs_target::{
@@ -33,7 +33,7 @@ pub struct CoreInformation {
 }
 
 /// A generic interface to control a MCU core.
-pub trait CoreInterface: MemoryInterface + CoreMemoryInterfaceShim {
+pub trait CoreInterface: MemoryInterface {
     /// Wait until the core is halted. If the core does not halt on its own,
     /// a [`DebugProbeError::Timeout`](crate::probe::DebugProbeError::Timeout) error will be returned.
     fn wait_for_core_halted(&mut self, timeout: Duration) -> Result<(), Error>;
@@ -178,32 +178,6 @@ pub trait CoreInterface: MemoryInterface + CoreMemoryInterfaceShim {
     }
 }
 
-/// Implementation detail to allow trait upcasting-like behaviour.
-//
-// TODO: replace with trait upcasting once stable
-pub trait CoreMemoryInterfaceShim: MemoryInterface {
-    /// Returns a reference to the underlying `MemoryInterface`.
-    // TODO: replace with trait upcasting once stable
-    fn as_memory_interface(&self) -> &dyn MemoryInterface;
-
-    /// Returns a mutable reference to the underlying `MemoryInterface`.
-    // TODO: replace with trait upcasting once stable
-    fn as_memory_interface_mut(&mut self) -> &mut dyn MemoryInterface;
-}
-
-impl<T> CoreMemoryInterfaceShim for T
-where
-    T: CoreInterface,
-{
-    fn as_memory_interface(&self) -> &dyn MemoryInterface {
-        self
-    }
-
-    fn as_memory_interface_mut(&mut self) -> &mut dyn MemoryInterface {
-        self
-    }
-}
-
 /// Generic core handle representing a physical core on an MCU.
 ///
 /// This should be considered as a temporary view of the core which locks the debug probe driver to as single consumer by borrowing it.
@@ -222,11 +196,11 @@ impl CoreMemoryInterface for Core<'_> {
     type ErrorType = Error;
 
     fn memory(&self) -> &dyn MemoryInterface<Self::ErrorType> {
-        self.inner.as_memory_interface()
+        self.inner.as_ref()
     }
 
     fn memory_mut(&mut self) -> &mut dyn MemoryInterface<Self::ErrorType> {
-        self.inner.as_memory_interface_mut()
+        self.inner.as_mut()
     }
 }
 
@@ -431,24 +405,9 @@ impl<'probe> Core<'probe> {
         self.inner.return_address()
     }
 
-    /// Find the index of the next available HW breakpoint comparator.
-    fn find_free_breakpoint_comparator_index(&mut self) -> Result<usize, Error> {
-        let mut next_available_hw_breakpoint = 0;
-        for breakpoint in self.inner.hw_breakpoints()? {
-            if breakpoint.is_none() {
-                return Ok(next_available_hw_breakpoint);
-            } else {
-                next_available_hw_breakpoint += 1;
-            }
-        }
-        Err(Error::Other(
-            "No available hardware breakpoints".to_string(),
-        ))
-    }
-
     /// Set a hardware breakpoint
     ///
-    /// This function will try to set a hardware breakpoint att `address`.
+    /// This function will try to set a hardware breakpoint at `address`.
     ///
     /// The amount of hardware breakpoints which are supported is chip specific,
     /// and can be queried using the `get_available_breakpoint_units` function.
@@ -459,15 +418,15 @@ impl<'probe> Core<'probe> {
         }
 
         // If there is a breakpoint set already, return its bp_unit_index, else find the next free index.
-        let breakpoint_comparator_index = match self
-            .inner
-            .hw_breakpoints()?
-            .iter()
-            .position(|&bp| bp == Some(address))
-        {
-            Some(breakpoint_comparator_index) => breakpoint_comparator_index,
-            None => self.find_free_breakpoint_comparator_index()?,
-        };
+        let breakpoints = self.inner.hw_breakpoints()?;
+        let breakpoint_comparator_index =
+            match breakpoints.iter().position(|&bp| bp == Some(address)) {
+                Some(breakpoint_comparator_index) => breakpoint_comparator_index,
+                None => breakpoints
+                    .iter()
+                    .position(|bp| bp.is_none())
+                    .ok_or_else(|| Error::Other("No available hardware breakpoints".to_string()))?,
+            };
 
         tracing::debug!(
             "Trying to set HW breakpoint #{} with comparator address  {:#08x}",
@@ -477,8 +436,28 @@ impl<'probe> Core<'probe> {
 
         // Actually set the breakpoint. Even if it has been set, set it again so it will be active.
         self.inner
-            .set_hw_breakpoint(breakpoint_comparator_index, address)?;
-        Ok(())
+            .set_hw_breakpoint(breakpoint_comparator_index, address)
+    }
+
+    /// Set a hardware breakpoint
+    ///
+    /// This function will try to set a given hardware breakpoint unit to `address`.
+    ///
+    /// The amount of hardware breakpoints which are supported is chip specific,
+    /// and can be queried using the `get_available_breakpoint_units` function.
+    #[tracing::instrument(skip(self))]
+    pub fn set_hw_breakpoint_unit(&mut self, unit_index: usize, addr: u64) -> Result<(), Error> {
+        if !self.inner.hw_breakpoints_enabled() {
+            self.enable_breakpoints(true)?;
+        }
+
+        tracing::debug!(
+            "Trying to set HW breakpoint #{} with comparator address  {:#08x}",
+            unit_index,
+            addr
+        );
+
+        self.inner.set_hw_breakpoint(unit_index, addr)
     }
 
     /// Set a hardware breakpoint
@@ -490,7 +469,7 @@ impl<'probe> Core<'probe> {
             .inner
             .hw_breakpoints()?
             .iter()
-            .position(|bp| bp.is_some() && bp.unwrap() == address);
+            .position(|bp| *bp == Some(address));
 
         tracing::debug!(
             "Will clear HW breakpoint    #{} with comparator address    {:#08x}",
@@ -641,12 +620,13 @@ impl CoreInterface for Core<'_> {
         self.enable_breakpoints(state)
     }
 
-    fn set_hw_breakpoint(&mut self, _unit_index: usize, addr: u64) -> Result<(), Error> {
-        self.set_hw_breakpoint(addr)
+    fn set_hw_breakpoint(&mut self, unit_index: usize, addr: u64) -> Result<(), Error> {
+        self.set_hw_breakpoint_unit(unit_index, addr)
     }
 
-    fn clear_hw_breakpoint(&mut self, _unit_index: usize) -> Result<(), Error> {
-        self.clear_all_hw_breakpoints()
+    fn clear_hw_breakpoint(&mut self, unit_index: usize) -> Result<(), Error> {
+        self.inner.clear_hw_breakpoint(unit_index)?;
+        Ok(())
     }
 
     fn registers(&self) -> &'static registers::CoreRegisters {
@@ -670,7 +650,7 @@ impl CoreInterface for Core<'_> {
     }
 
     fn hw_breakpoints_enabled(&self) -> bool {
-        todo!()
+        self.inner.hw_breakpoints_enabled()
     }
 
     fn architecture(&self) -> Architecture {

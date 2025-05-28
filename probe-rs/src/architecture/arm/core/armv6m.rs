@@ -1,13 +1,13 @@
 //! Register types and the core interface for armv6-M
 
-use super::{registers::cortex_m::*, CortexMState, Dfsr};
+use super::{CortexMState, Dfsr, registers::cortex_m::*};
 use crate::{
-    architecture::arm::{memory::ArmMemoryInterface, sequences::ArmDebugSequence, ArmError},
-    core::{CoreRegisters, RegisterId, RegisterValue, VectorCatchCondition},
-    error::Error,
-    memory::{valid_32bit_address, CoreMemoryInterface},
     Architecture, BreakpointCause, CoreInformation, CoreInterface, CoreRegister, CoreStatus,
     CoreType, HaltReason, InstructionSet, MemoryInterface, MemoryMappedRegister,
+    architecture::arm::{ArmError, memory::ArmMemoryInterface, sequences::ArmDebugSequence},
+    core::{CoreRegisters, RegisterId, RegisterValue, VectorCatchCondition},
+    error::Error,
+    memory::{CoreMemoryInterface, valid_32bit_address},
 };
 use bitfield::bitfield;
 use std::{
@@ -246,9 +246,9 @@ bitfield! {
     /// - `11` breakpoint on both lower and upper halfwords.
     /// - The field is UNKNOWN on reset.
     pub bp_match, set_bp_match: 31,30;
-    /// Stores bits [28:2] of the comparison address. The comparison address is
-    /// compared with the address from the Code memory region. Bits [31:29] and
-    /// [1:0] of the comparison address are zero.
+    /// Stores bits `[28:2]` of the comparison address. The comparison address is
+    /// compared with the address from the Code memory region. Bits `[31:29]` and
+    /// `[1:0]` of the comparison address are zero.
     ///
     /// The field is UNKNOWN on power-on reset.
     pub comp, set_comp: 28,2;
@@ -291,7 +291,10 @@ impl BpCompx {
         } else if bp_val.bp_match() == 0b10 {
             Ok((bp_val.comp() << 2) | 0x2)
         } else {
-            Err(Error::Arm(ArmError::Other(format!("Unsupported breakpoint comparator value {:#08x} for HW breakpoint. Breakpoint must be on half-word boundaries", bp_val.0) )))
+            Err(Error::Arm(ArmError::Other(format!(
+                "Unsupported breakpoint comparator value {:#08x} for HW breakpoint. Breakpoint must be on half-word boundaries",
+                bp_val.0
+            ))))
         }
     }
 }
@@ -608,6 +611,8 @@ impl CoreInterface for Armv6m<'_> {
 
         self.sequence
             .reset_system(&mut *self.memory, crate::CoreType::Armv6m, None)?;
+        // Invalidate cached core status
+        self.set_core_status(CoreStatus::Unknown);
         Ok(())
     }
 
@@ -617,8 +622,24 @@ impl CoreInterface for Armv6m<'_> {
         self.sequence
             .reset_system(&mut *self.memory, crate::CoreType::Armv6m, None)?;
 
-        // Update core status
-        let _ = self.status()?;
+        // Invalidate cached core status
+        self.set_core_status(CoreStatus::Unknown);
+
+        // Some processors may not enter the halt state immediately after clearing the reset state.
+        // Particularly: on PSOC 6, vector catch takes effect after the core's boot ROM finishes
+        // executing, when jumping to the reset vector of the user application.
+        match self.wait_for_core_halted(Duration::from_millis(100)) {
+            Ok(()) => (),
+            Err(Error::Arm(ArmError::Timeout)) if self.status()? == CoreStatus::Sleeping => {
+                // On PSOC 6, if no application is loaded in flash, or if this core is waiting for
+                // another core to boot it, the boot ROM sleeps and vector catch is not triggered.
+                tracing::warn!(
+                    "reset_and_halt timed out and core is sleeping; assuming core is quiescent"
+                );
+                self.halt(Duration::from_millis(100))?;
+            }
+            Err(e) => return Err(e),
+        }
 
         const XPSR_THUMB: u32 = 1 << 24;
 
@@ -677,7 +698,10 @@ impl CoreInterface for Armv6m<'_> {
                     .hw_breakpoints()?
                     .contains(&pc_before_step.try_into().ok())
             {
-                tracing::debug!("Encountered a breakpoint instruction @ {}. We need to manually advance the program counter to the next instruction.", pc_after_step);
+                tracing::debug!(
+                    "Encountered a breakpoint instruction @ {}. We need to manually advance the program counter to the next instruction.",
+                    pc_after_step
+                );
                 // Advance the program counter by the architecture specific byte size of the BKPT instruction.
                 pc_after_step.increment_address(2)?;
                 self.write_core_reg(self.program_counter().into(), pc_after_step)?;
@@ -759,7 +783,10 @@ impl CoreInterface for Armv6m<'_> {
         // The highest 3 bits of the address have to be zero, otherwise the breakpoint cannot
         // be set at the address.
         if addr >= 0x2000_0000 {
-            return Err(Error::Arm(ArmError::Other(format!("Unsupported address {:#08x} for HW breakpoint. Breakpoint must be at address < 0x2000_0000.", addr))));
+            return Err(Error::Arm(ArmError::Other(format!(
+                "Unsupported address {:#08x} for HW breakpoint. Breakpoint must be at address < 0x2000_0000.",
+                addr
+            ))));
         }
 
         let mut value = BpCompx(0);
@@ -910,9 +937,9 @@ impl CoreMemoryInterface for Armv6m<'_> {
     type ErrorType = ArmError;
 
     fn memory(&self) -> &dyn MemoryInterface<Self::ErrorType> {
-        self.memory.as_memory_interface()
+        self.memory.as_ref()
     }
     fn memory_mut(&mut self) -> &mut dyn MemoryInterface<Self::ErrorType> {
-        self.memory.as_memory_interface_mut()
+        self.memory.as_mut()
     }
 }

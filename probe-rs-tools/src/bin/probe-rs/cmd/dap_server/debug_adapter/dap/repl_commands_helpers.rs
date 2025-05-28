@@ -1,14 +1,14 @@
 use probe_rs::MemoryInterface;
 use probe_rs_debug::{ObjectRef, VariableName};
 
-use crate::cmd::dap_server::{server::core_data::CoreHandle, DebuggerError};
+use crate::cmd::dap_server::{DebuggerError, server::core_data::CoreHandle};
 
 use super::{
     dap_types::{
         CompletionItem, CompletionItemType, CompletionsArguments, DisassembledInstruction,
         EvaluateArguments, EvaluateResponseBody, Response,
     },
-    repl_commands::{ReplCommand, ReplHandler, REPL_COMMANDS},
+    repl_commands::{REPL_COMMANDS, ReplCommand, ReplHandler},
     repl_types::*,
     request_helpers::disassemble_target_memory,
 };
@@ -79,10 +79,9 @@ pub(crate) fn get_local_variable(
         type_: None,
         presentation_hint: None,
     };
-    response_body.result = "".to_string();
     for variable in variable_list {
         if gdb_nuf.format_specifier == GdbFormat::DapReference {
-            response_body.memory_reference = Some(format!("{}", variable.memory_location));
+            response_body.memory_reference = Some(variable.memory_location.to_string());
             response_body.result = format!(
                 "{} : {} ",
                 variable.name,
@@ -132,13 +131,12 @@ pub(crate) fn memory_read(
             return Err(DebuggerError::UserMessage(format!(
                 "Cannot disassemble memory at address {address:#010x}"
             )));
-        } else {
-            let mut formatted_output = "".to_string();
-            for assembly_line in &assembly_lines {
-                formatted_output.push_str(&assembly_line.to_string());
-            }
-            response.message = Some(formatted_output);
         }
+        let mut formatted_output = "".to_string();
+        for assembly_line in &assembly_lines {
+            formatted_output.push_str(&assembly_line.to_string());
+        }
+        response.message = Some(formatted_output);
     } else {
         let mut memory_result = vec![0u8; gdb_nuf.get_size()];
         match target_core.core.read_8(address, &mut memory_result) {
@@ -153,7 +151,7 @@ pub(crate) fn memory_read(
             Err(err) => {
                 return Err(DebuggerError::UserMessage(format!(
                     "Cannot read memory at address {address:#010x}: {err:?}"
-                )))
+                )));
             }
         }
     }
@@ -185,32 +183,34 @@ pub(crate) fn build_expanded_commands(
     let mut repl_commands: Vec<&ReplCommand<ReplHandler>> = REPL_COMMANDS.iter().collect();
 
     let mut command_root = "".to_string();
-    for command_piece in command_pieces {
+    let piece_count = command_pieces.clone().count();
+    for (piece_idx, command_piece) in command_pieces.enumerate() {
         // Find the matching commands.
         let matches = find_commands(&repl_commands, command_piece);
 
         // If there is only one match, and it has sub-commands, then we can continue iterating (implicit recursion with new sub-command).
-        if matches.len() == 1 {
-            if let Some(parent_command) = matches.first() {
-                if let Some(sub_commands) = parent_command.sub_commands {
-                    // Build up the full command as we iterate ...
-                    if !command_root.is_empty() {
-                        command_root.push(' ');
-                    }
-                    command_root.push_str(parent_command.command);
-                    repl_commands = sub_commands.iter().collect();
-                    continue;
-                }
-            }
-        }
+        let Some(parent_command) = matches.first() else {
+            // If there are no matches, then we can keep the matches from the previous
+            // iteration (if there were any) but we can't continue;
+            break;
+        };
 
-        if matches.is_empty() {
-            // If there are no matches, then we can keep the matches from the previous iteration (if there were any).
+        if matches.len() == 1
+            && !parent_command.sub_commands.is_empty()
+            && piece_idx != piece_count - 1
+        {
+            // Build up the full command as we iterate ...
+            if !command_root.is_empty() {
+                command_root.push(' ');
+            }
+            command_root.push_str(parent_command.command);
+            repl_commands = parent_command.sub_commands.iter().collect();
         } else {
-            // If there are multiple matches, or there is only one match with no sub-commands, then we can use the matches.
+            // If there are multiple matches, or there is only one match with no
+            // sub-commands, then we can use the matches.
             repl_commands = matches;
+            break;
         }
-        break;
     }
     (command_root, repl_commands)
 }

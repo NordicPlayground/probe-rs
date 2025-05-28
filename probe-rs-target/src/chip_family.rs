@@ -1,6 +1,6 @@
 use crate::memory::RegionMergeIterator as _;
 use crate::serialize::hex_jep106_option;
-use crate::{chip_detection::ChipDetectionMethod, CoreAccessOptions};
+use crate::{CoreAccessOptions, chip_detection::ChipDetectionMethod};
 use crate::{MemoryRange, MemoryRegion};
 
 use super::chip::Chip;
@@ -347,6 +347,13 @@ impl ChipFamily {
                 .iter()
                 .map(|core| &core.name)
                 .collect::<Vec<_>>();
+
+            if variant.memory_map.is_empty() && self.source != TargetDescriptionSource::Generic {
+                return Err(format!(
+                    "Variant {} does not contain any memory regions",
+                    variant.name
+                ));
+            }
 
             for memory in &variant.memory_map {
                 for core in memory.cores() {

@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use probe_rs_target::{MemoryRange, NvmRegion, PageInfo};
 
-use super::{FlashAlgorithm, FlashError, FlashVisualizer};
+use super::{FlashAlgorithm, FlashError};
 
 /// The description of a page in flash.
 #[derive(Clone, PartialEq, Eq)]
@@ -138,12 +138,6 @@ impl FlashLayout {
     pub fn data_blocks(&self) -> &[FlashDataBlockSpan] {
         &self.data_blocks
     }
-
-    /// Get a visualizer for the flash layout, which can create
-    /// a graphical representation of the layout.
-    pub fn visualize(&self) -> FlashVisualizer {
-        FlashVisualizer::new(self)
-    }
 }
 
 /// A block of data that is to be written to flash.
@@ -233,7 +227,10 @@ impl FlashBuilder {
     /// If a staged chunk is not fully contained in the range, only the contained part is
     /// returned. ie for each returned item (addr, data), it's guaranteed that the condition
     /// `start <= addr && addr + data.len() <= end` upholds.
-    pub(crate) fn data_in_range(&self, range: &Range<u64>) -> impl Iterator<Item = (u64, &[u8])> {
+    pub(crate) fn data_in_range<'s>(
+        &'s self,
+        range: &Range<u64>,
+    ) -> impl Iterator<Item = (u64, &'s [u8])> + use<'s> {
         let range = range.clone();
 
         let mut adjusted_start = range.start;

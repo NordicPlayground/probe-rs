@@ -1,12 +1,12 @@
 //! This example demonstrates how to use the ITM decoder to decode ITM packets from a target.
 
 use probe_rs::architecture::arm::{component::TraceSink, swo::SwoConfig};
-use probe_rs::{probe::list::Lister, Error, Permissions};
+use probe_rs::{Error, Permissions, probe::list::Lister};
 
 use itm::{Decoder, DecoderOptions, TracePacket};
 
 fn main() -> Result<(), Error> {
-    pretty_env_logger::init();
+    env_logger::init();
 
     let lister = Lister::new();
 

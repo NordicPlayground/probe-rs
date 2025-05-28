@@ -42,7 +42,7 @@ impl SWJPinsRequestBuilder {
         self
     }
 
-    pub fn _ntrst(&mut self, value: bool) -> &mut Self {
+    pub fn ntrst(&mut self, value: bool) -> &mut Self {
         self.ntrst = Some(value);
         self
     }
@@ -116,7 +116,7 @@ impl Request for SWJPinsRequest {
     type Response = SWJPinsResponse;
 
     fn to_bytes(&self, buffer: &mut [u8]) -> Result<usize, SendError> {
-        use scroll::{Pwrite, LE};
+        use scroll::{LE, Pwrite};
 
         buffer
             .pwrite_with(self.output.0, 0, LE)

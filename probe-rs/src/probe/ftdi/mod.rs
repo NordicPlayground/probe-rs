@@ -2,8 +2,8 @@
 use crate::{
     architecture::{
         arm::{
-            communication_interface::{DapProbe, UninitializedArmProbe},
             ArmCommunicationInterface,
+            communication_interface::{DapProbe, UninitializedArmProbe},
         },
         riscv::{communication_interface::RiscvInterfaceBuilder, dtm::jtag_dtm::JtagDtmBuilder},
         xtensa::communication_interface::{
@@ -11,17 +11,15 @@ use crate::{
         },
     },
     probe::{
-        arm_debug_interface::{ProbeStatistics, RawProtocolIo, SwdSettings},
-        common::{JtagDriverState, RawJtagIo},
-        DebugProbe, DebugProbeError, DebugProbeInfo, DebugProbeSelector, JTAGAccess,
-        ProbeCreationError, ProbeFactory, ScanChainElement, WireProtocol,
+        AutoImplementJtagAccess, DebugProbe, DebugProbeError, DebugProbeInfo, DebugProbeSelector,
+        IoSequenceItem, JtagAccess, JtagDriverState, ProbeCreationError, ProbeFactory,
+        ProbeStatistics, RawJtagIo, RawSwdIo, SwdSettings, WireProtocol,
     },
 };
 use bitvec::prelude::*;
 use nusb::DeviceInfo;
 use std::{
     io::{Read, Write},
-    iter,
     time::{Duration, Instant},
 };
 
@@ -29,7 +27,7 @@ mod command_compacter;
 mod ftdaye;
 
 use command_compacter::Command;
-use ftdaye::{error::FtdiError, ChipType};
+use ftdaye::{ChipType, error::FtdiError};
 
 #[derive(Debug)]
 struct JtagAdapter {
@@ -39,7 +37,7 @@ struct JtagAdapter {
     command: Command,
     commands: Vec<u8>,
     in_bit_counts: Vec<usize>,
-    in_bits: BitVec<u8, Lsb0>,
+    in_bits: BitVec,
     ftdi: FtdiProperties,
 }
 
@@ -249,7 +247,7 @@ impl JtagAdapter {
         Ok(())
     }
 
-    fn read_captured_bits(&mut self) -> Result<BitVec<u8, Lsb0>, DebugProbeError> {
+    fn read_captured_bits(&mut self) -> Result<BitVec, DebugProbeError> {
         self.flush()?;
 
         Ok(std::mem::take(&mut self.in_bits))
@@ -329,31 +327,11 @@ impl DebugProbe for FtdiProbe {
         Ok(self.adapter.set_speed_khz(speed_khz))
     }
 
-    fn set_scan_chain(&mut self, scan_chain: Vec<ScanChainElement>) -> Result<(), DebugProbeError> {
-        tracing::info!("Setting scan chain to {:?}", scan_chain);
-        self.jtag_state.expected_scan_chain = Some(scan_chain);
-        Ok(())
-    }
-
-    fn scan_chain(&self) -> Result<&[ScanChainElement], DebugProbeError> {
-        if let Some(ref scan_chain) = self.jtag_state.expected_scan_chain {
-            Ok(scan_chain)
-        } else {
-            Ok(&[])
-        }
-    }
-
     fn attach(&mut self) -> Result<(), DebugProbeError> {
         tracing::debug!("Attaching...");
 
         self.adapter.attach()?;
-
-        self.scan_chain()?;
         self.select_target(0)
-    }
-
-    fn select_jtag_tap(&mut self, index: usize) -> Result<(), DebugProbeError> {
-        self.select_target(index)
     }
 
     fn detach(&mut self) -> Result<(), crate::Error> {
@@ -391,6 +369,10 @@ impl DebugProbe for FtdiProbe {
     fn active_protocol(&self) -> Option<WireProtocol> {
         // Only supports JTAG
         Some(WireProtocol::Jtag)
+    }
+
+    fn try_as_jtag_probe(&mut self) -> Option<&mut dyn JtagAccess> {
+        Some(self)
     }
 
     fn try_get_riscv_interface_builder<'probe>(
@@ -432,35 +414,13 @@ impl DebugProbe for FtdiProbe {
     }
 }
 
+impl AutoImplementJtagAccess for FtdiProbe {}
 impl DapProbe for FtdiProbe {}
 
-impl RawProtocolIo for FtdiProbe {
-    fn jtag_shift_tms<M>(&mut self, tms: M, tdi: bool) -> Result<(), DebugProbeError>
+impl RawSwdIo for FtdiProbe {
+    fn swd_io<S>(&mut self, _swdio: S) -> Result<Vec<bool>, DebugProbeError>
     where
-        M: IntoIterator<Item = bool>,
-    {
-        self.probe_statistics.report_io();
-
-        self.shift_bits(tms, iter::repeat(tdi), iter::repeat(false))?;
-
-        Ok(())
-    }
-
-    fn jtag_shift_tdi<I>(&mut self, tms: bool, tdi: I) -> Result<(), DebugProbeError>
-    where
-        I: IntoIterator<Item = bool>,
-    {
-        self.probe_statistics.report_io();
-
-        self.shift_bits(iter::repeat(tms), tdi, iter::repeat(false))?;
-
-        Ok(())
-    }
-
-    fn swd_io<D, S>(&mut self, _dir: D, _swdio: S) -> Result<Vec<bool>, DebugProbeError>
-    where
-        D: IntoIterator<Item = bool>,
-        S: IntoIterator<Item = bool>,
+        S: IntoIterator<Item = IoSequenceItem>,
     {
         Err(DebugProbeError::NotImplemented {
             function_name: "swd_io",
@@ -499,7 +459,7 @@ impl RawJtagIo for FtdiProbe {
         Ok(())
     }
 
-    fn read_captured_bits(&mut self) -> Result<BitVec<u8, Lsb0>, DebugProbeError> {
+    fn read_captured_bits(&mut self) -> Result<BitVec, DebugProbeError> {
         self.adapter.read_captured_bits()
     }
 

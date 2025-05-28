@@ -13,8 +13,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -36,6 +35,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -59,8 +68,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -82,6 +90,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -105,8 +123,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -128,6 +145,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -151,8 +178,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -174,6 +200,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -198,8 +234,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -221,6 +256,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -253,8 +298,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -276,6 +320,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -305,8 +359,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: Flash
@@ -342,8 +395,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -365,6 +417,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -396,8 +458,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -419,6 +480,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -451,8 +522,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -474,6 +544,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -506,8 +586,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -529,6 +608,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -561,8 +650,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -584,6 +672,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -616,8 +714,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -639,6 +736,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -671,8 +778,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -694,6 +800,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -723,8 +839,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: Flash
@@ -760,8 +875,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -783,6 +897,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -815,8 +939,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -838,6 +961,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -870,8 +1003,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -893,6 +1025,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -924,8 +1066,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -947,6 +1088,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -978,8 +1129,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1001,6 +1151,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1033,8 +1193,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1056,6 +1215,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1088,8 +1257,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1111,6 +1279,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1143,8 +1321,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1166,6 +1343,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1198,8 +1385,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1221,6 +1407,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1252,8 +1448,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1275,6 +1470,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1306,8 +1511,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1329,6 +1533,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1360,8 +1574,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1383,6 +1596,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1414,8 +1637,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1437,6 +1659,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1468,8 +1700,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1491,6 +1722,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1523,8 +1764,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1546,6 +1786,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1578,8 +1828,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1601,6 +1850,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1635,8 +1894,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1658,6 +1916,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1689,8 +1957,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1712,6 +1979,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1744,8 +2021,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1767,6 +2043,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1799,8 +2085,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1822,6 +2107,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1853,8 +2148,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1876,6 +2170,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1908,8 +2212,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1931,6 +2234,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -1962,8 +2275,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1985,6 +2297,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -2017,8 +2339,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2040,6 +2361,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -2072,8 +2403,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2095,6 +2425,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -2129,8 +2469,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2152,6 +2491,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -2183,8 +2532,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2206,6 +2554,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -2238,8 +2596,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2261,6 +2618,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -2293,8 +2660,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2316,6 +2682,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:
@@ -2348,8 +2724,7 @@ variants:
   - name: main
     type: armv8m
     core_access_options: !Arm
-      ap: 1
-
+      ap: !v1 1
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2371,6 +2746,16 @@ variants:
     access:
       write: false
       boot: true
+  - !Nvm
+    name: OTP
+    range:
+      start: 0x8fff000
+      end: 0x8fff800
+    cores:
+    - main
+    access:
+      write: false
+      execute: false
   - !Ram
     name: SRAM1
     range:

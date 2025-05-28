@@ -1,13 +1,13 @@
 use std::path::PathBuf;
 use std::{fmt::Write, path::Path};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::CommandFactory;
 use clap_complete::{
-    generate,
+    Generator, Shell, generate,
     shells::{Bash, PowerShell, Zsh},
-    Generator, Shell,
 };
+use probe_rs::config::Registry;
 use probe_rs::probe::list::Lister;
 
 use crate::Cli;
@@ -119,7 +119,7 @@ pub enum CompleteKind {
 /// Output will be one line per chip and print the full name probe-rs expects.
 pub fn list_chips(starts_with: &str) -> Result<String> {
     let mut output = String::new();
-    for family in probe_rs::config::families() {
+    for family in Registry::from_builtin_families().families() {
         for variant in family.variants() {
             if variant.name.starts_with(starts_with) {
                 writeln!(output, "{}", variant.name)?;
@@ -303,7 +303,9 @@ impl ShellExt for PowerShell {
             println!("{script}");
             eprintln!("The user home directory could not be located.");
             eprintln!("Write the script to ~\\Documents\\WindowsPowerShell\\{file_name}");
-            eprintln!("Install the autocompletion with `Import-Module ~\\Documents\\WindowsPowerShell\\{file_name}`");
+            eprintln!(
+                "Install the autocompletion with `Import-Module ~\\Documents\\WindowsPowerShell\\{file_name}`"
+            );
             return Ok(());
         };
         let path = dir

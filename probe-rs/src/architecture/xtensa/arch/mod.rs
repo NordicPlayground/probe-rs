@@ -1,4 +1,4 @@
-use crate::{architecture::xtensa::communication_interface::XtensaError, RegisterId};
+use crate::{RegisterId, architecture::xtensa::communication_interface::XtensaError};
 
 pub mod instruction;
 
@@ -12,6 +12,12 @@ pub enum Register {
 
     /// Program state. The physical register depends on the debug level.
     CurrentPs,
+}
+
+impl Register {
+    pub(crate) fn is_cpu_register(self) -> bool {
+        matches!(self, Register::Cpu(_))
+    }
 }
 
 impl TryFrom<RegisterId> for Register {

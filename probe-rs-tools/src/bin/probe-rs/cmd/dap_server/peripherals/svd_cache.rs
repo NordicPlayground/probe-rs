@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use probe_rs::MemoryInterface;
-use probe_rs_debug::{get_object_reference, DebugError, ObjectRef};
+use probe_rs_debug::{DebugError, ObjectRef, get_object_reference};
 
 /// VariableCache stores available `Variable`s, and provides methods to create and navigate the parent-child relationships of the Variables.
 #[derive(Debug, Clone, PartialEq)]
@@ -93,7 +93,12 @@ impl SvdVariableCache {
             [] => None,
             [variable] => Some(variable),
             [.., last] => {
-                tracing::error!("Found {} variables with parent_key={:?} and name={}. Please report this as a bug.", child_variables.len(), parent_key, variable_name);
+                tracing::error!(
+                    "Found {} variables with parent_key={:?} and name={}. Please report this as a bug.",
+                    child_variables.len(),
+                    parent_key,
+                    variable_name
+                );
                 Some(last)
             }
         }
@@ -117,7 +122,10 @@ impl SvdVariableCache {
 
         // Validate that the parent_key exists ...
         if !self.variable_hash_map.contains_key(&parent_key) {
-            return Err(DebugError::Other(format!("SvdVariableCache: Attempted to add a new variable: {} with non existent `parent_key`: {:?}. Please report this as a bug", cache_variable.name, parent_key)));
+            return Err(DebugError::Other(format!(
+                "SvdVariableCache: Attempted to add a new variable: {} with non existent `parent_key`: {:?}. Please report this as a bug",
+                cache_variable.name, parent_key
+            )));
         }
 
         tracing::trace!(
@@ -131,7 +139,10 @@ impl SvdVariableCache {
             .variable_hash_map
             .insert(cache_variable.variable_key, cache_variable.clone())
         {
-            return Err(DebugError::Other(format!("Attempt to insert a new `SvdVariable`:{:?} with a duplicate cache key: {:?}. Please report this as a bug.", cache_variable.name, old_variable.variable_key)));
+            return Err(DebugError::Other(format!(
+                "Attempt to insert a new `SvdVariable`:{:?} with a duplicate cache key: {:?}. Please report this as a bug.",
+                cache_variable.name, old_variable.variable_key
+            )));
         }
 
         Ok(cache_variable.variable_key)
@@ -205,6 +216,9 @@ pub enum SvdVariable {
 
         /// Description of the register, used as type in DAP
         description: Option<String>,
+
+        /// Size in bits of the register
+        size: u32,
     },
     /// Field with address
     SvdField {
@@ -239,6 +253,7 @@ impl SvdVariable {
             SvdVariable::SvdRegister {
                 address,
                 restricted_read,
+                size,
                 ..
             } => {
                 if *restricted_read {
@@ -247,19 +262,32 @@ impl SvdVariable {
                         address
                     )
                 } else {
-                    let value = match memory.read_word_32(*address) {
-                        Ok(u32_value) => Ok(u32_value),
-                        Err(error) => Err(format!(
-                            "Unable to read peripheral register value @ {:#010X} : {:?}",
-                            address, error
-                        )),
+                    let size_bytes = (*size / 8).max(1);
+                    let bits_alignment_offset = (*address % size_bytes as u64) as u32 * 8;
+                    let value = match *size {
+                        0..=8 => memory
+                            .read_word_8(*address)
+                            .map(|val| format!("{val:#04X}")),
+                        9..=16 => {
+                            let aligned_address = *address & !0b1;
+                            memory
+                                .read_word_16(aligned_address)
+                                .map(|val| format!("{:#06X}", val >> bits_alignment_offset))
+                        }
+                        _ => {
+                            let aligned_address = *address & !0b11;
+                            memory
+                                .read_word_32(aligned_address)
+                                .map(|val| format!("{:#010X}", val >> bits_alignment_offset))
+                        }
                     };
 
                     match value {
-                        Ok(u32_value) => {
-                            format!("{:#010X}", u32_value)
-                        }
-                        Err(error) => error,
+                        Ok(value) => value,
+                        Err(error) => format!(
+                            "Unable to read peripheral register value @ {:#010X} : {:?}",
+                            address, error
+                        ),
                     }
                 }
             }
@@ -276,12 +304,10 @@ impl SvdVariable {
                         address
                     )
                 } else {
-                    let value = match memory.read_word_32(*address) {
-                        Ok(u32_value) => Ok(u32_value),
-                        Err(error) => Err(format!(
-                            "Unable to read peripheral register field value @ {:#010X} : {:?}",
-                            address, error
-                        )),
+                    let value = match *bit_range_upper_bound {
+                        0..8 => memory.read_word_8(*address).map(u32::from),
+                        8..16 => memory.read_word_16(*address & !0b1).map(u32::from),
+                        _ => memory.read_word_32(*address & !0b11),
                     };
 
                     // In this special case, we extract just the bits we need from the stored value of the register.
@@ -296,10 +322,13 @@ impl SvdVariable {
                                 address,
                                 bit_range_lower_bound,
                                 bit_range_upper_bound,
-                                width = (*bit_range_lower_bound..*bit_range_upper_bound).count()
+                                width = (*bit_range_upper_bound - *bit_range_lower_bound) as usize
                             )
                         }
-                        Err(e) => e,
+                        Err(error) => format!(
+                            "Unable to read peripheral register field value @ {:#010X} : {:?}",
+                            address, error
+                        ),
                     }
                 }
             }

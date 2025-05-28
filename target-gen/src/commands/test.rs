@@ -1,22 +1,25 @@
 use std::cell::RefCell;
-use std::fs::File;
 use std::path::Path;
 use std::rc::Rc;
 use std::time::Instant;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
 use probe_rs::{
+    MemoryInterface, Permissions, Session, SessionConfig,
+    config::Registry,
     flashing::{
-        erase_all, erase_sectors, DownloadOptions, FlashLoader, FlashProgress, ProgressEvent,
+        DownloadOptions, FlashLoader, FlashProgress, ProgressEvent, ProgressOperation, erase_all,
+        erase_sectors,
     },
-    MemoryInterface, Permissions, Session,
+    probe::WireProtocol,
 };
 use probe_rs_target::RawFlashAlgorithm;
-use xshell::{cmd, Shell};
+use xshell::{Shell, cmd};
 
 use crate::commands::elf::cmd_elf;
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_test(
     target_artifact: &Path,
     template_path: &Path,
@@ -24,6 +27,8 @@ pub fn cmd_test(
     test_start_sector_address: Option<u64>,
     chip: Option<String>,
     name: Option<String>,
+    speed: Option<u32>,
+    protocol: Option<WireProtocol>,
 ) -> Result<()> {
     ensure_is_file(target_artifact)?;
     ensure_is_file(template_path)?;
@@ -57,11 +62,14 @@ pub fn cmd_test(
         println!("{error}");
     }
 
-    // Add the target to the registry from the generated YAML file
-    let file = File::open(Path::new(definition_export_path))?;
-    let family_name = probe_rs::config::add_target_from_yaml(file)?;
+    let mut registry = Registry::new();
 
-    let targets = probe_rs::config::get_targets_by_family_name(&family_name)
+    // Add the target to the registry from the generated YAML file
+    let yaml = std::fs::read_to_string(definition_export_path)?;
+    let family_name = registry.add_target_family_from_yaml(&yaml)?;
+
+    let targets = registry
+        .get_targets_by_family_name(&family_name)
         .with_context(|| format!("Failed to get targets of {family_name}"))?;
 
     let target_name = match targets.len() {
@@ -81,31 +89,39 @@ pub fn cmd_test(
         }
     };
 
+    // Create SessionConfig to steer auto attach
+    let permissions = Permissions::new().allow_erase_all();
+    let session_config = SessionConfig {
+        permissions,
+        speed,
+        protocol,
+    };
+
     // We need to get the chip name so that special startup procedure can be used. (matched on name)
     let mut session =
-        probe_rs::Session::auto_attach(target_name, Permissions::new().allow_erase_all())?;
+        probe_rs::Session::auto_attach_with_registry(target_name, session_config, &registry)?;
 
     // Register callback to update the progress.
     let t = Rc::new(RefCell::new(Instant::now()));
     let progress = FlashProgress::new(move |event| match event {
-        ProgressEvent::StartedProgramming { .. } => {
+        ProgressEvent::Started(ProgressOperation::Program) => {
             let mut t = t.borrow_mut();
             *t = Instant::now();
         }
-        ProgressEvent::StartedErasing => {
+        ProgressEvent::Started(ProgressOperation::Erase) => {
             let mut t = t.borrow_mut();
             *t = Instant::now();
         }
-        ProgressEvent::FailedErasing => {
+        ProgressEvent::Failed(ProgressOperation::Erase) => {
             println!("Failed erasing in {:?}", t.borrow().elapsed());
         }
-        ProgressEvent::FinishedErasing => {
+        ProgressEvent::Finished(ProgressOperation::Erase) => {
             println!("Finished erasing in {:?}", t.borrow().elapsed());
         }
-        ProgressEvent::FailedProgramming => {
+        ProgressEvent::Failed(ProgressOperation::Program) => {
             println!("Failed programming in {:?}", t.borrow().elapsed());
         }
-        ProgressEvent::FinishedProgramming => {
+        ProgressEvent::Finished(ProgressOperation::Program) => {
             println!("Finished programming in {:?}", t.borrow().elapsed());
         }
         ProgressEvent::DiagnosticMessage { message } => {

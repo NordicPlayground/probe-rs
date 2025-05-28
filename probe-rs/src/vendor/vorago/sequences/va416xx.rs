@@ -4,14 +4,13 @@ use std::{sync::Arc, thread, time::Duration};
 use probe_rs_target::CoreType;
 
 use crate::{
+    MemoryMappedRegister,
     architecture::arm::{
-        ap::AccessPortType,
+        ArmError, ArmProbeInterface, FullyQualifiedApAddress,
         armv7m::Demcr,
         memory::ArmMemoryInterface,
-        sequences::{cortex_m_core_start, ArmDebugSequence},
-        ArmError, ArmProbeInterface, FullyQualifiedApAddress,
+        sequences::{ArmDebugSequence, cortex_m_core_start},
     },
-    MemoryMappedRegister,
 };
 
 /// Marker structure for the VA416xx device
@@ -79,9 +78,9 @@ impl ArmDebugSequence for Va416xx {
         interface.flush().ok();
 
         // Re-initializing the core(s) is on us.
-        let ap = interface.ap().ap_address().clone();
+        let ap = interface.fully_qualified_address();
 
-        let arm_interface = interface.get_arm_communication_interface()?;
+        let arm_interface = interface.get_arm_probe_interface()?;
         const NUM_RETRIES: u32 = 10;
         for i in 0..NUM_RETRIES {
             match arm_interface.reinitialize() {

@@ -10,15 +10,13 @@ mod speed;
 pub mod swo;
 
 use std::fmt;
-use std::iter;
 use std::time::{Duration, Instant};
 
 use bitvec::prelude::*;
 
 use itertools::Itertools;
-use nusb::transfer::{Direction, EndpointType};
 use nusb::DeviceInfo;
-use probe_rs_target::ScanChainElement;
+use nusb::transfer::{Direction, EndpointType};
 
 use self::bits::BitIter;
 use self::capabilities::{Capabilities, Capability};
@@ -30,24 +28,23 @@ use crate::architecture::arm::{ArmError, Pins};
 use crate::architecture::xtensa::communication_interface::{
     XtensaCommunicationInterface, XtensaDebugInterfaceState,
 };
-use crate::probe::common::{JtagDriverState, RawJtagIo};
 use crate::probe::jlink::bits::IteratorExt;
 use crate::probe::jlink::config::JlinkConfig;
 use crate::probe::jlink::connection::JlinkConnection;
 use crate::probe::usb_util::InterfaceExt;
-use crate::probe::JTAGAccess;
+use crate::probe::{AutoImplementJtagAccess, JtagAccess};
 use crate::{
     architecture::{
         arm::{
+            ArmCommunicationInterface, SwoAccess,
             communication_interface::{DapProbe, UninitializedArmProbe},
             swo::SwoConfig,
-            ArmCommunicationInterface, SwoAccess,
         },
         riscv::{communication_interface::RiscvInterfaceBuilder, dtm::jtag_dtm::JtagDtmBuilder},
     },
     probe::{
-        arm_debug_interface::{ProbeStatistics, RawProtocolIo, SwdSettings},
-        DebugProbe, DebugProbeError, DebugProbeInfo, DebugProbeSelector, ProbeFactory,
+        DebugProbe, DebugProbeError, DebugProbeInfo, DebugProbeSelector, IoSequenceItem,
+        JtagDriverState, ProbeFactory, ProbeStatistics, RawJtagIo, RawSwdIo, SwdSettings,
         WireProtocol,
     },
 };
@@ -130,7 +127,10 @@ impl ProbeFactory for JLinkFactory {
                     let endpoints: Vec<_> = descr.endpoints().collect();
                     tracing::trace!("endpoint descriptors: {:#x?}", endpoints);
                     if endpoints.len() != 2 {
-                        tracing::warn!("vendor-specific interface with {} endpoints, expected 2 (skipping interface)", endpoints.len());
+                        tracing::warn!(
+                            "vendor-specific interface with {} endpoints, expected 2 (skipping interface)",
+                            endpoints.len()
+                        );
                         continue;
                     }
 
@@ -235,7 +235,7 @@ impl ProbeFactory for JLinkFactory {
         };
 
         if this.caps.contains(Capability::GetMaxBlockSize) {
-            this.max_mem_block_size = this.read_max_mem_block()?;
+            this.max_mem_block_size = this.read_max_mem_block()? as usize;
 
             tracing::debug!(
                 "J-Link max mem block size for SWD IO: {} byte",
@@ -382,7 +382,7 @@ pub struct JLink {
     jtag_tms_bits: Vec<bool>,
     jtag_tdi_bits: Vec<bool>,
     jtag_capture_tdo: Vec<bool>,
-    jtag_response: BitVec<u8, Lsb0>,
+    jtag_response: BitVec,
     jtag_state: JtagDriverState,
 
     /// max number of bits in a transfer chunk, when using JTAG
@@ -391,7 +391,7 @@ pub struct JLink {
     /// Maximum memory block size, as report by the `GET_MAX_MEM_BLOCK` command.
     ///
     /// Used to determine maximum transfer length for SWD IO.
-    max_mem_block_size: u32,
+    max_mem_block_size: usize,
 
     probe_statistics: ProbeStatistics,
     swd_settings: SwdSettings,
@@ -778,7 +778,7 @@ impl JLink {
         Ok(())
     }
 
-    fn read_captured_bits(&mut self) -> Result<BitVec<u8, Lsb0>, DebugProbeError> {
+    fn read_captured_bits(&mut self) -> Result<BitVec, DebugProbeError> {
         self.flush_jtag()?;
 
         Ok(std::mem::take(&mut self.jtag_response))
@@ -787,47 +787,58 @@ impl JLink {
     /// Perform a single SWDIO command
     ///
     /// The caller needs to ensure that the given iterators are not longer than the maximum transfer size
-    /// allowed. It seems that the maximum transfer size is determined by [`self.max_mem_block_size`].
-    fn perform_swdio_transfer<D, S>(&self, dir: D, swdio: S) -> Result<Vec<bool>, DebugProbeError>
+    /// allowed. It seems that the maximum transfer size is determined by [`JLink::max_mem_block_size`].
+    fn perform_swdio_transfer<S>(&self, swdio: S) -> Result<Vec<bool>, DebugProbeError>
     where
-        D: IntoIterator<Item = bool>,
-        S: IntoIterator<Item = bool>,
+        S: IntoIterator<Item = IoSequenceItem>,
     {
         self.require_interface_selected(Interface::Swd)?;
 
-        const COMMAND_OVERHEAD: u32 = 4;
+        const COMMAND_OVERHEAD: usize = 4;
 
-        let max_bits = ((self.max_mem_block_size - COMMAND_OVERHEAD) / 2 * 8) as usize;
-        let max_bits = max_bits.min(65535);
+        let max_bits = (self.max_mem_block_size - COMMAND_OVERHEAD) / 2 * 8;
+        let max_bits = std::cmp::min(max_bits, 65535);
 
-        let dir_chunks = dir.into_iter().chunks(max_bits);
         let swdio_chunks = swdio.into_iter().chunks(max_bits);
 
-        #[allow(clippy::useless_conversion)]
-        let chunks = dir_chunks.into_iter().zip(swdio_chunks.into_iter());
-
         let mut output = Vec::new();
-        let mut buf = Vec::with_capacity(self.max_mem_block_size as usize);
-        buf.resize(4, 0);
-        buf[0] = Command::HwJtag3 as u8;
-        // buf[1] is dummy data for alignment
-        buf[1] = 0;
-        // buf[2..=3] is the bit count, which we'll fill in later
+        let mut buf = Vec::with_capacity(self.max_mem_block_size);
+        buf.resize(COMMAND_OVERHEAD, 0);
 
-        for (dir, swdio) in chunks {
-            buf.truncate(4);
+        for swdio in swdio_chunks.into_iter() {
+            buf.truncate(COMMAND_OVERHEAD);
 
-            let mut dir_bit_count = 0;
-            buf.extend(dir.inspect(|_| dir_bit_count += 1).collapse_bytes());
-            let mut swdio_bit_count = 0;
-            buf.extend(swdio.inspect(|_| swdio_bit_count += 1).collapse_bytes());
+            const INPUT: bool = false;
+            const OUTPUT: bool = true;
 
-            assert_eq!(
-                dir_bit_count, swdio_bit_count,
-                "`dir` and `swdio` must have the same number of bits"
+            let swdio: Vec<_> = swdio.collect();
+
+            //  Extend using the direction bits:
+            buf.extend(
+                swdio
+                    .iter()
+                    .map(|item| match item {
+                        IoSequenceItem::Input => INPUT,
+                        IoSequenceItem::Output { .. } => OUTPUT,
+                    })
+                    .collapse_bytes(),
+            );
+            //  Extend using the value bits:
+            buf.extend(
+                swdio
+                    .iter()
+                    .map(|item| match item {
+                        IoSequenceItem::Input => false,
+                        IoSequenceItem::Output(x) => *x,
+                    })
+                    .collapse_bytes(),
             );
 
-            let num_bits = dir_bit_count as u16;
+            let num_bits = swdio.len() as u16;
+
+            buf[0] = Command::HwJtag3 as u8;
+            // buf[1] is dummy data for alignment
+            buf[1] = 0;
             buf[2..=3].copy_from_slice(&num_bits.to_le_bytes());
             let num_bytes = usize::from(num_bits.div_ceil(8));
 
@@ -964,11 +975,6 @@ impl DebugProbe for JLink {
         self.speed_khz
     }
 
-    fn set_scan_chain(&mut self, scan_chain: Vec<ScanChainElement>) -> Result<(), DebugProbeError> {
-        self.jtag_state.expected_scan_chain = Some(scan_chain);
-        Ok(())
-    }
-
     fn set_speed(&mut self, speed_khz: u32) -> Result<u32, DebugProbeError> {
         if speed_khz == 0 || speed_khz >= 0xffff {
             return Err(DebugProbeError::UnsupportedSpeed(speed_khz));
@@ -1035,7 +1041,6 @@ impl DebugProbe for JLink {
                 tracing::debug!("Resetting JTAG chain using trst");
                 self.reset_trst()?;
 
-                self.scan_chain()?;
                 self.select_target(0)?;
             }
             WireProtocol::Swd => {
@@ -1058,25 +1063,6 @@ impl DebugProbe for JLink {
         Ok(())
     }
 
-    fn select_jtag_tap(&mut self, index: usize) -> Result<(), DebugProbeError> {
-        self.select_target(index)
-    }
-
-    fn scan_chain(&self) -> Result<&[ScanChainElement], DebugProbeError> {
-        match self.active_protocol() {
-            Some(WireProtocol::Jtag) => {
-                if let Some(ref scan_chain) = self.jtag_state.expected_scan_chain {
-                    Ok(scan_chain)
-                } else {
-                    Ok(&[])
-                }
-            }
-            _ => Err(DebugProbeError::InterfaceNotAvailable {
-                interface_name: "JTAG",
-            }),
-        }
-    }
-
     fn detach(&mut self) -> Result<(), crate::Error> {
         Ok(())
     }
@@ -1094,6 +1080,10 @@ impl DebugProbe for JLink {
     fn target_reset_deassert(&mut self) -> Result<(), DebugProbeError> {
         self.set_reset(true)?;
         Ok(())
+    }
+
+    fn try_as_jtag_probe(&mut self) -> Option<&mut dyn JtagAccess> {
+        Some(self)
     }
 
     fn try_get_riscv_interface_builder<'probe>(
@@ -1164,52 +1154,15 @@ impl DebugProbe for JLink {
     fn has_xtensa_interface(&self) -> bool {
         self.supported_protocols.contains(&WireProtocol::Jtag)
     }
-
-    fn try_into_jlink(&mut self) -> Result<&mut JLink, DebugProbeError> {
-        Ok(self)
-    }
 }
 
-impl RawProtocolIo for JLink {
-    fn jtag_shift_tms<M>(&mut self, tms: M, tdi: bool) -> Result<(), DebugProbeError>
+impl RawSwdIo for JLink {
+    fn swd_io<S>(&mut self, swdio: S) -> Result<Vec<bool>, DebugProbeError>
     where
-        M: IntoIterator<Item = bool>,
-    {
-        assert!(
-            self.protocol != WireProtocol::Swd,
-            "Logic error, requested jtag_io when in SWD mode"
-        );
-
-        self.probe_statistics.report_io();
-
-        self.shift_bits(tms, iter::repeat(tdi), iter::repeat(false))?;
-
-        Ok(())
-    }
-
-    fn jtag_shift_tdi<I>(&mut self, tms: bool, tdi: I) -> Result<(), DebugProbeError>
-    where
-        I: IntoIterator<Item = bool>,
-    {
-        assert!(
-            self.protocol != WireProtocol::Swd,
-            "Logic error, requested jtag_io when in SWD mode"
-        );
-
-        self.probe_statistics.report_io();
-
-        self.shift_bits(iter::repeat(tms), tdi, iter::repeat(false))?;
-
-        Ok(())
-    }
-
-    fn swd_io<D, S>(&mut self, dir: D, swdio: S) -> Result<Vec<bool>, DebugProbeError>
-    where
-        D: IntoIterator<Item = bool>,
-        S: IntoIterator<Item = bool>,
+        S: IntoIterator<Item = IoSequenceItem>,
     {
         self.probe_statistics.report_io();
-        self.perform_swdio_transfer(dir, swdio)
+        self.perform_swdio_transfer(swdio)
     }
 
     fn swj_pins(
@@ -1268,11 +1221,12 @@ impl RawJtagIo for JLink {
         self.shift_jtag_bit(tms, tdi, capture)
     }
 
-    fn read_captured_bits(&mut self) -> Result<BitVec<u8, Lsb0>, DebugProbeError> {
+    fn read_captured_bits(&mut self) -> Result<BitVec, DebugProbeError> {
         self.read_captured_bits()
     }
 }
 
+impl AutoImplementJtagAccess for JLink {}
 impl DapProbe for JLink {}
 
 impl SwoAccess for JLink {

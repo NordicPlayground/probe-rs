@@ -2,12 +2,16 @@
 
 use anyhow::Result;
 use probe_rs::{
-    architecture::arm::{DpAddress, FullyQualifiedApAddress},
+    architecture::arm::{
+        FullyQualifiedApAddress,
+        ap::{ApRegister, IDR},
+        dp::DpAddress,
+    },
     probe::list::Lister,
 };
 
 fn main() -> Result<()> {
-    pretty_env_logger::init();
+    env_logger::init();
 
     let lister = Lister::new();
 
@@ -29,12 +33,15 @@ fn main() -> Result<()> {
     const APP_CTRL: FullyQualifiedApAddress = FullyQualifiedApAddress::v1_with_default_dp(2);
     const NET_CTRL: FullyQualifiedApAddress = FullyQualifiedApAddress::v1_with_default_dp(3);
 
-    const ERASEALL: u8 = 0x04;
-    const ERASEALLSTATUS: u8 = 0x08;
-    const IDR: u8 = 0xFC;
+    const ERASEALL: u64 = 0x04;
+    const ERASEALLSTATUS: u64 = 0x08;
 
     for ap in &[APP_MEM, NET_MEM, APP_CTRL, NET_CTRL] {
-        println!("IDR {:?} {:x}", ap, iface.read_raw_ap_register(ap, IDR)?);
+        println!(
+            "IDR {:?} {:x}",
+            ap,
+            iface.read_raw_ap_register(ap, IDR::ADDRESS)?
+        );
     }
 
     for ap in &[APP_CTRL, NET_CTRL] {

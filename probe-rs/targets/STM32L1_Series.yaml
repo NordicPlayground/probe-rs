@@ -8,12 +8,12 @@ variants:
 - name: STM32L100C6
   package_variants:
   - STM32L100C6Ux
-  - STM32L100C6UxAA
+  - STM32L100C6UxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -41,7 +41,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -67,12 +67,12 @@ variants:
 - name: STM32L100R8
   package_variants:
   - STM32L100R8Tx
-  - STM32L100R8TxAA
+  - STM32L100R8TxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -100,7 +100,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -126,12 +126,12 @@ variants:
 - name: STM32L100RB
   package_variants:
   - STM32L100RBTx
-  - STM32L100RBTxAA
+  - STM32L100RBTxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -159,7 +159,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -189,7 +189,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -216,13 +216,13 @@ variants:
   package_variants:
   - STM32L151C6Tx
   - STM32L151C6Ux
-  - STM32L151C6TxAA
-  - STM32L151C6UxAA
+  - STM32L151C6TxA
+  - STM32L151C6UxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -250,7 +250,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -278,7 +278,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -305,13 +305,13 @@ variants:
   package_variants:
   - STM32L151C8Tx
   - STM32L151C8Ux
-  - STM32L151C8TxAA
-  - STM32L151C8UxAA
+  - STM32L151C8TxA
+  - STM32L151C8UxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -339,7 +339,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -367,7 +367,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -394,13 +394,13 @@ variants:
   package_variants:
   - STM32L151CBTx
   - STM32L151CBUx
-  - STM32L151CBTxAA
-  - STM32L151CBUxAA
+  - STM32L151CBTxA
+  - STM32L151CBUxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -428,7 +428,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -456,7 +456,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -487,7 +487,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -517,7 +517,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -547,7 +547,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -587,7 +587,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -624,13 +624,13 @@ variants:
   package_variants:
   - STM32L151R6Tx
   - STM32L151R6Hx
-  - STM32L151R6TxAA
-  - STM32L151R6HxAA
+  - STM32L151R6TxA
+  - STM32L151R6HxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -658,7 +658,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -686,7 +686,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -713,13 +713,13 @@ variants:
   package_variants:
   - STM32L151R8Tx
   - STM32L151R8Hx
-  - STM32L151R8TxAA
-  - STM32L151R8HxAA
+  - STM32L151R8TxA
+  - STM32L151R8HxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -747,7 +747,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -775,7 +775,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -802,13 +802,13 @@ variants:
   package_variants:
   - STM32L151RBTx
   - STM32L151RBHx
-  - STM32L151RBTxAA
-  - STM32L151RBHxAA
+  - STM32L151RBTxA
+  - STM32L151RBHxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -836,7 +836,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -864,7 +864,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -891,12 +891,12 @@ variants:
   package_variants:
   - STM32L151RCTx
   - STM32L151RCYx
-  - STM32L151RCTxAA
+  - STM32L151RCTxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -924,7 +924,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -955,7 +955,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -995,7 +995,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1035,7 +1035,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1062,13 +1062,13 @@ variants:
   package_variants:
   - STM32L151V8Tx
   - STM32L151V8Hx
-  - STM32L151V8TxAA
-  - STM32L151V8HxAA
+  - STM32L151V8TxA
+  - STM32L151V8HxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1096,7 +1096,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1124,7 +1124,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1151,13 +1151,13 @@ variants:
   package_variants:
   - STM32L151VBTx
   - STM32L151VBHx
-  - STM32L151VBTxAA
-  - STM32L151VBHxAA
+  - STM32L151VBTxA
+  - STM32L151VBHxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1185,7 +1185,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1213,7 +1213,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1240,12 +1240,12 @@ variants:
   package_variants:
   - STM32L151VCTx
   - STM32L151VCHx
-  - STM32L151VCTxAA
+  - STM32L151VCTxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1273,7 +1273,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1299,13 +1299,13 @@ variants:
 - name: STM32L151VD
   package_variants:
   - STM32L151VDTx
-  - STM32L151VDTxXX
-  - STM32L151VDYxXX
+  - STM32L151VDTxX
+  - STM32L151VDYxX
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1343,7 +1343,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1371,7 +1371,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1402,7 +1402,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1442,7 +1442,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1472,7 +1472,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1512,7 +1512,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1549,13 +1549,13 @@ variants:
   package_variants:
   - STM32L152C6Tx
   - STM32L152C6Ux
-  - STM32L152C6TxAA
-  - STM32L152C6UxAA
+  - STM32L152C6TxA
+  - STM32L152C6UxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1583,7 +1583,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1611,7 +1611,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1638,13 +1638,13 @@ variants:
   package_variants:
   - STM32L152C8Tx
   - STM32L152C8Ux
-  - STM32L152C8TxAA
-  - STM32L152C8UxAA
+  - STM32L152C8TxA
+  - STM32L152C8UxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1672,7 +1672,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1700,7 +1700,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1727,13 +1727,13 @@ variants:
   package_variants:
   - STM32L152CBTx
   - STM32L152CBUx
-  - STM32L152CBTxAA
-  - STM32L152CBUxAA
+  - STM32L152CBTxA
+  - STM32L152CBUxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1761,7 +1761,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1789,7 +1789,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -1820,7 +1820,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1850,7 +1850,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1880,7 +1880,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1920,7 +1920,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1957,13 +1957,13 @@ variants:
   package_variants:
   - STM32L152R6Tx
   - STM32L152R6Hx
-  - STM32L152R6HxAA
-  - STM32L152R6TxAA
+  - STM32L152R6HxA
+  - STM32L152R6TxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -1991,7 +1991,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2019,7 +2019,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2046,13 +2046,13 @@ variants:
   package_variants:
   - STM32L152R8Tx
   - STM32L152R8Hx
-  - STM32L152R8TxAA
-  - STM32L152R8HxAA
+  - STM32L152R8TxA
+  - STM32L152R8HxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2080,7 +2080,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2108,7 +2108,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2135,13 +2135,13 @@ variants:
   package_variants:
   - STM32L152RBTx
   - STM32L152RBHx
-  - STM32L152RBTxAA
-  - STM32L152RBHxAA
+  - STM32L152RBTxA
+  - STM32L152RBHxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2169,7 +2169,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2197,7 +2197,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2223,12 +2223,12 @@ variants:
 - name: STM32L152RC
   package_variants:
   - STM32L152RCTx
-  - STM32L152RCTxAA
+  - STM32L152RCTxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2256,7 +2256,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2287,7 +2287,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2327,7 +2327,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2368,7 +2368,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2395,13 +2395,13 @@ variants:
   package_variants:
   - STM32L152V8Tx
   - STM32L152V8Hx
-  - STM32L152V8TxAA
-  - STM32L152V8HxAA
+  - STM32L152V8TxA
+  - STM32L152V8HxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2429,7 +2429,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2457,7 +2457,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2484,13 +2484,13 @@ variants:
   package_variants:
   - STM32L152VBTx
   - STM32L152VBHx
-  - STM32L152VBTxAA
-  - STM32L152VBHxAA
+  - STM32L152VBTxA
+  - STM32L152VBHxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2518,7 +2518,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2546,7 +2546,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2573,12 +2573,12 @@ variants:
   package_variants:
   - STM32L152VCTx
   - STM32L152VCHx
-  - STM32L152VCTxAA
+  - STM32L152VCTxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2606,7 +2606,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2632,12 +2632,12 @@ variants:
 - name: STM32L152VD
   package_variants:
   - STM32L152VDTx
-  - STM32L152VDTxXX
+  - STM32L152VDTxX
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2675,7 +2675,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2706,7 +2706,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2746,7 +2746,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2776,7 +2776,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2816,7 +2816,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2857,7 +2857,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2887,7 +2887,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2923,12 +2923,12 @@ variants:
 - name: STM32L162RC
   package_variants:
   - STM32L162RCTx
-  - STM32L162RCTxAA
+  - STM32L162RCTxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -2956,7 +2956,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -2987,7 +2987,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -3027,7 +3027,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -3064,12 +3064,12 @@ variants:
   package_variants:
   - STM32L162VCTx
   - STM32L162VCHx
-  - STM32L162VCTxAA
+  - STM32L162VCTxA
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -3097,7 +3097,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -3123,12 +3123,12 @@ variants:
 - name: STM32L162VD
   package_variants:
   - STM32L162VDTx
-  - STM32L162VDYxXX
+  - STM32L162VDYxX
   cores:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -3166,7 +3166,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: IROM1
@@ -3197,7 +3197,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -3237,7 +3237,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -3267,7 +3267,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -3307,7 +3307,7 @@ variants:
   - name: main
     type: armv7m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1

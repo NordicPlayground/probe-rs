@@ -1,10 +1,10 @@
-use super::{debug_info::DebugInfo, DebugError, VerifiedBreakpoint};
+use super::{DebugError, VerifiedBreakpoint, debug_info::DebugInfo};
 use probe_rs::{
+    CoreInterface, CoreStatus, HaltReason,
     architecture::{
         arm::ArmError, riscv::communication_interface::RiscvError,
         xtensa::communication_interface::XtensaError,
     },
-    CoreInterface, CoreStatus, HaltReason,
 };
 use std::{ops::RangeInclusive, time::Duration};
 
@@ -49,7 +49,7 @@ impl SteppingMode {
             _ => {
                 return Err(DebugError::Other(
                     "Core must be halted before stepping.".to_string(),
-                ))
+                ));
             }
         };
         let origin_program_counter = program_counter;
@@ -89,7 +89,9 @@ impl SteppingMode {
                     match error {
                         DebugError::WarnAndContinue { message } => {
                             // Step on target instruction, and then try again.
-                            tracing::trace!("Incomplete stepping information @{program_counter:#010X}: {message}");
+                            tracing::trace!(
+                                "Incomplete stepping information @{program_counter:#010X}: {message}"
+                            );
                             program_counter = core.step()?.pc;
                             return_address =
                                 core.read_core_reg(core.return_address().id())?.try_into()?;
@@ -146,7 +148,7 @@ impl SteppingMode {
     /// To understand how this method works, use the following framework:
     /// - Everything is calculated from a given machine instruction address, usually the current program counter.
     /// - To calculate where the user might step to (step-over, step-into, step-out), we start from the given instruction
-    ///     address/program counter, and work our way through all the rows in the sequence of instructions it is part of.
+    ///   address/program counter, and work our way through all the rows in the sequence of instructions it is part of.
     ///   - A sequence of instructions represents a series of monotonically increasing target machine instructions,
     ///     and does not necessarily represent the whole of a function.
     ///   - Similarly, the instructions belonging to a sequence are not necessarily contiguous inside the sequence of instructions,
@@ -235,7 +237,9 @@ impl SteppingMode {
                     // We have halted at an address after the current instruction (either in the same sequence,
                     // or at the return address of the current function),
                     // so we can conclude there were no branching calls in this instruction.
-                    tracing::debug!("Stepping into next statement, but no branching calls found. Stepped to next available location.");
+                    tracing::debug!(
+                        "Stepping into next statement, but no branching calls found. Stepped to next available location."
+                    );
                 } else if matches!(core_status, CoreStatus::Halted(HaltReason::Breakpoint(_))) {
                     // We have halted at a PC that is within the current statement, so there must be another breakpoint.
                     tracing::debug!("Stepping into next statement, but encountered a breakpoint.");
@@ -265,7 +269,10 @@ impl SteppingMode {
                         {
                             return Err(DebugError::Other(format!(
                                 "Function {:?} is marked as `noreturn`. Cannot step out of this function.",
-                                function.function_name(debug_info).as_deref().unwrap_or("<unknown>")
+                                function
+                                    .function_name(debug_info)
+                                    .as_deref()
+                                    .unwrap_or("<unknown>")
                             )));
                         } else if function.range_contains(program_counter) {
                             if function.is_inline() {
@@ -283,9 +290,9 @@ impl SteppingMode {
                                 );
                             } else if let Some(return_address) = return_address {
                                 tracing::debug!(
-                                        "Step Out target: non-inline function, stepping over return address: {:#010x}",
-                                            return_address
-                                    );
+                                    "Step Out target: non-inline function, stepping over return address: {:#010x}",
+                                    return_address
+                                );
                                 // Step_out_address for non-inlined functions is the first available breakpoint address after the return address.
                                 return SteppingMode::BreakPoint.get_halt_location(
                                     core,
@@ -320,31 +327,43 @@ fn run_to_address(
     target_address: u64,
     core: &mut impl CoreInterface,
 ) -> Result<(CoreStatus, u64), DebugError> {
-    Ok(if target_address == program_counter {
+    if target_address == program_counter {
         // No need to step further. e.g. For inline functions we have already stepped to the best available target address..
-        (
+        return Ok((
             core.status()?,
             core.read_core_reg(core.program_counter().id())?
                 .try_into()?,
-        )
-    } else if core.set_hw_breakpoint(0, target_address).is_ok() {
+        ));
+    }
+
+    let breakpoints = core.hw_breakpoints()?;
+    let bp_to_use = breakpoints.iter().position(|bp| bp.is_none()).unwrap_or(0);
+
+    if core.set_hw_breakpoint(bp_to_use, target_address).is_ok() {
         core.run()?;
         // It is possible that we are stepping over long running instructions.
-        match core.wait_for_core_halted(Duration::from_millis(1000)) {
+        let status = core.wait_for_core_halted(Duration::from_millis(1000));
+
+        // Restore the original breakpoint.
+        if let Some(Some(bp)) = breakpoints.get(bp_to_use) {
+            core.set_hw_breakpoint(bp_to_use, *bp)?;
+        } else {
+            core.clear_hw_breakpoint(bp_to_use)?;
+        }
+
+        match status {
             Ok(()) => {
                 // We have hit the target address, so all is good.
                 // NOTE: It is conceivable that the core has halted, but we have not yet stepped to the target address. (e.g. the user tries to step out of a function, but there is another breakpoint active before the end of the function.)
                 //       This is a legitimate situation, so we clear the breakpoint at the target address, and pass control back to the user
-                core.clear_hw_breakpoint(0)?;
-                (
+                Ok((
                     core.status()?,
                     core.read_core_reg(core.program_counter().id())?
                         .try_into()?,
-                )
+                ))
             }
             Err(error) => {
                 program_counter = core.halt(Duration::from_millis(500))?.pc;
-                core.clear_hw_breakpoint(0)?;
                 if matches!(
                     error,
                     probe_rs::Error::Arm(ArmError::Timeout)
@@ -357,31 +376,30 @@ fn run_to_address(
                         target_address,
                         program_counter
                     );
-                    (core.status()?, program_counter)
+                    Ok((core.status()?, program_counter))
                 } else {
                     // Something else is wrong.
-                    return Err(DebugError::Other(format!(
+                    Err(DebugError::Other(format!(
                         "Unexpected error while waiting for the core to halt after stepping to {:#010X}. Forced a halt at {:#010X}. {:?}.",
-                        program_counter,
-                        target_address,
-                        error
-                    )));
+                        program_counter, target_address, error
+                    )))
                 }
             }
         }
     } else {
         // If we don't have breakpoints to use, we have to rely on single stepping.
         // TODO: In theory, this could go on for a long time. Should we consider NOT allowing this kind of stepping if there are no breakpoints available?
-        step_to_address(target_address..=u64::MAX, core)?
-    })
+
+        Ok(step_to_address(target_address..=u64::MAX, core)?)
+    }
 }
 
 /// In some cases, we need to single-step the core, until ONE of the following conditions are met:
 /// - We reach the `target_address_range.end()`
 /// - We reach an address that is not in the sequential range of `target_address_range`,
-///     i.e. we stepped to some kind of branch instruction, or diversion to an interrupt handler.
+///   i.e. we stepped to some kind of branch instruction, or diversion to an interrupt handler.
 /// - We reach some other legitimate halt point (e.g. the user tries to step past a series of statements,
-///     but there is another breakpoint active in that "gap")
+///   but there is another breakpoint active in that "gap")
 /// - We encounter an error (e.g. the core locks up).
 fn step_to_address(
     target_address_range: RangeInclusive<u64>,
@@ -400,14 +418,21 @@ fn step_to_address(
                     break;
                 }
                 // This is a recoverable error kind, and can be reported to the user higher up in the call stack.
-                other_halt_reason => return Err(DebugError::WarnAndContinue {
-                    message: format!("Target halted unexpectedly before we reached the destination address of a step operation: {other_halt_reason:?}")
-                }),
+                other_halt_reason => {
+                    return Err(DebugError::WarnAndContinue {
+                        message: format!(
+                            "Target halted unexpectedly before we reached the destination address of a step operation: {other_halt_reason:?}"
+                        ),
+                    });
+                }
             },
             // This is not a recoverable error, and will result in the debug session ending (we have no predicatable way of successfully continuing the session)
-            other_status => return Err(DebugError::Other(
-                format!("Target failed to reach the destination address of a step operation: {:?}", other_status))
-            ),
+            other_status => {
+                return Err(DebugError::Other(format!(
+                    "Target failed to reach the destination address of a step operation: {:?}",
+                    other_status
+                )));
+            }
         }
     }
     Ok((

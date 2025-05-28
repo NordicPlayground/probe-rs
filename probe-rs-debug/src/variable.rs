@@ -3,6 +3,7 @@ use crate::{language::ProgrammingLanguage, unit_info::UnitInfo};
 use super::*;
 use gimli::{DebugInfoOffset, DwLang, UnitOffset};
 use itertools::Itertools;
+use probe_rs::RegisterValue;
 use std::ops::Range;
 
 /// Define the role that a variable plays in a Variant relationship. See section '5.7.10 Variant
@@ -118,8 +119,8 @@ pub enum VariableNodeType {
     /// children. With the current implementation, the `type_offset` will point to a DIE with a tag
     /// of `DW_TAG_structure_type`.
     /// - Rule: For structured variables, we WILL NOT automatically expand their children, but we
-    ///         have enough information to expand it on demand. Except if they fall into one of the
-    ///         special cases handled by [VariableNodeType::RecurseToBaseType]
+    ///   have enough information to expand it on demand. Except if they fall into one of the
+    ///   special cases handled by [VariableNodeType::RecurseToBaseType]
     TypeOffset(DebugInfoOffset, UnitOffset),
     /// Use the `header_offset` and `entries_offset` as direct references for recursing the variable
     /// children.
@@ -132,26 +133,26 @@ pub enum VariableNodeType {
     /// Sometimes it doesn't make sense to recurse the children of a specific node type
     /// - Rule: Pointers to `unit` datatypes WILL NOT BE resolved, because it doesn't make sense.
     /// - Rule: Once we determine that a variable can not be recursed further, we update the
-    ///         variable_node_type to indicate that no further recursion is possible/required. This
-    ///         can be because the variable is a 'base' data type, or because there was some kind of
-    ///         error in processing the current node, so we don't want to incur cascading errors.
+    ///   variable_node_type to indicate that no further recursion is possible/required. This
+    ///   can be because the variable is a 'base' data type, or because there was some kind of
+    ///   error in processing the current node, so we don't want to incur cascading errors.
     // TODO: Find code instances where we use magic values (e.g. u32::MAX) and replace with DoNotRecurse logic if appropriate.
     DoNotRecurse,
     /// Unless otherwise specified, always recurse the children of every node until we get to the
     /// base data type.
     /// - Rule: (Default) Unless it is prevented by any of the other rules, we always recurse the
-    ///         children of these variables.
+    ///   children of these variables.
     /// - Rule: Certain structured variables (e.g. `&str`, `Some`, `Ok`, `Err`, etc.) are set to
-    ///         [VariableNodeType::RecurseToBaseType] to improve the debugger UX.
+    ///   [VariableNodeType::RecurseToBaseType] to improve the debugger UX.
     /// - Rule: Pointers to `const` variables WILL ALWAYS BE recursed, because they provide
-    ///         essential information, for example about the length of strings, or the size of
-    ///         arrays.
+    ///   essential information, for example about the length of strings, or the size of
+    ///   arrays.
     /// - Rule: Enumerated types WILL ALWAYS BE recursed, because we only ever want to see the
-    ///         'active' child as the value.
+    ///   'active' child as the value.
     /// - Rule: For now, Array types WILL ALWAYS BE recursed. TODO: Evaluate if it is beneficial to
-    ///         defer these.
+    ///   defer these.
     /// - Rule: For now, Union types WILL ALWAYS BE recursed. TODO: Evaluate if it is beneficial to
-    ///         defer these.
+    ///   defer these.
     #[default]
     RecurseToBaseType,
 }
@@ -394,7 +395,7 @@ impl VariableType {
             } => return language.format_array_type(&item_type_name.type_name(language), *count),
 
             VariableType::Bitfield(_, ty) | VariableType::Modified(_, ty) => {
-                return ty.type_name(language)
+                return ty.type_name(language);
             }
         };
 
@@ -403,7 +404,7 @@ impl VariableType {
 }
 
 /// Location of a variable
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum VariableLocation {
     /// Location of the variable is not known. This means that it has not been evaluated yet.
     #[default]
@@ -414,6 +415,8 @@ pub enum VariableLocation {
     Address(u64),
     /// The value of the variable is directly available.
     Value,
+    /// The variable is stored in a register, and the value is read from there.
+    RegisterValue(RegisterValue),
     /// There was an error evaluating the variable location.
     Error(String),
     /// Support for handling the location of this variable is not (yet) implemented.
@@ -425,6 +428,15 @@ impl VariableLocation {
     pub fn memory_address(&self) -> Result<u64, DebugError> {
         match self {
             VariableLocation::Address(address) => Ok(*address),
+            VariableLocation::RegisterValue(address) => match TryInto::<u64>::try_into(*address) {
+                Ok(address) => Ok(address),
+                Err(_) => Err(DebugError::WarnAndContinue {
+                    message: "Register value is not a valid address".to_string(),
+                }),
+            },
+            VariableLocation::Error(error) => Err(DebugError::WarnAndContinue {
+                message: error.clone(),
+            }),
             other => Err(DebugError::WarnAndContinue {
                 message: format!("Variable does not have a memory location: location={other:?}"),
             }),
@@ -434,9 +446,10 @@ impl VariableLocation {
     /// Check if the location is valid, ie. not an error, unsupported, or unavailable.
     pub fn valid(&self) -> bool {
         match self {
-            VariableLocation::Address(_) | VariableLocation::Value | VariableLocation::Unknown => {
-                true
-            }
+            VariableLocation::Address(_)
+            | VariableLocation::RegisterValue(_)
+            | VariableLocation::Value
+            | VariableLocation::Unknown => true,
             _other => false,
         }
     }
@@ -447,7 +460,14 @@ impl std::fmt::Display for VariableLocation {
         match self {
             VariableLocation::Unknown => "<unknown value>".fmt(f),
             VariableLocation::Unavailable => "<value not available>".fmt(f),
-            VariableLocation::Address(address) => write!(f, "{address:#010X}"),
+            VariableLocation::Address(address) => {
+                write!(f, "{address:#010X}")
+            }
+            VariableLocation::RegisterValue(address) => match address {
+                RegisterValue::U32(value) => write!(f, "{value:#010X}"),
+                RegisterValue::U64(value) => write!(f, "{value:#018X}"),
+                RegisterValue::U128(value) => write!(f, "{value:#034X}"),
+            },
             VariableLocation::Value => "<not applicable - statically stored value>".fmt(f),
             VariableLocation::Error(error) => error.fmt(f),
             VariableLocation::Unsupported(reason) => reason.fmt(f),
@@ -459,12 +479,14 @@ impl std::fmt::Display for VariableLocation {
 ///
 /// Any modifications to the `Variable` value will be transient (lost when it goes out of scope),
 /// unless it is updated through one of the available methods on `VariableCache`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Variable {
     /// Every variable must have a unique key value assigned to it.
     /// The value will be zero until it is stored in VariableCache, at which time its value will be
     /// set to the same as the VariableCache::variable_cache_key
     pub(super) variable_key: ObjectRef,
+    /// The offset to the variable's type information.
+    pub(crate) type_node_offset: Option<UnitOffset>,
     /// Every variable must have a unique parent assigned to it when stored in the VariableCache.
     pub parent_key: ObjectRef,
     /// The variable name refers to the name of any of the types of values described in the [VariableCache]
@@ -504,6 +526,7 @@ impl Variable {
             language: unit_info
                 .map(|info| info.get_language())
                 .unwrap_or(gimli::DW_LANG_Rust),
+            type_node_offset: None,
             variable_key: Default::default(),
             parent_key: Default::default(),
             name: Default::default(),
@@ -612,8 +635,9 @@ impl Variable {
             if self.variable_node_type.is_deferred() {
                 // When we will do a lazy-load of variable children, and they have not yet been
                 // requested by the user, just display the type_name as the value
-                self.type_name
-                    .display_name(language::from_dwarf(self.language).as_ref())
+                self.type_name()
+            } else if let VariableLocation::Error(ref error) = self.memory_location {
+                error.clone()
             } else {
                 // This condition should only be true for intermediate nodes
                 // from DWARF. These should not show up in the final
@@ -661,12 +685,8 @@ impl Variable {
         {
             // And we have not previously assigned the value, then assign the type and address as
             // the value.
-            self.value = VariableValue::Valid(format!(
-                "{} @ {}",
-                self.type_name
-                    .display_name(language::from_dwarf(self.language).as_ref()),
-                self.memory_location
-            ));
+            self.value =
+                VariableValue::Valid(format!("{} @ {}", self.type_name(), self.memory_location));
             return;
         }
 

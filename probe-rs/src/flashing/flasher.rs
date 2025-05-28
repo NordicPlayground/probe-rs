@@ -1,4 +1,4 @@
-use probe_rs_target::RawFlashAlgorithm;
+use probe_rs_target::{RawFlashAlgorithm, TransferEncoding};
 use tracing::Level;
 
 use super::{FlashAlgorithm, FlashBuilder, FlashError, FlashPage, FlashProgress};
@@ -8,8 +8,8 @@ use crate::flashing::encoder::FlashEncoder;
 use crate::flashing::{FlashLayout, FlashSector};
 use crate::memory::MemoryInterface;
 use crate::rtt::{self, Rtt, ScanRegion};
-use crate::CoreStatus;
-use crate::{core::CoreRegisters, session::Session, Core, InstructionSet};
+use crate::{Core, InstructionSet, core::CoreRegisters, session::Session};
+use crate::{CoreStatus, Target};
 use std::marker::PhantomData;
 use std::{
     fmt::Debug,
@@ -45,29 +45,91 @@ impl Operation for Verify {
     const NAME: &'static str = "Verify";
 }
 
+pub(super) enum FlashData {
+    Raw(FlashLayout),
+    Loaded {
+        encoder: FlashEncoder,
+        ignore_fills: bool,
+    },
+}
+
+impl FlashData {
+    pub fn layout(&self) -> &FlashLayout {
+        match self {
+            FlashData::Raw(layout) => layout,
+            FlashData::Loaded { encoder, .. } => encoder.flash_layout(),
+        }
+    }
+
+    pub fn layout_mut(&mut self) -> &mut FlashLayout {
+        // We're mutating the data, let's invalidate the encoder
+        if let FlashData::Loaded { encoder, .. } = self {
+            *self = FlashData::Raw(encoder.flash_layout().clone());
+        }
+
+        match self {
+            FlashData::Raw(layout) => layout,
+            FlashData::Loaded { .. } => unreachable!(),
+        }
+    }
+
+    pub fn encoder(&mut self, encoding: TransferEncoding, ignore_fills: bool) -> &FlashEncoder {
+        if let FlashData::Loaded {
+            encoder,
+            ignore_fills: was_ignore_fills,
+        } = self
+        {
+            if *was_ignore_fills != ignore_fills {
+                // Fill handling changed, invalidate the encoder
+                *self = FlashData::Raw(encoder.flash_layout().clone());
+            }
+        }
+        if let FlashData::Raw(layout) = self {
+            let layout = std::mem::take(layout);
+            let encoder = FlashEncoder::new(encoding, layout, ignore_fills);
+            *self = FlashData::Loaded {
+                encoder,
+                ignore_fills,
+            };
+        }
+
+        match self {
+            FlashData::Loaded { encoder, .. } => encoder,
+            FlashData::Raw(_) => unreachable!(),
+        }
+    }
+}
+
+pub(super) struct LoadedRegion {
+    pub region: NvmRegion,
+    pub data: FlashData,
+}
+
+impl LoadedRegion {
+    pub fn flash_layout(&self) -> &FlashLayout {
+        self.data.layout()
+    }
+}
+
 /// A structure to control the flash of an attached microchip.
 ///
 /// Once constructed it can be used to program date to the flash.
-pub(super) struct Flasher<'session> {
-    pub(super) session: &'session mut Session,
-    core_index: usize,
-    flash_algorithm: FlashAlgorithm,
-    loaded: bool,
-    progress: FlashProgress,
+pub(super) struct Flasher {
+    pub(super) core_index: usize,
+    pub(super) flash_algorithm: FlashAlgorithm,
+    pub(super) loaded: bool,
+    pub(super) regions: Vec<LoadedRegion>,
 }
 
 /// The byte used to fill the stack when checking for stack overflows.
 const STACK_FILL_BYTE: u8 = 0x56;
 
-impl<'session> Flasher<'session> {
+impl Flasher {
     pub(super) fn new(
-        session: &'session mut Session,
+        target: &Target,
         core_index: usize,
         raw_flash_algorithm: &RawFlashAlgorithm,
-        progress: FlashProgress,
     ) -> Result<Self, FlashError> {
-        let target = session.target();
-
         let flash_algorithm = FlashAlgorithm::assemble_from_raw_with_core(
             raw_flash_algorithm,
             &target.cores[core_index].name,
@@ -75,17 +137,16 @@ impl<'session> Flasher<'session> {
         )?;
 
         Ok(Self {
-            session,
             core_index,
             flash_algorithm,
-            progress,
             loaded: false,
+            regions: Vec::new(),
         })
     }
 
-    fn ensure_loaded(&mut self) -> Result<(), FlashError> {
+    fn ensure_loaded(&mut self, session: &mut Session) -> Result<(), FlashError> {
         if !self.loaded {
-            self.load()?;
+            self.load(session)?;
             self.loaded = true;
         }
 
@@ -100,15 +161,12 @@ impl<'session> Flasher<'session> {
         self.flash_algorithm.page_buffers.len() > 1
     }
 
-    fn load(&mut self) -> Result<(), FlashError> {
+    fn load(&mut self, session: &mut Session) -> Result<(), FlashError> {
         tracing::debug!("Initializing the flash algorithm.");
         let algo = &self.flash_algorithm;
 
         // Attach to memory and core.
-        let mut core = self
-            .session
-            .core(self.core_index)
-            .map_err(FlashError::Core)?;
+        let mut core = session.core(self.core_index).map_err(FlashError::Core)?;
 
         // TODO: we probably want a full system reset here to make sure peripherals don't interfere.
         tracing::debug!("Reset and halt core {}", self.core_index);
@@ -159,17 +217,16 @@ impl<'session> Flasher<'session> {
         Ok(())
     }
 
-    pub(super) fn init<O: Operation>(
-        &mut self,
+    pub(super) fn init<'s, 'p, O: Operation>(
+        &'s mut self,
+        session: &'s mut Session,
+        progress: &'s FlashProgress<'p>,
         clock: Option<u32>,
-    ) -> Result<ActiveFlasher<'_, O>, FlashError> {
-        self.ensure_loaded()?;
+    ) -> Result<(ActiveFlasher<'s, 'p, O>, &'s mut [LoadedRegion]), FlashError> {
+        self.ensure_loaded(session)?;
 
         // Attach to memory and core.
-        let mut core = self
-            .session
-            .core(self.core_index)
-            .map_err(FlashError::Core)?;
+        let mut core = session.core(self.core_index).map_err(FlashError::Core)?;
 
         let instruction_set = core.instruction_set().map_err(FlashError::Core)?;
 
@@ -178,79 +235,93 @@ impl<'session> Flasher<'session> {
             core,
             instruction_set,
             rtt: None,
-            progress: &self.progress,
+            progress,
             flash_algorithm: &self.flash_algorithm,
             _operation: PhantomData,
         };
 
         flasher.init(clock)?;
 
-        Ok(flasher)
+        Ok((flasher, &mut self.regions))
     }
 
-    pub(super) fn run_erase_all(&mut self) -> Result<(), FlashError> {
-        self.progress.started_erasing();
-        let result = if self.session.has_sequence_erase_all() {
-            fn run(flasher: &mut Flasher) -> Result<(), FlashError> {
-                flasher
-                    .session
-                    .sequence_erase_all()
-                    .map_err(|e| FlashError::ChipEraseFailed {
-                        source: Box::new(e),
-                    })?;
-                // We need to reload the flasher, since the debug sequence erase
-                // may have invalidated any previously invalid state
-                flasher.load()
-            }
-
-            run(self)
+    pub(super) fn run_erase_all(
+        &mut self,
+        session: &mut Session,
+        progress: &FlashProgress,
+    ) -> Result<(), FlashError> {
+        progress.started_erasing();
+        let result = if session.has_sequence_erase_all() {
+            session
+                .sequence_erase_all()
+                .map_err(|e| FlashError::ChipEraseFailed {
+                    source: Box::new(e),
+                })?;
+            // We need to reload the flasher, since the debug sequence erase
+            // may have invalidated any previously invalid state
+            self.load(session)
         } else {
-            self.run_erase(|active| active.erase_all())
+            self.run_erase(session, progress, |active, _| active.erase_all())
         };
 
         match result.is_ok() {
-            true => self.progress.finished_erasing(),
-            false => self.progress.failed_erasing(),
+            true => progress.finished_erasing(),
+            false => progress.failed_erasing(),
         }
 
         result
     }
 
-    pub(super) fn run_erase<T, F>(&mut self, f: F) -> Result<T, FlashError>
+    pub(super) fn run_erase<'p, T, F>(
+        &mut self,
+        session: &mut Session,
+        progress: &FlashProgress<'p>,
+        f: F,
+    ) -> Result<T, FlashError>
     where
-        F: FnOnce(&mut ActiveFlasher<'_, Erase>) -> Result<T, FlashError> + Sized,
+        F: FnOnce(&mut ActiveFlasher<'_, 'p, Erase>, &mut [LoadedRegion]) -> Result<T, FlashError>,
     {
-        // TODO: Fix those values (None, None).
-        let mut active = self.init(None)?;
-        let r = f(&mut active)?;
+        let (mut active, data) = self.init(session, progress, None)?;
+        let r = f(&mut active, data)?;
         active.uninit()?;
         Ok(r)
     }
 
-    pub(super) fn run_program<T, F>(&mut self, f: F) -> Result<T, FlashError>
+    pub(super) fn run_program<'p, T, F>(
+        &mut self,
+        session: &mut Session,
+        progress: &FlashProgress<'p>,
+        f: F,
+    ) -> Result<T, FlashError>
     where
-        F: FnOnce(&mut ActiveFlasher<'_, Program>) -> Result<T, FlashError> + Sized,
+        F: FnOnce(
+            &mut ActiveFlasher<'_, 'p, Program>,
+            &mut [LoadedRegion],
+        ) -> Result<T, FlashError>,
     {
-        // TODO: Fix those values (None, None).
-        let mut active = self.init(None)?;
-        let r = f(&mut active)?;
+        let (mut active, data) = self.init(session, progress, None)?;
+        let r = f(&mut active, data)?;
         active.uninit()?;
         Ok(r)
     }
 
-    pub(super) fn run_verify<T, F>(&mut self, f: F) -> Result<T, FlashError>
+    pub(super) fn run_verify<'p, T, F>(
+        &mut self,
+        session: &mut Session,
+        progress: &FlashProgress<'p>,
+        f: F,
+    ) -> Result<T, FlashError>
     where
-        F: FnOnce(&mut ActiveFlasher<'_, Verify>) -> Result<T, FlashError> + Sized,
+        F: FnOnce(&mut ActiveFlasher<'_, 'p, Verify>, &mut [LoadedRegion]) -> Result<T, FlashError>,
     {
-        // TODO: Fix those values (None, None).
-        let mut active = self.init(None)?;
-        let r = f(&mut active)?;
+        let (mut active, data) = self.init(session, progress, None)?;
+        let r = f(&mut active, data)?;
         active.uninit()?;
         Ok(r)
     }
 
-    pub(super) fn is_chip_erase_supported(&self) -> bool {
-        self.session.has_sequence_erase_all() || self.flash_algorithm().pc_erase_all.is_some()
+    pub(super) fn is_chip_erase_supported(&self, session: &Session) -> bool {
+        session.has_sequence_erase_all() || self.flash_algorithm().pc_erase_all.is_some()
     }
 
     /// Program the contents of given `FlashBuilder` to the flash.
@@ -260,16 +331,14 @@ impl<'session> Flasher<'session> {
     /// and written again once the sector is erased.
     pub(super) fn program(
         &mut self,
-        region: &NvmRegion,
-        flash_builder: &FlashBuilder,
+        session: &mut Session,
+        progress: &FlashProgress,
         restore_unwritten_bytes: bool,
         enable_double_buffering: bool,
         skip_erasing: bool,
         verify: bool,
     ) -> Result<(), FlashError> {
         tracing::debug!("Starting program procedure.");
-        // Convert the list of flash operations into flash sectors and pages.
-        let mut flash_layout = self.flash_layout(region, flash_builder, restore_unwritten_bytes)?;
 
         tracing::debug!("Double Buffering enabled: {:?}", enable_double_buffering);
         tracing::debug!(
@@ -278,25 +347,19 @@ impl<'session> Flasher<'session> {
         );
 
         if restore_unwritten_bytes {
-            self.fill_unwritten(&mut flash_layout)?;
+            self.fill_unwritten(session, progress)?;
         }
-
-        let flash_encoder = FlashEncoder::new(self.flash_algorithm.transfer_encoding, flash_layout);
 
         // Skip erase if necessary (i.e. chip erase was done before)
         if !skip_erasing {
             // Erase all necessary sectors
-            self.sector_erase(&flash_encoder)?;
+            self.sector_erase(session, progress)?;
         }
 
         // Flash all necessary pages.
-        if self.double_buffering_supported() && enable_double_buffering {
-            self.program_double_buffer(&flash_encoder)?;
-        } else {
-            self.program_simple(&flash_encoder)?;
-        };
+        self.do_program(session, progress, enable_double_buffering)?;
 
-        if verify && !self.verify(flash_encoder.flash_layout(), !restore_unwritten_bytes)? {
+        if verify && !self.verify(session, progress, !restore_unwritten_bytes)? {
             return Err(FlashError::Verify);
         }
 
@@ -308,167 +371,283 @@ impl<'session> Flasher<'session> {
     /// If `restore_unwritten_bytes` is `true`, all bytes of the layout's page,
     /// that are not to be written during flashing will be read from the flash first
     /// and written again once the page is programmed.
-    pub(super) fn fill_unwritten(&mut self, layout: &mut FlashLayout) -> Result<(), FlashError> {
-        self.progress.started_filling();
+    pub(super) fn fill_unwritten(
+        &mut self,
+        session: &mut Session,
+        progress: &FlashProgress,
+    ) -> Result<(), FlashError> {
+        progress.started_filling();
 
-        let result = self.run_verify(|active| {
-            for fill in layout.fills.iter() {
-                let t = Instant::now();
-                let page = &mut layout.pages[fill.page_index()];
+        fn fill_pages(
+            regions: &mut [LoadedRegion],
+            progress: &FlashProgress,
+            mut read: impl FnMut(u64, &mut [u8]) -> Result<(), FlashError>,
+        ) -> Result<(), FlashError> {
+            for region in regions.iter_mut() {
+                let layout = region.data.layout_mut();
+                for fill in layout.fills.iter() {
+                    let t = Instant::now();
+                    let page = &mut layout.pages[fill.page_index()];
 
-                let page_offset = (fill.address() - page.address()) as usize;
-                let page_slice = &mut page.data_mut()[page_offset..][..fill.size() as usize];
+                    let page_offset = (fill.address() - page.address()) as usize;
+                    let page_slice = &mut page.data_mut()[page_offset..][..fill.size() as usize];
 
-                active.read_flash(fill.address(), page_slice)?;
+                    read(fill.address(), page_slice)?;
 
-                active.progress.page_filled(fill.size(), t.elapsed());
+                    progress.page_filled(fill.size(), t.elapsed());
+                }
             }
 
             Ok(())
-        });
+        }
+
+        let result = if self.flash_algorithm.pc_read.is_some() {
+            self.run_verify(session, progress, |active, data| {
+                fill_pages(data, progress, |address, data| {
+                    active.read_flash(address, data)
+                })
+            })
+        } else {
+            // Not using a flash algorithm function, so there's no need to go
+            // through ActiveFlasher.
+            let mut core = session.core(0).map_err(FlashError::Core)?;
+            fill_pages(&mut self.regions, progress, |address, data| {
+                core.read(address, data).map_err(FlashError::Core)
+            })
+        };
 
         match result.is_ok() {
-            true => self.progress.finished_filling(),
-            false => self.progress.failed_filling(),
+            true => progress.finished_filling(),
+            false => progress.failed_filling(),
         }
 
         result
     }
 
-    /// Verifies all the to-be-written bytes of `layout`.
+    /// Verifies all the to-be-written bytes of this flasher.
     pub(super) fn verify(
         &mut self,
-        layout: &FlashLayout,
+        session: &mut Session,
+        progress: &FlashProgress,
         ignore_filled: bool,
     ) -> Result<bool, FlashError> {
-        self.run_verify(|active| {
-            if let Some(verify) = active.flash_algorithm.pc_verify {
-                tracing::debug!("Verify using CMSIS function");
-                // Prefer Verify as we may use compression
-                // FIXME: avoid compressing multiple times
-                let flash_encoder =
-                    FlashEncoder::new(active.flash_algorithm.transfer_encoding, layout.clone());
+        progress.started_verifying();
 
-                for page in flash_encoder.pages() {
-                    let address = page.address();
-                    let bytes = page.data();
-
-                    tracing::debug!(
-                        "Verifying page at address {:#010x} with size: {}",
-                        address,
-                        bytes.len()
-                    );
-
-                    // Transfer the bytes to RAM.
-                    let buffer_address = active.load_page_buffer(bytes, 0)?;
-
-                    let result = active.call_function_and_wait(
-                        &Registers {
-                            pc: into_reg(verify)?,
-                            r0: Some(into_reg(address)?),
-                            r1: Some(into_reg(bytes.len() as u64)?),
-                            r2: Some(into_reg(buffer_address)?),
-                            r3: None,
-                        },
-                        false,
-                        Duration::from_secs(30),
-                    )?;
-
-                    // Returns
-                    // status information:
-                    // the sum of (adr+sz) - on success.
-                    // any other number - on failure, and represents the failing address.
-                    if result as u64 != address + bytes.len() as u64 {
-                        tracing::debug!("Verification failed for page at address {:#010x}", result);
-                        return Ok(false);
-                    }
-                }
-            } else {
-                tracing::debug!("Verify using manual comparison");
-                for (idx, page) in layout.pages.iter().enumerate() {
-                    let address = page.address();
-                    let data = page.data();
-
-                    let mut read_back = vec![0; data.len()];
-                    active.read_flash(address, &mut read_back)?;
-
-                    if ignore_filled {
-                        // "Unfill" fill regions. These don't get flashed, so their contents are
-                        // allowed to differ. We mask these bytes with default flash content here,
-                        // just for the verification process.
-                        for fill in layout.fills() {
-                            if fill.page_index() != idx {
-                                continue;
-                            }
-
-                            let fill_offset = (fill.address() - address) as usize;
-                            let fill_size = fill.size() as usize;
-
-                            let default_bytes = &data[fill_offset..][..fill_size];
-                            read_back[fill_offset..][..fill_size].copy_from_slice(default_bytes);
-                        }
-                    }
-
-                    if data != read_back.as_slice() {
-                        tracing::debug!(
-                            "Verification failed for page at address {:#010x}",
-                            address
-                        );
-                        return Ok(false);
-                    }
-                }
-            }
-            Ok(true)
-        })
-    }
-
-    /// Programs the pages given in `flash_layout` into the flash.
-    fn program_simple(&mut self, flash_encoder: &FlashEncoder) -> Result<(), FlashError> {
-        self.progress
-            .started_programming(flash_encoder.program_size());
-
-        let result = self.run_program(|active| {
-            for page in flash_encoder.pages() {
-                active
-                    .program_page(page)
-                    .map_err(|error| FlashError::PageWrite {
-                        page_address: page.address(),
-                        source: Box::new(error),
-                    })?;
-            }
-            Ok(())
-        });
+        let result = self.do_verify(session, progress, ignore_filled);
 
         match result.is_ok() {
-            true => self.progress.finished_programming(),
-            false => self.progress.failed_programming(),
+            true => progress.finished_verifying(),
+            false => progress.failed_verifying(),
         }
 
         result
+    }
+
+    fn do_verify(
+        &mut self,
+        session: &mut Session,
+        progress: &FlashProgress,
+        ignore_filled: bool,
+    ) -> Result<bool, FlashError> {
+        let encoding = self.flash_algorithm.transfer_encoding;
+        if let Some(verify) = self.flash_algorithm.pc_verify {
+            // Try to use the verify function if available.
+            self.run_verify(session, progress, |active, data| {
+                for region in data {
+                    tracing::debug!("Verify using CMSIS function");
+
+                    // Prefer Verify as we may use compression
+                    let flash_encoder = region.data.encoder(encoding, ignore_filled);
+
+                    for page in flash_encoder.pages() {
+                        let start = Instant::now();
+                        let address = page.address();
+                        let bytes = page.data();
+
+                        tracing::debug!(
+                            "Verifying page at address {:#010x} with size: {}",
+                            address,
+                            bytes.len()
+                        );
+
+                        // Transfer the bytes to RAM.
+                        let buffer_address = active.load_page_buffer(bytes, 0)?;
+
+                        let result = active.call_function_and_wait(
+                            &Registers {
+                                pc: into_reg(verify)?,
+                                r0: Some(into_reg(address)?),
+                                r1: Some(into_reg(bytes.len() as u64)?),
+                                r2: Some(into_reg(buffer_address)?),
+                                r3: None,
+                            },
+                            false,
+                            Duration::from_secs(30),
+                        )?;
+
+                        // Returns
+                        // status information:
+                        // the sum of (adr+sz) - on success.
+                        // any other number - on failure, and represents the failing address.
+                        if result as u64 != address + bytes.len() as u64 {
+                            tracing::debug!(
+                                "Verification failed for page at address {:#010x}",
+                                result
+                            );
+                            return Ok(false);
+                        }
+
+                        progress.page_verified(bytes.len() as u64, start.elapsed());
+                    }
+                }
+                Ok(true)
+            })
+        } else {
+            tracing::debug!("Verify by reading back flash contents");
+
+            fn compare_flash(
+                regions: &[LoadedRegion],
+                progress: &FlashProgress,
+                ignore_filled: bool,
+                mut read: impl FnMut(u64, &mut [u8]) -> Result<(), FlashError>,
+            ) -> Result<bool, FlashError> {
+                for region in regions {
+                    let layout = region.data.layout();
+                    for (idx, page) in layout.pages.iter().enumerate() {
+                        let start = Instant::now();
+                        let address = page.address();
+                        let data = page.data();
+
+                        let mut read_back = vec![0; data.len()];
+                        read(address, &mut read_back)?;
+
+                        if ignore_filled {
+                            // "Unfill" fill regions. These don't get flashed, so their contents are
+                            // allowed to differ. We mask these bytes with default flash content here,
+                            // just for the verification process.
+                            for fill in layout.fills() {
+                                if fill.page_index() != idx {
+                                    continue;
+                                }
+
+                                let fill_offset = (fill.address() - address) as usize;
+                                let fill_size = fill.size() as usize;
+
+                                let default_bytes = &data[fill_offset..][..fill_size];
+                                read_back[fill_offset..][..fill_size]
+                                    .copy_from_slice(default_bytes);
+                            }
+                        }
+                        if data != read_back {
+                            tracing::debug!(
+                                "Verification failed for page at address {:#010x}",
+                                address
+                            );
+                            return Ok(false);
+                        }
+
+                        progress.page_verified(data.len() as u64, start.elapsed());
+                    }
+                }
+                Ok(true)
+            }
+
+            if self.flash_algorithm.pc_read.is_some() {
+                self.run_verify(session, progress, |active, data| {
+                    compare_flash(data, progress, ignore_filled, |address, data| {
+                        active.read_flash(address, data)
+                    })
+                })
+            } else {
+                // Not using a flash algorithm function, so there's no need to go
+                // through ActiveFlasher.
+                let mut core = session.core(0).map_err(FlashError::Core)?;
+                compare_flash(&self.regions, progress, ignore_filled, |address, data| {
+                    core.read(address, data).map_err(FlashError::Core)
+                })
+            }
+        }
     }
 
     /// Perform an erase of all sectors given in `flash_layout`.
-    fn sector_erase(&mut self, flash_encoder: &FlashEncoder) -> Result<(), FlashError> {
-        self.progress.started_erasing();
+    fn sector_erase(
+        &mut self,
+        session: &mut Session,
+        progress: &FlashProgress,
+    ) -> Result<(), FlashError> {
+        progress.started_erasing();
 
-        let result = self.run_erase(|active| {
-            for sector in flash_encoder.sectors() {
-                active
-                    .erase_sector(sector)
-                    .map_err(|e| FlashError::EraseFailed {
-                        sector_address: sector.address(),
-                        source: Box::new(e),
-                    })?;
+        let encoding = self.flash_algorithm.transfer_encoding;
+
+        let result = self.run_erase(session, progress, |active, data| {
+            for region in data.iter_mut() {
+                for sector in region.data.encoder(encoding, false).sectors() {
+                    active
+                        .erase_sector(sector)
+                        .map_err(|e| FlashError::EraseFailed {
+                            sector_address: sector.address(),
+                            source: Box::new(e),
+                        })?;
+                }
             }
             Ok(())
         });
 
         match result.is_ok() {
-            true => self.progress.finished_erasing(),
-            false => self.progress.failed_erasing(),
+            true => progress.finished_erasing(),
+            false => progress.failed_erasing(),
         }
 
         result
+    }
+
+    fn do_program(
+        &mut self,
+        session: &mut Session,
+        progress: &FlashProgress,
+        enable_double_buffering: bool,
+    ) -> Result<(), FlashError> {
+        progress.started_programming();
+        let program_result = if self.double_buffering_supported() && enable_double_buffering {
+            self.program_double_buffer(session, progress)
+        } else {
+            self.program_simple(session, progress)
+        };
+
+        match program_result.is_ok() {
+            true => progress.finished_programming(),
+            false => progress.failed_programming(),
+        }
+
+        program_result
+    }
+
+    /// Programs the pages given in `flash_layout` into the flash.
+    fn program_simple(
+        &mut self,
+        session: &mut Session,
+        progress: &FlashProgress,
+    ) -> Result<(), FlashError> {
+        let encoding = self.flash_algorithm.transfer_encoding;
+        self.run_program(session, progress, |active, data| {
+            for region in data.iter_mut() {
+                tracing::debug!(
+                    "    programming region: {:#010X?} ({} bytes)",
+                    region.region.range,
+                    region.region.range.end - region.region.range.start
+                );
+                let flash_encoder = region.data.encoder(encoding, false);
+                for page in flash_encoder.pages() {
+                    active
+                        .program_page(page)
+                        .map_err(|error| FlashError::PageWrite {
+                            page_address: page.address(),
+                            source: Box::new(error),
+                        })?;
+                }
+            }
+            Ok(())
+        })
     }
 
     /// Flash a program using double buffering.
@@ -480,64 +659,74 @@ impl<'session> Flasher<'session> {
     ///
     /// This is only possible if the RAM is large enough to
     /// fit at least two page buffers. See [Flasher::double_buffering_supported].
-    fn program_double_buffer(&mut self, flash_encoder: &FlashEncoder) -> Result<(), FlashError> {
-        let mut current_buf = 0;
-        self.progress
-            .started_programming(flash_encoder.program_size());
+    fn program_double_buffer(
+        &mut self,
+        session: &mut Session,
+        progress: &FlashProgress,
+    ) -> Result<(), FlashError> {
+        let encoding = self.flash_algorithm.transfer_encoding;
+        self.run_program(session, progress, |active, data| {
+            for region in data.iter_mut() {
+                tracing::debug!(
+                    "    programming region: {:#010X?} ({} bytes)",
+                    region.region.range,
+                    region.region.range.end - region.region.range.start
+                );
+                let flash_encoder = region.data.encoder(encoding, false);
 
-        let result = self.run_program(|active| {
-            let mut t = Instant::now();
-            let mut last_page_address = 0;
-            for page in flash_encoder.pages() {
-                // At the start of each loop cycle load the next page buffer into RAM.
-                let buffer_address = active.load_page_buffer(page.data(), current_buf)?;
+                let mut current_buf = 0;
+                let mut t = Instant::now();
+                let mut last_page_address = 0;
+                for page in flash_encoder.pages() {
+                    // At the start of each loop cycle load the next page buffer into RAM.
+                    let buffer_address = active.load_page_buffer(page.data(), current_buf)?;
 
-                // Then wait for the active RAM -> Flash copy process to finish.
-                // Also check if it finished properly. If it didn't, return an error.
-                active.wait_for_write_end(last_page_address)?;
+                    // Then wait for the active RAM -> Flash copy process to finish.
+                    // Also check if it finished properly. If it didn't, return an error.
+                    active.wait_for_write_end(last_page_address)?;
 
-                last_page_address = page.address();
-                active.progress.page_programmed(page.size(), t.elapsed());
+                    last_page_address = page.address();
+                    progress.page_programmed(page.size() as u64, t.elapsed());
 
-                t = Instant::now();
+                    t = Instant::now();
 
-                // Start the next copy process.
-                active.start_program_page_with_buffer(
-                    buffer_address,
-                    page.address(),
-                    page.size() as u64,
-                )?;
+                    // Start the next copy process.
+                    active.start_program_page_with_buffer(
+                        buffer_address,
+                        page.address(),
+                        page.size() as u64,
+                    )?;
 
-                // Swap the buffers
-                if current_buf == 1 {
-                    current_buf = 0;
-                } else {
-                    current_buf = 1;
+                    // Swap the buffers
+                    if current_buf == 1 {
+                        current_buf = 0;
+                    } else {
+                        current_buf = 1;
+                    }
                 }
+
+                active.wait_for_write_end(last_page_address)?;
             }
-
-            active.wait_for_write_end(last_page_address)
-        });
-
-        match result.is_ok() {
-            true => self.progress.finished_programming(),
-            false => self.progress.failed_programming(),
-        }
-
-        result
+            Ok(())
+        })
     }
 
-    pub(super) fn flash_layout(
-        &self,
-        region: &NvmRegion,
-        flash_builder: &FlashBuilder,
+    pub(crate) fn add_region(
+        &mut self,
+        region: NvmRegion,
+        builder: &FlashBuilder,
         restore_unwritten_bytes: bool,
-    ) -> Result<FlashLayout, FlashError> {
-        flash_builder.build_sectors_and_pages(
-            region,
+    ) -> Result<(), FlashError> {
+        let layout = builder.build_sectors_and_pages(
+            &region,
             &self.flash_algorithm,
             restore_unwritten_bytes,
-        )
+        )?;
+        self.regions.push(LoadedRegion {
+            region,
+            data: FlashData::Raw(layout),
+        });
+        Ok(())
     }
 }
 
@@ -567,16 +756,16 @@ fn into_reg(val: u64) -> Result<u32, FlashError> {
     Ok(reg_value)
 }
 
-pub(super) struct ActiveFlasher<'op, O: Operation> {
+pub(super) struct ActiveFlasher<'op, 'p, O: Operation> {
     core: Core<'op>,
     instruction_set: InstructionSet,
     rtt: Option<Rtt>,
-    progress: &'op FlashProgress,
+    progress: &'op FlashProgress<'p>,
     flash_algorithm: &'op FlashAlgorithm,
     _operation: PhantomData<O>,
 }
 
-impl<O: Operation> ActiveFlasher<'_, O> {
+impl<O: Operation> ActiveFlasher<'_, '_, O> {
     #[tracing::instrument(name = "Call to flash algorithm init", skip(self, clock))]
     pub(super) fn init(&mut self, clock: Option<u32>) -> Result<(), FlashError> {
         let algo = &self.flash_algorithm;
@@ -897,7 +1086,8 @@ impl<O: Operation> ActiveFlasher<'_, O> {
         assert!(
             buffer_number < self.flash_algorithm.page_buffers.len(),
             "Trying to use non-existing buffer ({}/{}) for flashing. This is a bug. Please report it.",
-            buffer_number, self.flash_algorithm.page_buffers.len()
+            buffer_number,
+            self.flash_algorithm.page_buffers.len()
         );
 
         let buffer_address = self.flash_algorithm.page_buffers[buffer_number];
@@ -946,7 +1136,7 @@ impl<O: Operation> ActiveFlasher<'_, O> {
     }
 }
 
-impl ActiveFlasher<'_, Erase> {
+impl ActiveFlasher<'_, '_, Erase> {
     pub(super) fn erase_all(&mut self) -> Result<(), FlashError> {
         tracing::debug!("Erasing entire chip.");
         let algo = &self.flash_algorithm;
@@ -1019,7 +1209,7 @@ impl ActiveFlasher<'_, Erase> {
     }
 }
 
-impl ActiveFlasher<'_, Program> {
+impl ActiveFlasher<'_, '_, Program> {
     pub(super) fn program_page(&mut self, page: &FlashPage) -> Result<(), FlashError> {
         let t1 = Instant::now();
 
@@ -1040,7 +1230,8 @@ impl ActiveFlasher<'_, Program> {
 
         tracing::info!("Flashing took: {:?}", t1.elapsed());
 
-        self.progress.page_programmed(page.size(), t1.elapsed());
+        self.progress
+            .page_programmed(page.size() as u64, t1.elapsed());
         Ok(())
     }
 

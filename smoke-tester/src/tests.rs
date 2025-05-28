@@ -3,16 +3,16 @@ use std::time::Instant;
 use colored::Colorize;
 use linkme::distributed_slice;
 use probe_rs::{
+    Architecture, Core, CoreInterface, MemoryInterface, Session,
     config::MemoryRegion,
-    flashing::{download_file_with_options, DownloadOptions, FlashProgress, FormatKind},
-    Architecture, Core, MemoryInterface, Session,
+    flashing::{DownloadOptions, FlashProgress, FormatKind, download_file_with_options},
 };
 
 pub mod stepping;
 
 use miette::{IntoDiagnostic, Result, WrapErr};
 
-use crate::{println_test_status, TestFailure, TestResult, TestTracker, CORE_TESTS, SESSION_TESTS};
+use crate::{CORE_TESTS, SESSION_TESTS, TestFailure, TestResult, TestTracker, println_test_status};
 
 #[distributed_slice(CORE_TESTS)]
 pub fn test_register_read(tracker: &TestTracker, core: &mut Core) -> TestResult {
@@ -82,7 +82,7 @@ fn test_write_read(
     println_test_status!(
         tracker,
         blue,
-        "Testing:  write and read at address {:#010X}: {scenario}",
+        "Testing: write and read at address {:#010X}: {scenario}",
         address
     );
 
@@ -118,6 +118,14 @@ fn test_memory_access(tracker: &TestTracker, core: &mut Core) -> TestResult {
     for ram in memory_regions {
         let ram_start = ram.range.start;
         let ram_size = ram.range.end - ram.range.start;
+        println_test_status!(
+            tracker,
+            blue,
+            "Testing region: {} ({:#010X} - {:#010X})",
+            ram.name.as_deref().unwrap_or("<unnamed region>"),
+            ram.range.start,
+            ram.range.end
+        );
 
         println_test_status!(tracker, blue, "Test - RAM Start 32");
         // Write first word
@@ -225,12 +233,58 @@ fn test_hw_breakpoints(tracker: &TestTracker, core: &mut Core) -> TestResult {
     // For this test, we assume that code is executed from Flash / non-volatile memory, and try to set breakpoints
     // in these regions.
     for region in memory_regions {
+        println_test_status!(
+            tracker,
+            blue,
+            "Testing region: {} ({:#010X} - {:#010X})",
+            region.name.as_deref().unwrap_or("<unnamed region>"),
+            region.range.start,
+            region.range.end
+        );
         let initial_breakpoint_addr = region.range.start;
 
         let num_breakpoints = core.available_breakpoint_units().into_diagnostic()?;
 
         println_test_status!(tracker, blue, "{} breakpoints supported", num_breakpoints);
 
+        if num_breakpoints == 0 {
+            println_test_status!(tracker, blue, "No HW breakpoints supported");
+            continue;
+        }
+
+        let breakpoint_addresses = (0..num_breakpoints as u64)
+            .map(|i| initial_breakpoint_addr + 4 * i)
+            .collect::<Vec<_>>();
+
+        // Test CoreInterface
+        for (i, address) in breakpoint_addresses.iter().enumerate() {
+            CoreInterface::set_hw_breakpoint(core, i, *address).into_diagnostic()?;
+        }
+
+        let breakpoints = core.hw_breakpoints().into_diagnostic()?;
+        for (i, address) in breakpoint_addresses.iter().enumerate() {
+            assert_eq!(
+                breakpoints[i],
+                Some(*address),
+                "Error reading back HW breakpoint at index {i}"
+            );
+        }
+
+        // Now check that breakpoints can be overwritten.
+        CoreInterface::set_hw_breakpoint(core, 0, breakpoint_addresses[0] + 4).into_diagnostic()?;
+        let breakpoints = core.hw_breakpoints().into_diagnostic()?;
+        assert_eq!(
+            breakpoints[0],
+            Some(breakpoint_addresses[0] + 4),
+            "Error reading back HW breakpoint at index 0"
+        );
+
+        // Clear all breakpoints again
+        for i in 0..num_breakpoints {
+            CoreInterface::clear_hw_breakpoint(core, i as usize).into_diagnostic()?;
+        }
+
+        // Test inherent methods
         for i in 0..num_breakpoints {
             core.set_hw_breakpoint(initial_breakpoint_addr + 4 * i as u64)
                 .into_diagnostic()?;
@@ -240,8 +294,14 @@ fn test_hw_breakpoints(tracker: &TestTracker, core: &mut Core) -> TestResult {
         core.set_hw_breakpoint(initial_breakpoint_addr + num_breakpoints as u64 * 4)
             .expect_err("Trying to use more than supported number of breakpoints should fail.");
 
+        // However, we should be able to update a specific breakpoint
+        core.set_hw_breakpoint_unit(0, initial_breakpoint_addr + num_breakpoints as u64 * 4)
+            .into_diagnostic()?;
+
         // Clear all breakpoints again
-        for i in 0..num_breakpoints {
+        core.clear_hw_breakpoint(initial_breakpoint_addr + num_breakpoints as u64 * 4)
+            .into_diagnostic()?;
+        for i in 1..num_breakpoints {
             core.clear_hw_breakpoint(initial_breakpoint_addr + 4 * i as u64)
                 .into_diagnostic()?;
         }

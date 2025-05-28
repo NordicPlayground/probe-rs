@@ -1,22 +1,22 @@
 //! Register types and the core interface for armv8-M
 
 use super::{
+    CortexMState, Dfsr,
     cortex_m::{IdPfr1, Mvfr0},
     registers::cortex_m::{
         CORTEX_M_CORE_REGISTERS, CORTEX_M_WITH_FP_CORE_REGISTERS, FP, PC, RA, SP,
     },
-    CortexMState, Dfsr,
 };
 use crate::{
+    Architecture, BreakpointCause, CoreInformation, CoreInterface, CoreRegister, CoreStatus,
+    CoreType, HaltReason, InstructionSet, MemoryInterface, MemoryMappedRegister,
     architecture::arm::{
-        core::registers::cortex_m::XPSR, memory::ArmMemoryInterface, sequences::ArmDebugSequence,
-        ArmError,
+        ArmError, core::registers::cortex_m::XPSR, memory::ArmMemoryInterface,
+        sequences::ArmDebugSequence,
     },
     core::{CoreRegisters, RegisterId, RegisterValue, VectorCatchCondition},
     error::Error,
-    memory::{valid_32bit_address, CoreMemoryInterface},
-    Architecture, BreakpointCause, CoreInformation, CoreInterface, CoreRegister, CoreStatus,
-    CoreType, HaltReason, InstructionSet, MemoryInterface, MemoryMappedRegister,
+    memory::{CoreMemoryInterface, valid_32bit_address},
 };
 use bitfield::bitfield;
 use std::{
@@ -233,6 +233,8 @@ impl CoreInterface for Armv8m<'_> {
 
         self.sequence
             .reset_system(&mut *self.memory, crate::CoreType::Armv8m, None)?;
+        // Invalidate cached core status
+        self.set_core_status(CoreStatus::Unknown);
         Ok(())
     }
 
@@ -244,8 +246,24 @@ impl CoreInterface for Armv8m<'_> {
         self.sequence
             .reset_system(&mut *self.memory, crate::CoreType::Armv8m, None)?;
 
-        // Update core status
-        let _ = self.status()?;
+        // Invalidate cached core status
+        self.set_core_status(CoreStatus::Unknown);
+
+        // Some processors may not enter the halt state immediately after clearing the reset state.
+        // Particularly: on PSOC 6, vector catch takes effect after the core's boot ROM finishes
+        // executing, when jumping to the reset vector of the user application.
+        match self.wait_for_core_halted(Duration::from_millis(100)) {
+            Ok(()) => (),
+            Err(Error::Arm(ArmError::Timeout)) if self.status()? == CoreStatus::Sleeping => {
+                // On PSOC 6, if no application is loaded in flash, or if this core is waiting for
+                // another core to boot it, the boot ROM sleeps and vector catch is not triggered.
+                tracing::warn!(
+                    "reset_and_halt timed out and core is sleeping; assuming core is quiescent"
+                );
+                self.halt(Duration::from_millis(100))?;
+            }
+            Err(e) => return Err(e),
+        }
 
         const XPSR_THUMB: u32 = 1 << 24;
 
@@ -304,7 +322,10 @@ impl CoreInterface for Armv8m<'_> {
                     .hw_breakpoints()?
                     .contains(&pc_before_step.try_into().ok())
             {
-                tracing::debug!("Encountered a breakpoint instruction @ {}. We need to manually advance the program counter to the next instruction.", pc_after_step);
+                tracing::debug!(
+                    "Encountered a breakpoint instruction @ {}. We need to manually advance the program counter to the next instruction.",
+                    pc_after_step
+                );
                 // Advance the program counter by the architecture specific byte size of the BKPT instruction.
                 pc_after_step.increment_address(2)?;
                 self.write_core_reg(self.program_counter().into(), pc_after_step)?;
@@ -544,10 +565,10 @@ impl CoreMemoryInterface for Armv8m<'_> {
     type ErrorType = ArmError;
 
     fn memory(&self) -> &dyn MemoryInterface<Self::ErrorType> {
-        self.memory.as_memory_interface()
+        self.memory.as_ref()
     }
     fn memory_mut(&mut self) -> &mut dyn MemoryInterface<Self::ErrorType> {
-        self.memory.as_memory_interface_mut()
+        self.memory.as_mut()
     }
 }
 
@@ -1002,7 +1023,7 @@ bitfield! {
     pub rev, _: 31, 28;
     num_code_1, _: 14, 12;
     /// The number of literal address comparators supported, starting from NUM_CODE upwards.
-    /// UNK/SBZP if Flash Patch is not implemented. Flash Patch is not implemented if FP_REMAP[29] is 0.
+    /// UNK/SBZP if Flash Patch is not implemented. Flash Patch is not implemented if `FP_REMAP[29]` is 0.
     /// If this field is zero, the implementation does not support literal comparators.
     pub num_lit, _: 11, 8;
     num_code_0, _: 7, 4;
@@ -1046,7 +1067,7 @@ bitfield! {
     #[derive(Copy,Clone)]
     pub struct FpCompN(u32);
     impl Debug;
-    /// BPADDR, bits[31:1] Breakpoint address. Specifies bits[31:1] of the breakpoint instruction address.
+    /// BPADDR, `bits[31:1]` Breakpoint address. Specifies bits`[31:1]` of the breakpoint instruction address.
     /// If BE == 0, this field is Reserved, UNK/SBZP.
     /// The reset value of this field is UNKNOWN.
     pub bp_addr, set_bp_addr: 31, 1;

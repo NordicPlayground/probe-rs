@@ -1,25 +1,26 @@
 #![allow(missing_docs)] // Don't require docs for test code
 use crate::{
+    Error, MemoryInterface, MemoryMappedRegister,
     architecture::arm::{
-        ap::memory_ap::{mock::MockMemoryAp, MemoryAp},
+        ArmError, ArmProbeInterface, DapAccess, FullyQualifiedApAddress, RawDapAccess,
+        RegisterAddress, SwoAccess,
+        ap::memory_ap::mock::MockMemoryAp,
         armv8m::Dhcsr,
         communication_interface::{
-            ArmDebugState, Initialized, SwdSequence, Uninitialized, UninitializedArmProbe,
+            ArmDebugState, DapProbe, Initialized, SwdSequence, Uninitialized, UninitializedArmProbe,
         },
-        memory::{adi_v5_memory_interface::ADIMemoryInterface, ArmMemoryInterface},
+        dp::{DpAddress, DpRegisterAddress},
+        memory::{ADIMemoryInterface, ArmMemoryInterface},
         sequences::ArmDebugSequence,
-        ArmError, ArmProbeInterface, DapAccess, DpAddress, FullyQualifiedApAddress, PortType,
-        RawDapAccess, SwoAccess,
     },
     probe::{DebugProbe, DebugProbeError, Probe, WireProtocol},
-    Error, MemoryInterface, MemoryMappedRegister,
 };
 use object::{
+    Endianness, Object, ObjectSection,
     elf::{FileHeader32, FileHeader64, PT_LOAD},
     read::elf::{ElfFile, FileHeader, ProgramHeader},
-    Endianness, Object, ObjectSection,
 };
-use probe_rs_target::{MemoryRange, ScanChainElement};
+use probe_rs_target::MemoryRange;
 use std::{
     cell::RefCell,
     collections::{BTreeSet, VecDeque},
@@ -33,12 +34,11 @@ use std::{
 pub struct FakeProbe {
     protocol: WireProtocol,
     speed: u32,
-    scan_chain: Option<Vec<ScanChainElement>>,
 
-    dap_register_read_handler: Option<Box<dyn Fn(PortType, u8) -> Result<u32, ArmError> + Send>>,
+    dap_register_read_handler: Option<Box<dyn Fn(RegisterAddress) -> Result<u32, ArmError> + Send>>,
 
     dap_register_write_handler:
-        Option<Box<dyn Fn(PortType, u8, u32) -> Result<(), ArmError> + Send>>,
+        Option<Box<dyn Fn(RegisterAddress, u32) -> Result<(), ArmError> + Send>>,
 
     operations: RefCell<VecDeque<Operation>>,
 
@@ -270,28 +270,23 @@ impl ArmMemoryInterface for &mut MockCore {
         todo!()
     }
 
-    fn ap(&mut self) -> &mut MemoryAp {
+    fn fully_qualified_address(&self) -> FullyQualifiedApAddress {
         todo!()
     }
 
-    fn get_arm_communication_interface(
-        &mut self,
-    ) -> Result<
-        &mut crate::architecture::arm::ArmCommunicationInterface<Initialized>,
-        DebugProbeError,
-    > {
+    fn get_arm_probe_interface(&mut self) -> Result<&mut dyn ArmProbeInterface, DebugProbeError> {
         todo!()
     }
 
-    fn try_as_parts(
-        &mut self,
-    ) -> Result<
-        (
-            &mut crate::architecture::arm::ArmCommunicationInterface<Initialized>,
-            &mut MemoryAp,
-        ),
-        DebugProbeError,
-    > {
+    fn get_swd_sequence(&mut self) -> Result<&mut dyn SwdSequence, DebugProbeError> {
+        todo!()
+    }
+
+    fn get_dap_access(&mut self) -> Result<&mut dyn DapAccess, DebugProbeError> {
+        todo!()
+    }
+
+    fn generic_status(&mut self) -> Result<crate::architecture::arm::ap::CSW, ArmError> {
         todo!()
     }
 
@@ -302,7 +297,7 @@ impl ArmMemoryInterface for &mut MockCore {
 pub enum Operation {
     ReadRawApRegister {
         ap: FullyQualifiedApAddress,
-        address: u8,
+        address: u64,
         result: u32,
     },
 }
@@ -322,7 +317,6 @@ impl FakeProbe {
         FakeProbe {
             protocol: WireProtocol::Swd,
             speed: 1000,
-            scan_chain: None,
 
             dap_register_read_handler: None,
             dap_register_write_handler: None,
@@ -344,7 +338,7 @@ impl FakeProbe {
     /// Fake probe with a mocked core
     /// with access to an actual binary file.
     pub fn with_mocked_core_and_binary(program_binary: &Path) -> Self {
-        let file_data = std::fs::read(program_binary).unwrap().to_owned();
+        let file_data = std::fs::read(program_binary).unwrap();
         let file_data_slice = file_data.as_slice();
 
         let file_kind = object::FileKind::parse(file_data.as_slice()).unwrap();
@@ -372,7 +366,7 @@ impl FakeProbe {
     /// Can be used to hook into the read.
     pub fn set_dap_register_read_handler(
         &mut self,
-        handler: Box<dyn Fn(PortType, u8) -> Result<u32, ArmError> + Send>,
+        handler: Box<dyn Fn(RegisterAddress) -> Result<u32, ArmError> + Send>,
     ) {
         self.dap_register_read_handler = Some(handler);
     }
@@ -381,7 +375,7 @@ impl FakeProbe {
     /// Can be used to hook into the write.
     pub fn set_dap_register_write_handler(
         &mut self,
-        handler: Box<dyn Fn(PortType, u8, u32) -> Result<(), ArmError> + Send>,
+        handler: Box<dyn Fn(RegisterAddress, u32) -> Result<(), ArmError> + Send>,
     ) {
         self.dap_register_write_handler = Some(handler);
     }
@@ -398,7 +392,7 @@ impl FakeProbe {
     fn read_raw_ap_register(
         &mut self,
         expected_ap: &FullyQualifiedApAddress,
-        expected_address: u8,
+        expected_address: u64,
     ) -> Result<u32, ArmError> {
         let operation = self.next_operation();
 
@@ -413,7 +407,9 @@ impl FakeProbe {
 
                 Ok(result)
             }
-            None => panic!("No more operations expected, but got read_raw_ap_register ap={expected_ap:?}, address:{expected_address}"),
+            None => panic!(
+                "No more operations expected, but got read_raw_ap_register ap={expected_ap:?}, address:{expected_address}"
+            ),
             //other => panic!("Unexpected operation: {:?}", other),
         }
     }
@@ -491,20 +487,6 @@ impl DebugProbe for FakeProbe {
         self.speed
     }
 
-    fn set_scan_chain(&mut self, scan_chain: Vec<ScanChainElement>) -> Result<(), DebugProbeError> {
-        self.scan_chain = Some(scan_chain);
-        Ok(())
-    }
-
-    fn scan_chain(&self) -> Result<&[ScanChainElement], DebugProbeError> {
-        match &self.scan_chain {
-            Some(chain) => Ok(chain),
-            None => Err(DebugProbeError::Other(
-                "No scan chain set for fake probe".to_string(),
-            )),
-        }
-    }
-
     fn set_speed(&mut self, speed_khz: u32) -> Result<u32, DebugProbeError> {
         self.speed = speed_khz;
 
@@ -563,17 +545,17 @@ impl DebugProbe for FakeProbe {
 
 impl RawDapAccess for FakeProbe {
     /// Reads the DAP register on the specified port and address
-    fn raw_read_register(&mut self, port: PortType, addr: u8) -> Result<u32, ArmError> {
+    fn raw_read_register(&mut self, address: RegisterAddress) -> Result<u32, ArmError> {
         let handler = self.dap_register_read_handler.as_ref().unwrap();
 
-        handler(port, addr)
+        handler(address)
     }
 
     /// Writes a value to the DAP register on the specified port and address
-    fn raw_write_register(&mut self, port: PortType, addr: u8, value: u32) -> Result<(), ArmError> {
+    fn raw_write_register(&mut self, address: RegisterAddress, value: u32) -> Result<(), ArmError> {
         let handler = self.dap_register_write_handler.as_ref().unwrap();
 
-        handler(port, addr, value)
+        handler(address, value)
     }
 
     fn jtag_sequence(&mut self, _cycles: u8, _tms: bool, _tdi: u64) -> Result<(), DebugProbeError> {
@@ -697,6 +679,10 @@ impl ArmProbeInterface for FakeArmInterface<Initialized> {
     fn current_debug_port(&self) -> DpAddress {
         self.state.current_dp
     }
+
+    fn reinitialize(&mut self) -> Result<(), ArmError> {
+        Ok(())
+    }
 }
 
 impl SwoAccess for FakeArmInterface<Initialized> {
@@ -717,14 +703,18 @@ impl SwoAccess for FakeArmInterface<Initialized> {
 }
 
 impl DapAccess for FakeArmInterface<Initialized> {
-    fn read_raw_dp_register(&mut self, _dp: DpAddress, _address: u8) -> Result<u32, ArmError> {
+    fn read_raw_dp_register(
+        &mut self,
+        _dp: DpAddress,
+        _address: DpRegisterAddress,
+    ) -> Result<u32, ArmError> {
         todo!()
     }
 
     fn write_raw_dp_register(
         &mut self,
         _dp: DpAddress,
-        _address: u8,
+        _address: DpRegisterAddress,
         _value: u32,
     ) -> Result<(), ArmError> {
         todo!()
@@ -733,7 +723,7 @@ impl DapAccess for FakeArmInterface<Initialized> {
     fn read_raw_ap_register(
         &mut self,
         _ap: &FullyQualifiedApAddress,
-        _address: u8,
+        _address: u64,
     ) -> Result<u32, ArmError> {
         self.probe.read_raw_ap_register(_ap, _address)
     }
@@ -741,7 +731,7 @@ impl DapAccess for FakeArmInterface<Initialized> {
     fn read_raw_ap_register_repeated(
         &mut self,
         _ap: &FullyQualifiedApAddress,
-        _address: u8,
+        _address: u64,
         _values: &mut [u32],
     ) -> Result<(), ArmError> {
         todo!()
@@ -750,7 +740,7 @@ impl DapAccess for FakeArmInterface<Initialized> {
     fn write_raw_ap_register(
         &mut self,
         _ap: &FullyQualifiedApAddress,
-        _address: u8,
+        _address: u64,
         _value: u32,
     ) -> Result<(), ArmError> {
         todo!()
@@ -759,10 +749,18 @@ impl DapAccess for FakeArmInterface<Initialized> {
     fn write_raw_ap_register_repeated(
         &mut self,
         _ap: &FullyQualifiedApAddress,
-        _address: u8,
+        _address: u64,
         _values: &[u32],
     ) -> Result<(), ArmError> {
         todo!()
+    }
+
+    fn try_dap_probe(&self) -> Option<&dyn DapProbe> {
+        None
+    }
+
+    fn try_dap_probe_mut(&mut self) -> Option<&mut dyn DapProbe> {
+        None
     }
 }
 

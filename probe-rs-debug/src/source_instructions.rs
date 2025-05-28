@@ -1,7 +1,6 @@
 use super::{
-    canonical_path_eq,
+    ColumnType, DebugError, DebugInfo, GimliReader, canonical_path_eq,
     unit_info::{self, UnitInfo},
-    ColumnType, DebugError, DebugInfo, GimliReader,
 };
 use gimli::LineSequence;
 use serde::Serialize;
@@ -45,7 +44,9 @@ impl VerifiedBreakpoint {
             return Ok(verified_breakpoint);
         }
         // If we get here, we have not found a valid breakpoint location.
-        let message = format!("Could not identify a valid breakpoint for address: {address:#010x}. Please consider using instruction level stepping.");
+        let message = format!(
+            "Could not identify a valid breakpoint for address: {address:#010x}. Please consider using instruction level stepping."
+        );
         Err(DebugError::WarnAndContinue { message })
     }
 
@@ -66,10 +67,10 @@ impl VerifiedBreakpoint {
     /// 3. Filter the [`Vec<LineSequence>`][LineSequence] entries to only include sequences that match the requested path.
     /// 3. Convert remaining [`LineSequence`], to [`InstructionSequence`].
     /// 4. Return the first [`InstructionSequence`] that contains the requested source location.
-    ///    4a. This may be an exact match on file/line/column, or,
-    ///    4b. Failing an exact match, a match on file/line only.
-    ///    4c. Failing that, a match on file only, where the line number is the "next" available instruction,
-    ///        on the next available line of the specified file.
+    ///    1. This may be an exact match on file/line/column, or,
+    ///    2. Failing an exact match, a match on file/line only.
+    ///    3. Failing that, a match on file only, where the line number is the "next" available instruction,
+    ///       on the next available line of the specified file.
     pub(crate) fn for_source_location(
         debug_info: &DebugInfo,
         path: TypedPath,
@@ -161,7 +162,10 @@ impl VerifiedBreakpoint {
             }
         }
         // If we get here, we have not found a valid breakpoint location.
-        Err(DebugError::Other(format!("No valid breakpoint information found for file: {}, line: {line:?}, column: {column:?}", path.display())))
+        Err(DebugError::Other(format!(
+            "No valid breakpoint information found for file: {}, line: {line:?}, column: {column:?}",
+            path.display()
+        )))
     }
 }
 
@@ -517,7 +521,7 @@ impl<'debug_info> InstructionSequence<'debug_info> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 /// The type of instruction, as defined by [`gimli::LineRow`] attributes and relative position in the sequence.
 enum InstructionType {
     /// We need to keep track of source lines that signal function signatures,
@@ -531,14 +535,14 @@ enum InstructionType {
     Unspecified,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 /// - A [`InstructionLocation`] filters and maps [`gimli::LineRow`] entries to be used for determining valid halt points.
 ///   - Each [`InstructionLocation`] maps to a single machine instruction on target.
 ///   - For establishing valid halt locations (breakpoint or stepping), we are only interested,
 ///     in the [`InstructionLocation`]'s that represent DWARF defined `statements`,
 ///     which are not part of the prologue or epilogue.
 /// - A line of code in a source file may contain multiple instruction locations, in which case
-///     a new [`InstructionLocation`] with unique `column` is created.
+///   a new [`InstructionLocation`] with unique `column` is created.
 /// - A [`InstructionSequence`] is a series of contiguous [`InstructionLocation`]'s.
 struct InstructionLocation {
     address: u64,
@@ -553,19 +557,18 @@ impl Debug for InstructionLocation {
         write!(
             f,
             "Instruction @ {:010x}, on line={:04}  col={:05}  f={:02}, type={:?}",
-            &self.address,
-            match &self.line {
+            self.address,
+            match self.line {
                 Some(line) => line.get(),
                 None => 0,
             },
-            match &self.column {
+            match self.column {
                 ColumnType::LeftEdge => 0,
-                ColumnType::Column(column) => column.to_owned(),
+                ColumnType::Column(column) => column,
             },
-            &self.file_index,
-            &self.instruction_type,
-        )?;
-        Ok(())
+            self.file_index,
+            self.instruction_type,
+        )
     }
 }
 
@@ -575,7 +578,8 @@ fn log_row_eval(
     row: &gimli::LineRow,
     status: &str,
 ) {
-    tracing::trace!("Sequence: line={:04} col={:05} f={:02} stmt={:5} ep={:5} es={:5} eb={:5} : {:#010X}<={:#010X}<{:#010X} : {}",
+    tracing::trace!(
+        "Sequence: line={:04} col={:05} f={:02} stmt={:5} ep={:5} es={:5} eb={:5} : {:#010X}<={:#010X}<{:#010X} : {}",
         match row.line() {
             Some(line) => line.get(),
             None => 0,
@@ -592,5 +596,6 @@ fn log_row_eval(
         active_sequence.start,
         row.address(),
         active_sequence.end,
-        status);
+        status
+    );
 }

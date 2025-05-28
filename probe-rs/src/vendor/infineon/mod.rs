@@ -1,16 +1,17 @@
 //! Infineon vendor support.
 
 use jep106::JEP106Code;
-use probe_rs_target::{chip_detection::ChipDetectionMethod, Chip};
+use probe_rs_target::{Chip, chip_detection::ChipDetectionMethod};
 
 use crate::{
     architecture::arm::{
-        memory::ArmMemoryInterface, ArmChipInfo, ArmError, ArmProbeInterface,
-        FullyQualifiedApAddress,
+        ArmChipInfo, ArmError, ArmProbeInterface, FullyQualifiedApAddress,
+        dp::{DpRegister, TARGETID},
+        memory::ArmMemoryInterface,
     },
-    config::{registry, DebugSequence},
+    config::{DebugSequence, Registry},
     error::Error,
-    vendor::{infineon::sequences::xmc4000::XMC4000, Vendor},
+    vendor::{Vendor, infineon::sequences::xmc4000::XMC4000},
 };
 
 pub mod sequences;
@@ -20,6 +21,7 @@ pub mod sequences;
 pub struct Infineon;
 
 const INFINEON: JEP106Code = JEP106Code { id: 0x41, cc: 0x00 };
+const CYPRESS: JEP106Code = JEP106Code { id: 0x34, cc: 0x00 };
 
 impl Vendor for Infineon {
     fn try_create_debug_sequence(&self, chip: &Chip) -> Option<DebugSequence> {
@@ -34,25 +36,27 @@ impl Vendor for Infineon {
 
     fn try_detect_arm_chip(
         &self,
+        registry: &Registry,
         interface: &mut dyn ArmProbeInterface,
         chip_info: ArmChipInfo,
     ) -> Result<Option<String>, Error> {
-        if chip_info.manufacturer != INFINEON {
-            return Ok(None);
+        if let Some(psoc) = try_detect_psoc(registry, interface, &chip_info)? {
+            Ok(Some(psoc))
+        } else {
+            try_detect_xmc4xxx(registry, interface, &chip_info)
         }
-
-        if let Some(target) = try_detect_xmc4xxx(interface, &chip_info)? {
-            return Ok(Some(target));
-        }
-
-        Ok(None)
     }
 }
 
 fn try_detect_xmc4xxx(
+    registry: &Registry,
     interface: &mut dyn ArmProbeInterface,
     chip_info: &ArmChipInfo,
 ) -> Result<Option<String>, Error> {
+    if chip_info.manufacturer != INFINEON {
+        return Ok(None);
+    }
+
     const KNOWN_PARTS: &[u16] = &[0x1dd, 0x1df, 0x1dc, 0x1db];
     if !KNOWN_PARTS.contains(&chip_info.part) {
         return Ok(None);
@@ -76,12 +80,11 @@ fn try_detect_xmc4xxx(
     // Now look up a closest match. We are not able to tell exactly which device this is, because
     // the identical die is packaged up differently for different devices.
 
-    let families = registry::families_ref();
-    for family in families.iter() {
+    for family in registry.families() {
         for info in family
             .chip_detection
             .iter()
-            .filter_map(ChipDetectionMethod::as_infineon_scu)
+            .filter_map(ChipDetectionMethod::as_infineon_xmc_scu)
         {
             if info.part != chip_info.part || info.scu_id != (scu_idchip & 0xFFFF0) >> 4 {
                 continue;
@@ -146,4 +149,34 @@ fn probe_xmc4xxx_flash_size(start_addr: u32, memory: &mut dyn ArmMemoryInterface
         last_successful_size = size;
     }
     last_successful_size
+}
+
+fn try_detect_psoc(
+    registry: &Registry,
+    interface: &mut dyn ArmProbeInterface,
+    chip_info: &ArmChipInfo,
+) -> Result<Option<String>, Error> {
+    if chip_info.manufacturer != INFINEON && chip_info.manufacturer != CYPRESS {
+        return Ok(None);
+    }
+
+    let mut families = registry
+        .families()
+        .iter()
+        .filter(|f| f.manufacturer == Some(chip_info.manufacturer))
+        .flat_map(|f| f.chip_detection.iter())
+        .flat_map(ChipDetectionMethod::as_infineon_psoc_siid)
+        .filter(|f| f.family_id == chip_info.part)
+        .peekable();
+
+    if families.peek().is_none() {
+        return Ok(None);
+    }
+
+    let tid = TARGETID(
+        interface.read_raw_dp_register(interface.current_debug_port(), TARGETID::ADDRESS)?,
+    );
+    let siid = tid.tpartno();
+
+    Ok(families.find_map(|family| family.silicon_ids.get(&siid).cloned()))
 }

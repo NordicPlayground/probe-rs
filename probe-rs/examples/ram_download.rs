@@ -1,13 +1,13 @@
 //! This example demonstrates how to write data to RAM and read it back.
 
-use probe_rs::probe::{list::Lister, Probe};
-use probe_rs::{config::TargetSelector, probe::WireProtocol, MemoryInterface, Permissions};
+use probe_rs::probe::{Probe, list::Lister};
+use probe_rs::{MemoryInterface, Permissions, config::TargetSelector, probe::WireProtocol};
 
 use clap::Parser;
 use std::num::ParseIntError;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 #[derive(clap::Parser)]
 struct Cli {
@@ -28,7 +28,7 @@ fn parse_hex(src: &str) -> Result<u64, ParseIntError> {
 }
 
 fn main() -> Result<()> {
-    pretty_env_logger::init();
+    env_logger::init();
 
     let matches = Cli::parse();
 

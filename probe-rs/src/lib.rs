@@ -37,9 +37,10 @@
 //!
 //! ```no_run
 //! # use probe_rs::Error;
-//! use probe_rs::{Session, Permissions, MemoryInterface};
+//! use probe_rs::{Session, SessionConfig, MemoryInterface};
 //!
-//! let mut session = Session::auto_attach("nrf52", Permissions::default())?;
+//! let session_config = SessionConfig::default();
+//! let mut session = Session::auto_attach("nrf52", session_config)?;
 //! let mut core = session.core(0)?;
 //!
 //! // Read a block of 50 32 bit words.
@@ -75,9 +76,6 @@ pub mod vendor;
 pub mod core;
 mod error;
 pub mod flashing;
-#[cfg(feature = "gdb-server")]
-#[cfg_attr(probers_docsrs, doc(cfg(feature = "gdb-server")))]
-pub mod gdb_server;
 pub mod integration;
 mod memory;
 pub mod probe;
@@ -101,7 +99,7 @@ pub use crate::core::{
 };
 pub use crate::error::Error;
 pub use crate::memory::MemoryInterface;
-pub use crate::session::{Permissions, Session};
+pub use crate::session::{Permissions, Session, SessionConfig};
 
 #[doc = include_str!("../../README.md")]
 #[cfg(doctest)]

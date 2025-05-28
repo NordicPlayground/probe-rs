@@ -3,6 +3,7 @@ mod diagnostics;
 use clap::Parser;
 use colored::Colorize;
 use diagnostics::render_diagnostics;
+use probe_rs::config::Registry;
 use probe_rs::probe::list::Lister;
 use std::ffi::OsString;
 use std::{path::PathBuf, process};
@@ -12,7 +13,7 @@ use crate::util::common_options::{
     BinaryDownloadOptions, CargoOptions, OperationError, ProbeOptions,
 };
 use crate::util::flash;
-use crate::util::logging::{setup_logging, LevelFilter};
+use crate::util::logging::{LevelFilter, setup_logging};
 use crate::util::{cargo::build_artifact, logging};
 
 /// Common options when flashing a target device.
@@ -56,7 +57,8 @@ struct CliOptions {
 }
 
 pub fn main(args: &[OsString]) {
-    match main_try(args) {
+    let mut registry = Registry::from_builtin_families();
+    match main_try(&mut registry, args) {
         Ok(_) => (),
         Err(e) => {
             // Ensure stderr is flushed before calling process::exit,
@@ -64,14 +66,14 @@ pub fn main(args: &[OsString]) {
             // to access stderr during shutdown.
             //
             // We ignore the errors, not much we can do anyway.
-            render_diagnostics(e);
+            render_diagnostics(&registry, e);
 
             process::exit(1);
         }
     }
 }
 
-fn main_try(args: &[OsString]) -> Result<(), OperationError> {
+fn main_try(registry: &mut Registry, args: &[OsString]) -> Result<(), OperationError> {
     // Parse the commandline options.
     let opt = CliOptions::parse_from(args);
 
@@ -97,7 +99,7 @@ fn main_try(args: &[OsString]) -> Result<(), OperationError> {
         path_buf.clone()
     } else {
         let cargo_options = opt.cargo_options.to_cargo_options();
-        image_instr_set = target_instruction_set(opt.cargo_options.target.clone());
+        image_instr_set = target_instruction_set(opt.cargo_options.target.as_deref());
 
         // Build the project, and extract the path of the built artifact.
         build_artifact(&work_dir, &cargo_options)
@@ -126,7 +128,7 @@ fn main_try(args: &[OsString]) -> Result<(), OperationError> {
     let lister = Lister::new();
 
     // Attach to specified probe
-    let (mut session, probe_options) = opt.probe_options.simple_attach(&lister)?;
+    let (mut session, probe_options) = opt.probe_options.simple_attach(registry, &lister)?;
 
     // Flash the binary
     let loader =

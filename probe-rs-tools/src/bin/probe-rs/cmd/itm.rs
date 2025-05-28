@@ -3,10 +3,11 @@
 use std::time::{Duration, Instant};
 
 use probe_rs::architecture::arm::{component::TraceSink, swo::SwoConfig};
+use probe_rs::config::Registry;
 use probe_rs::probe::list::Lister;
 
-use crate::util::common_options::ProbeOptions;
 use crate::CoreOptions;
+use crate::util::common_options::ProbeOptions;
 
 #[derive(clap::Subcommand)]
 pub(crate) enum ItmSource {
@@ -26,7 +27,7 @@ pub(crate) enum ItmSource {
     /// analyzer or a capable probe to capture the data.
     ///
     /// To work around issues with buffering and throughput of the SWO output and to
-    /// avoid the need for, special hardware, this program provides a mechanism to
+    /// avoid the need for special hardware this program provides a mechanism to
     /// instead capture DWT/ITM trace data within the Embedded Trace Buffer/FIFO
     /// (ETB/ETF). The ETF is a 4 KiB (usually) FIFO in SRAM that can be used to
     /// buffer data before draining the trace data to an external source. The ETF
@@ -68,8 +69,8 @@ pub struct Cmd {
 }
 
 impl Cmd {
-    pub fn run(self, lister: &Lister) -> anyhow::Result<()> {
-        let (mut session, _probe_options) = self.common.simple_attach(lister)?;
+    pub fn run(self, registry: &mut Registry, lister: &Lister) -> anyhow::Result<()> {
+        let (mut session, _probe_options) = self.common.simple_attach(registry, lister)?;
 
         match self.source {
             ItmSource::TraceMemory { coreclk } => {

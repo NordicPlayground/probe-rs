@@ -1,25 +1,25 @@
 //! Register types and the core interface for armv8-a
 
 use super::{
+    CortexAState,
     instructions::{
         aarch64,
         thumb2::{build_ldr, build_mcr, build_mrc, build_str, build_vmov, build_vmrs},
     },
     registers::{aarch32::AARCH32_WITH_FP_32_CORE_REGISTERS, aarch64::AARCH64_CORE_REGISTERS},
-    CortexAState,
 };
 use crate::{
-    architecture::arm::{
-        core::armv8a_debug_regs::*, memory::ArmMemoryInterface, sequences::ArmDebugSequence,
-        ArmError,
-    },
-    core::{
-        memory_mapped_registers::MemoryMappedRegister, CoreRegisters, RegisterId, RegisterValue,
-    },
-    error::Error,
-    memory::{valid_32bit_address, MemoryNotAlignedError},
     Architecture, CoreInformation, CoreInterface, CoreRegister, CoreStatus, CoreType,
     InstructionSet, MemoryInterface,
+    architecture::arm::{
+        ArmError, core::armv8a_debug_regs::*, memory::ArmMemoryInterface,
+        sequences::ArmDebugSequence,
+    },
+    core::{
+        CoreRegisters, RegisterId, RegisterValue, memory_mapped_registers::MemoryMappedRegister,
+    },
+    error::Error,
+    memory::{MemoryNotAlignedError, valid_32bit_address},
 };
 use std::{
     sync::Arc,
@@ -1683,7 +1683,7 @@ impl MemoryInterface for Armv8a<'_> {
 mod test {
     use crate::{
         architecture::arm::{
-            ap::memory_ap::MemoryAp, communication_interface::SwdSequence,
+            FullyQualifiedApAddress, communication_interface::SwdSequence,
             sequences::DefaultArmSequence,
         },
         probe::DebugProbeError,
@@ -1833,37 +1833,36 @@ mod test {
     }
 
     impl ArmMemoryInterface for MockProbe {
-        fn update_core_status(&mut self, _: CoreStatus) {}
-
-        fn ap(&mut self) -> &mut MemoryAp {
+        fn fully_qualified_address(&self) -> FullyQualifiedApAddress {
             todo!()
         }
 
-        fn get_arm_communication_interface(
+        fn get_arm_probe_interface(
             &mut self,
-        ) -> Result<
-            &mut crate::architecture::arm::ArmCommunicationInterface<
-                crate::architecture::arm::communication_interface::Initialized,
-            >,
-            DebugProbeError,
-        > {
+        ) -> Result<&mut dyn crate::architecture::arm::ArmProbeInterface, DebugProbeError> {
             Err(DebugProbeError::NotImplemented {
-                function_name: "get_arm_communication_interface",
+                function_name: "get_arm_probe_interface",
             })
         }
 
-        fn try_as_parts(
+        fn get_swd_sequence(&mut self) -> Result<&mut dyn SwdSequence, DebugProbeError> {
+            Err(DebugProbeError::NotImplemented {
+                function_name: "get_swd_sequence",
+            })
+        }
+
+        fn get_dap_access(
             &mut self,
-        ) -> Result<
-            (
-                &mut crate::architecture::arm::ArmCommunicationInterface<
-                    crate::architecture::arm::communication_interface::Initialized,
-                >,
-                &mut MemoryAp,
-            ),
-            DebugProbeError,
-        > {
-            todo!()
+        ) -> Result<&mut dyn crate::architecture::arm::DapAccess, DebugProbeError> {
+            Err(DebugProbeError::NotImplemented {
+                function_name: "get_dap_access",
+            })
+        }
+
+        fn generic_status(&mut self) -> Result<crate::architecture::arm::ap::CSW, ArmError> {
+            Err(ArmError::Probe(DebugProbeError::NotImplemented {
+                function_name: "generic_status",
+            }))
         }
 
         fn base_address(&mut self) -> Result<u64, ArmError> {

@@ -68,14 +68,14 @@ pub struct RttWindowOpened {
 #[serde(rename_all = "camelCase")]
 pub struct RttWindowOpenedArguments {
     /// The RTT channel number.
-    pub channel_number: usize,
+    pub channel_number: u32,
     pub window_is_open: bool,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RttChannelEventBody {
-    pub channel_number: usize,
+    pub channel_number: u32,
     pub channel_name: String,
     pub data_format: rtt::DataFormat,
 }
@@ -83,7 +83,7 @@ pub struct RttChannelEventBody {
 #[derive(Clone, PartialEq, Eq, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RttDataEventBody {
-    pub channel_number: usize,
+    pub channel_number: u32,
     /// RTT output
     pub data: String,
 }
@@ -228,5 +228,19 @@ fn get_string_argument(
         _ => Err(DebuggerError::MissingArgument {
             argument_name: argument_name.to_string(),
         }),
+    }
+}
+
+impl Display for Message {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut formatted = self.format.clone();
+
+        if let Some(args) = &self.variables {
+            for (key, value) in args {
+                formatted = formatted.replace(&format!("{{{key}}}"), value);
+            }
+        }
+
+        f.write_str(&formatted)
     }
 }

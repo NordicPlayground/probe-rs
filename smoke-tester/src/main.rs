@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use linkme::distributed_slice;
 use miette::{Context, IntoDiagnostic, Result};
-use probe_rs::Permissions;
+use probe_rs::{Permissions, probe::WireProtocol};
 
 mod dut_definition;
 mod macros;
@@ -93,12 +93,15 @@ struct Opt {
     #[arg(long, global = true, value_name = "PROBE_SPEED")]
     probe_speed: Option<u32>,
 
+    #[arg(long, global = true, value_name = "PROTOCOL")]
+    protocol: Option<WireProtocol>,
+
     #[arg(long, global = true, value_name = "FILE", conflicts_with_all = ["chip", "dut_definitions"])]
     single_dut: Option<PathBuf>,
 }
 
 fn main() -> Result<ExitCode> {
-    pretty_env_logger::init();
+    env_logger::init();
 
     let opt = Opt::parse();
 
@@ -122,6 +125,10 @@ fn main() -> Result<ExitCode> {
     for definition in &mut definitions {
         if let Some(probe_speed) = opt.probe_speed {
             definition.probe_speed = Some(probe_speed);
+        }
+
+        if let Some(protcol) = opt.protocol {
+            definition.protocol = Some(protcol);
         }
     }
 
@@ -471,6 +478,7 @@ impl<'dut> TestTracker<'dut> {
                 println_test_status!(self, yellow, "Missing resource for test: {}", message);
             }
             Err(_e) => {
+                println_test_status!(self, red, "{_e:?}");
                 println_test_status!(self, red, "Test failed in {formatted_duration}.");
             }
         };

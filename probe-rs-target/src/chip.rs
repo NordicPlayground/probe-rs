@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::memory::MemoryRegion;
-use crate::{serialize::hex_option, CoreType};
+use crate::{CoreType, serialize::hex_option};
 use serde::{Deserialize, Serialize};
 
 /// Represents a DAP scan chain element.
@@ -11,6 +11,13 @@ pub struct ScanChainElement {
     pub name: Option<String>,
     /// Specifies the IR length of the DAP (default value: 4).
     pub ir_len: Option<u8>,
+}
+
+impl ScanChainElement {
+    /// Returns the IR length, or 4 if not specified.
+    pub fn ir_len(&self) -> u8 {
+        self.ir_len.unwrap_or(4)
+    }
 }
 
 /// Configuration for JTAG tunneling.
@@ -161,12 +168,32 @@ pub enum CoreAccessOptions {
     Xtensa(XtensaCoreAccessOptions),
 }
 
+/// An address for AP accesses
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ApAddress {
+    /// References an address for an APv1 access, which is part of the ADIv5 specification.
+    #[serde(rename = "v1")]
+    V1(u8),
+    /// References an address for an APv2 access, which is part of the ADIv6 specification.
+    ///
+    /// # Note
+    /// This represents a base address within the root DP memory space.
+    #[serde(rename = "v2")]
+    V2(u64),
+}
+
+impl Default for ApAddress {
+    fn default() -> Self {
+        ApAddress::V1(0)
+    }
+}
+
 /// The data required to access an ARM core
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct ArmCoreAccessOptions {
     /// The access port number to access the core
-    pub ap: u8,
+    pub ap: ApAddress,
     /// The TARGETSEL value used to access the core
     #[serde(serialize_with = "hex_option")]
     pub targetsel: Option<u32>,

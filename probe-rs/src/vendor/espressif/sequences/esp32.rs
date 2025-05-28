@@ -7,12 +7,17 @@ use std::{
 
 use super::esp::EspFlashSizeDetector;
 use crate::{
+    MemoryInterface, Session,
     architecture::xtensa::{
-        communication_interface::{ProgramCounter, XtensaCommunicationInterface, XtensaError},
+        Xtensa,
+        communication_interface::{
+            MemoryRegionProperties, ProgramCounter, XtensaCommunicationInterface, XtensaError,
+        },
         sequences::XtensaDebugSequence,
         xdm,
     },
-    MemoryInterface, Session,
+    semihosting::{SemihostingCommand, UnknownCommandDetails},
+    vendor::espressif::sequences::esp::EspBreakpointHandler,
 };
 
 /// The debug sequence implementation for the ESP32.
@@ -24,7 +29,9 @@ pub struct ESP32 {
 impl ESP32 {
     /// Creates a new debug sequence handle for the ESP32.
     pub fn create() -> Arc<dyn XtensaDebugSequence> {
-        tracing::warn!("Be careful not to reset your ESP32 while connected to the debugger! Depending on the specific device, this may render it temporarily inoperable or permanently damage it.");
+        tracing::warn!(
+            "Be careful not to reset your ESP32 while connected to the debugger! Depending on the specific device, this may render it temporarily inoperable or permanently damage it."
+        );
         Arc::new(Self {
             inner: EspFlashSizeDetector {
                 stack_pointer: 0x3ffd0000,
@@ -35,39 +42,67 @@ impl ESP32 {
             },
         })
     }
-}
 
-impl XtensaDebugSequence for ESP32 {
-    fn on_connect(&self, core: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
-        // Peripheral address range
-        core.add_slow_memory_access_range(0x3FF0_0000..0x3FF8_0000);
+    fn disable_wdts(
+        &self,
+        interface: &mut XtensaCommunicationInterface,
+    ) -> Result<(), crate::Error> {
         tracing::info!("Disabling ESP32 watchdogs...");
 
         // tg0 wdg
         const TIMG0_BASE: u64 = 0x3ff5f000;
         const TIMG0_WRITE_PROT: u64 = TIMG0_BASE | 0x64;
         const TIMG0_WDTCONFIG0: u64 = TIMG0_BASE | 0x48;
-        core.write_word_32(TIMG0_WRITE_PROT, 0x50D83AA1)?; // write protection off
-        core.write_word_32(TIMG0_WDTCONFIG0, 0x0)?;
-        core.write_word_32(TIMG0_WRITE_PROT, 0x0)?; // write protection on
+        interface.write_word_32(TIMG0_WRITE_PROT, 0x50D83AA1)?; // write protection off
+        interface.write_word_32(TIMG0_WDTCONFIG0, 0x0)?;
+        interface.write_word_32(TIMG0_WRITE_PROT, 0x0)?; // write protection on
 
         // tg1 wdg
         const TIMG1_BASE: u64 = 0x3ff60000;
         const TIMG1_WRITE_PROT: u64 = TIMG1_BASE | 0x64;
         const TIMG1_WDTCONFIG0: u64 = TIMG1_BASE | 0x48;
-        core.write_word_32(TIMG1_WRITE_PROT, 0x50D83AA1)?; // write protection off
-        core.write_word_32(TIMG1_WDTCONFIG0, 0x0)?;
-        core.write_word_32(TIMG1_WRITE_PROT, 0x0)?; // write protection on
+        interface.write_word_32(TIMG1_WRITE_PROT, 0x50D83AA1)?; // write protection off
+        interface.write_word_32(TIMG1_WDTCONFIG0, 0x0)?;
+        interface.write_word_32(TIMG1_WRITE_PROT, 0x0)?; // write protection on
 
         // rtc wdg
         const RTC_CNTL_BASE: u64 = 0x3ff48000;
         const RTC_WRITE_PROT: u64 = RTC_CNTL_BASE | 0xa4;
         const RTC_WDTCONFIG0: u64 = RTC_CNTL_BASE | 0x8c;
-        core.write_word_32(RTC_WRITE_PROT, 0x50D83AA1)?; // write protection off
-        core.write_word_32(RTC_WDTCONFIG0, 0x0)?;
-        core.write_word_32(RTC_WRITE_PROT, 0x0)?; // write protection on
+        interface.write_word_32(RTC_WRITE_PROT, 0x50D83AA1)?; // write protection off
+        interface.write_word_32(RTC_WDTCONFIG0, 0x0)?;
+        interface.write_word_32(RTC_WRITE_PROT, 0x0)?; // write protection on
 
         Ok(())
+    }
+}
+
+impl XtensaDebugSequence for ESP32 {
+    fn on_connect(&self, interface: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
+        // Data
+        interface.core_properties().memory_ranges.insert(
+            0x3FF8_0000..0x4000_0000,
+            MemoryRegionProperties {
+                unaligned_store: true,
+                unaligned_load: true,
+                fast_memory_access: true,
+            },
+        );
+        // Instruction
+        interface.core_properties().memory_ranges.insert(
+            0x4000_0000..0x400C_2000,
+            MemoryRegionProperties {
+                unaligned_store: false,
+                unaligned_load: false,
+                fast_memory_access: true,
+            },
+        );
+
+        self.disable_wdts(interface)
+    }
+
+    fn on_halt(&self, interface: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
+        self.disable_wdts(interface)
     }
 
     fn detect_flash_size(&self, session: &mut Session) -> Result<Option<usize>, crate::Error> {
@@ -161,7 +196,7 @@ impl XtensaDebugSequence for ESP32 {
             }
 
             if start.elapsed() >= timeout {
-                return Err(crate::Error::Timeout);
+                return Err(XtensaError::Timeout.into());
             }
         }
 
@@ -175,5 +210,13 @@ impl XtensaDebugSequence for ESP32 {
         tracing::info!("Reset complete");
 
         Ok(())
+    }
+
+    fn on_unknown_semihosting_command(
+        &self,
+        interface: &mut Xtensa,
+        details: UnknownCommandDetails,
+    ) -> Result<Option<SemihostingCommand>, crate::Error> {
+        EspBreakpointHandler::handle_xtensa_idf_semihosting(interface, details)
     }
 }

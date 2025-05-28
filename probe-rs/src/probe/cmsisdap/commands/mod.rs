@@ -27,7 +27,7 @@ pub enum CmsisDapError {
     },
 
     /// CMSIS-DAP responded with an error.
-    ErrorResponse(RequestError),
+    ErrorResponse(#[source] RequestError),
 
     /// Too much data provided for SWJ Sequence command.
     TooMuchData,
@@ -73,8 +73,8 @@ pub enum SendError {
     /// Connecting to target failed, received: {0:x}
     ConnectResponseError(u8),
 
-    /// Command ID in response (:#02x) does not match sent command ID
-    CommandIdMismatch(u8),
+    /// Command ID in response ({0:#02x}) does not match sent command ID ({1:?} - {*_1 as u8:#02x}).
+    CommandIdMismatch(u8, CommandId),
 
     /// String in response is not valid UTF-8.
     ///
@@ -258,15 +258,11 @@ impl CmsisDapDevice {
     pub(super) fn set_packet_size(&mut self, packet_size: usize) {
         tracing::debug!("Configuring probe to use packet size {}", packet_size);
         match self {
-            CmsisDapDevice::V1 {
-                ref mut report_size,
-                ..
-            } => {
+            CmsisDapDevice::V1 { report_size, .. } => {
                 *report_size = packet_size;
             }
             CmsisDapDevice::V2 {
-                ref mut max_packet_size,
-                ..
+                max_packet_size, ..
             } => {
                 *max_packet_size = packet_size;
             }
@@ -363,7 +359,7 @@ impl Status {
 ///
 /// The command ID is always sent as the first byte for every command,
 /// and also is the first byte of every response.
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[allow(unused)]
 pub enum CommandId {
     Info = 0x00,
@@ -468,7 +464,10 @@ fn send_command_inner<Req: Request>(
     if response_data[0] == Req::COMMAND_ID as u8 {
         request.parse_response(&response_data[1..])
     } else {
-        Err(SendError::CommandIdMismatch(response_data[0]))
+        Err(SendError::CommandIdMismatch(
+            response_data[0],
+            Req::COMMAND_ID,
+        ))
     }
 }
 

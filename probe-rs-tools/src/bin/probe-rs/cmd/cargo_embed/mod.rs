@@ -2,20 +2,20 @@ mod config;
 mod error;
 mod rttui;
 
-use anyhow::{anyhow, Context, Result};
+use crate::cmd::gdb_server::GdbInstanceConfiguration;
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use colored::Colorize;
 use parking_lot::FairMutex;
+use probe_rs::config::Registry;
 use probe_rs::flashing::{BootInfo, FormatKind};
-use probe_rs::gdb_server::GdbInstanceConfiguration;
 use probe_rs::probe::list::Lister;
 use probe_rs::rtt::ScanRegion;
-use probe_rs::{probe::DebugProbeSelector, Session};
+use probe_rs::{Session, probe::DebugProbeSelector};
 use std::ffi::OsString;
 use std::time::Instant;
 use std::{fs, thread};
 use std::{
-    fs::File,
     io::Write,
     panic,
     path::{Path, PathBuf},
@@ -25,14 +25,14 @@ use std::{
 };
 use time::{OffsetDateTime, UtcOffset};
 
+use crate::FormatOptions;
 use crate::util::cargo::target_instruction_set;
 use crate::util::common_options::{BinaryDownloadOptions, OperationError, ProbeOptions};
 use crate::util::flash::{build_loader, run_flash_download};
 use crate::util::logging::setup_logging;
 use crate::util::rtt::client::RttClient;
-use crate::util::rtt::{RttChannelConfig, RttConfig};
+use crate::util::rtt::{self, RttChannelConfig, RttConfig};
 use crate::util::{cargo::build_artifact, common_options::CargoOptions, logging};
-use crate::FormatOptions;
 
 #[derive(Debug, clap::Parser)]
 #[clap(
@@ -71,8 +71,8 @@ struct CliOptions {
     cargo_options: CargoOptions,
 }
 
-pub fn main(args: &[OsString], offset: UtcOffset) {
-    match main_try(args, offset) {
+pub async fn main(args: &[OsString], offset: UtcOffset) {
+    match main_try(args, offset).await {
         Ok(_) => (),
         Err(e) => {
             // Ensure stderr is flushed before calling proces::exit,
@@ -107,7 +107,7 @@ pub fn main(args: &[OsString], offset: UtcOffset) {
     }
 }
 
-fn main_try(args: &[OsString], offset: UtcOffset) -> Result<()> {
+async fn main_try(args: &[OsString], offset: UtcOffset) -> Result<()> {
     // Parse the commandline options.
     let opt = CliOptions::parse_from(args);
 
@@ -138,10 +138,13 @@ fn main_try(args: &[OsString], offset: UtcOffset) -> Result<()> {
 
     let _log_guard = setup_logging(None, config.general.log_level);
 
+    let mut registry = Registry::from_builtin_families();
+
     // Make sure we load the config given in the cli parameters.
     for cdp in &config.general.chip_descriptions {
-        let file = File::open(Path::new(cdp))?;
-        probe_rs::config::add_target_from_yaml(file)
+        let file = std::fs::read_to_string(Path::new(cdp))?;
+        registry
+            .add_target_family_from_yaml(&file)
             .with_context(|| format!("failed to load the chip description from {cdp}"))?;
     }
     let image_instr_set;
@@ -150,7 +153,7 @@ fn main_try(args: &[OsString], offset: UtcOffset) -> Result<()> {
         path_buf.clone()
     } else {
         let cargo_options = opt.cargo_options.to_cargo_options();
-        image_instr_set = target_instruction_set(opt.cargo_options.target.clone());
+        image_instr_set = target_instruction_set(opt.cargo_options.target.as_deref());
 
         // Build the project, and extract the path of the built artifact.
         build_artifact(&work_dir, &cargo_options)?.path().into()
@@ -212,13 +215,14 @@ fn main_try(args: &[OsString], offset: UtcOffset) -> Result<()> {
     };
 
     let lister = Lister::new();
-    let (mut session, probe_options) = match probe_options.simple_attach(&lister) {
+    let (mut session, probe_options) = match probe_options.simple_attach(&mut registry, &lister) {
         Ok((session, probe_options)) => (session, probe_options),
 
         Err(OperationError::MultipleProbesFound { list }) => {
             use std::fmt::Write;
 
-            return Err(anyhow!("The following devices were found:\n \
+            return Err(anyhow!(
+                "The following devices were found:\n \
                     {} \
                         \
                     Use '--probe VID:PID'\n \
@@ -226,7 +230,13 @@ fn main_try(args: &[OsString], offset: UtcOffset) -> Result<()> {
                     You can also set the [default.probe] config attribute \
                     (in your Embed.toml) to select which probe to use. \
                     For usage examples see https://github.com/probe-rs/probe-rs/blob/master/probe-rs-tools/src/bin/probe-rs/cmd/cargo_embed/config/default.toml .",
-                    list.iter().enumerate().fold(String::new(), |mut s, (num, link)| { let _ = writeln!(s, "[{num}]: {link}"); s })));
+                list.iter()
+                    .enumerate()
+                    .fold(String::new(), |mut s, (num, link)| {
+                        let _ = writeln!(s, "[{num}]: {link}");
+                        s
+                    })
+            ));
         }
         Err(OperationError::AttachingFailed {
             source,
@@ -237,31 +247,38 @@ fn main_try(args: &[OsString], offset: UtcOffset) -> Result<()> {
                 tracing::info!(
                     "A hard reset during attaching might help. This will reset the entire chip."
                 );
-                tracing::info!("Set `general.connect_under_reset` in your cargo-embed configuration file to enable this feature.");
+                tracing::info!(
+                    "Set `general.connect_under_reset` in your cargo-embed configuration file to enable this feature."
+                );
             }
             return Err(source).context("failed attaching to target");
         }
         Err(e) => return Err(e.into()),
     };
 
-    let format = FormatOptions::default().to_format_kind(session.target());
+    let format = FormatKind::from(FormatOptions::default().to_format_kind(session.target()));
     let elf = if matches!(format, FormatKind::Elf | FormatKind::Idf) {
         Some(fs::read(&path)?)
     } else {
         None
     };
-    let rtt_client = RttClient::new(
-        elf.as_deref(),
-        session.target(),
-        create_rtt_config(&config).clone(),
-        ScanRegion::Ram,
-    )?;
+
+    let scan = if let Some(ref elf) = elf {
+        match rtt::get_rtt_symbol_from_bytes(elf) {
+            Ok(address) => ScanRegion::Exact(address),
+            // Do not scan the memory for the control block.
+            _ => ScanRegion::Ranges(vec![]),
+        }
+    } else {
+        ScanRegion::Ram
+    };
+
+    let mut rtt_client = RttClient::new(create_rtt_config(&config).clone(), scan);
 
     // FIXME: we should probably figure out in a different way which core we can work with.
     // It seems arbitrary that we reset the target using the same core we use for polling RTT.
     let core_id = rtt_client.core_id();
 
-    let mut should_clear_rtt_header = true;
     if config.flashing.enabled {
         let download_options = BinaryDownloadOptions {
             disable_progressbars: opt.disable_progressbars,
@@ -274,14 +291,7 @@ fn main_try(args: &[OsString], offset: UtcOffset) -> Result<()> {
         let format_options = FormatOptions::default();
         let loader = build_loader(&mut session, &path, format_options, image_instr_set)?;
 
-        // When using RTT with a program in flash, the RTT header will be moved to RAM on
-        // startup, so clearing it before startup is ok. However, if we're downloading to the
-        // header's final address in RAM, then it's not relocated on startup and we should not
-        // clear it. This impacts static RTT headers, like used in defmt_rtt.
-        if let ScanRegion::Exact(address) = rtt_client.scan_region {
-            should_clear_rtt_header = !loader.has_data_for_address(address);
-            tracing::debug!("RTT ScanRegion::Exact address is within region to be flashed")
-        }
+        rtt_client.configure_from_loader(&loader);
 
         let boot_info = loader.boot_info();
 
@@ -314,6 +324,11 @@ fn main_try(args: &[OsString], offset: UtcOffset) -> Result<()> {
             .reset_and_halt(Duration::from_millis(100))?;
     }
 
+    if config.flashing.enabled || config.reset.enabled {
+        let mut core = session.core(core_id)?;
+        rtt_client.clear_control_block(&mut core)?;
+    }
+
     let session = Arc::new(FairMutex::new(session));
 
     let mut gdb_thread_handle = None;
@@ -337,7 +352,7 @@ fn main_try(args: &[OsString], offset: UtcOffset) -> Result<()> {
                 GdbInstanceConfiguration::from_session(&session, Some(gdb_connection_string))
             };
 
-            if let Err(e) = probe_rs::gdb_server::run(&session, instances.iter()) {
+            if let Err(e) = crate::cmd::gdb_server::run(&session, instances.iter(), None) {
                 logging::eprintln("During the execution of GDB an error was encountered:");
                 logging::eprintln(format!("{e:?}"));
             }
@@ -346,14 +361,7 @@ fn main_try(args: &[OsString], offset: UtcOffset) -> Result<()> {
 
     if config.rtt.enabled {
         // GDB is also using the session, so we do not lock on the outside.
-        run_rttui_app(
-            name,
-            &session,
-            config,
-            offset,
-            should_clear_rtt_header,
-            rtt_client,
-        )?;
+        run_rttui_app(name, elf, &session, config, offset, rtt_client).await?;
     } else if should_resume_core(&config) {
         // If we don't run the app, we have to resume the core somewhere else.
         let mut session_handle = session.lock();
@@ -385,22 +393,19 @@ fn should_resume_core(config: &config::Config) -> bool {
     }
 }
 
-fn run_rttui_app(
+#[expect(
+    clippy::await_holding_lock,
+    reason = "session_handle is locked in accordance with main loop's alternating pattern"
+)]
+async fn run_rttui_app(
     name: &str,
+    elf: Option<Vec<u8>>,
     session: &FairMutex<Session>,
     config: config::Config,
     timezone_offset: UtcOffset,
-    should_clear_rtt_header: bool,
     mut client: RttClient,
 ) -> anyhow::Result<()> {
     let core_id = client.core_id();
-
-    if (config.flashing.enabled || config.reset.enabled) && should_clear_rtt_header {
-        let mut session_handle = session.lock();
-        let mut core = session_handle.core(core_id)?;
-
-        client.clear_control_block(&mut core)?;
-    }
 
     if should_resume_core(&config) {
         let mut session_handle = session.lock();
@@ -453,8 +458,11 @@ fn run_rttui_app(
         / 1_000_000;
 
     let logname = format!("{name}_{chip_name}_{timestamp_millis}");
-    let mut app = rttui::app::App::new(rtt, config, logname)?;
+    let mut app = rttui::app::App::new(rtt, elf, config, timezone_offset, logname)?;
     loop {
+        // This main loop alternates between giving the GUI a chance to update (`app.render()`) and
+        // accesses to the probe (`session.lock()`, `channel.borrow_mut()` in poll_rtt).
+
         app.render();
 
         {
@@ -466,10 +474,10 @@ fn run_rttui_app(
                 break;
             }
 
-            app.poll_rtt(&mut core)?;
+            app.poll_rtt(&mut core).await?;
         }
 
-        thread::sleep(Duration::from_millis(10));
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
     let mut session_handle = session.lock();

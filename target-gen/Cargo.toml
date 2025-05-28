@@ -16,10 +16,10 @@ publish.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-probe-rs = { path = "../probe-rs", version = "0.26.0", package = "probe-rs-nordic" }
-probe-rs-target = { path = "../probe-rs-target", version = "0.26.0", default-features = false, package = "probe-rs-target-nordic" }
-cmsis-pack = "0.7.0"
-jep106 = "0.2.8"
+probe-rs = { path = "../probe-rs", version = "0.28.0", package = "probe-rs-nordic" }
+probe-rs-target = { path = "../probe-rs-target", version = "0.28.0", default-features = false, package = "probe-rs-target-nordic" }
+cmsis-pack = "0.7.1"
+jep106 = "0.3.0"
 goblin = { version = "0.9.0", default-features = false, features = [
     "elf32",
     "elf64",
@@ -38,7 +38,7 @@ zip = { version = "2.0.0", default-features = false, features = [
     "zstd",
 ] }
 clap = { version = "4.5", features = ["derive"] }
-colored = "2"
+colored = "3"
 anyhow.workspace = true
 reqwest = { version = "0.12.4", features = [
     "json",
@@ -51,7 +51,7 @@ tracing-subscriber = { version = "0.3.18", features = [
     "tracing-log",
 ] }
 xshell = { version = "0.2", default-features = false }
-parse_int = "0.6"
+parse_int = "0.9"
 
 [dev-dependencies]
 tempfile = "3.0"

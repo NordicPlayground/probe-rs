@@ -1,23 +1,26 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use probe_rs::Core;
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     crossterm::{
         event::{self, KeyCode, KeyEventKind},
         execute,
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     widgets::{Block, Borders, List, Paragraph, Tabs},
-    Terminal,
 };
 use std::{cell::RefCell, io::Write, rc::Rc};
 use std::{path::PathBuf, sync::mpsc::TryRecvError};
+use time::UtcOffset;
 
 use crate::{
     cmd::cargo_embed::rttui::{channel::ChannelData, tab::TabConfig},
-    util::rtt::client::RttClient,
+    util::rtt::{
+        DataFormat, DefmtProcessor, DefmtState, RttChannelConfig, RttDecoder, client::RttClient,
+    },
 };
 
 use super::super::config;
@@ -38,13 +41,28 @@ pub struct App {
 
     current_height: usize,
 
+    // The configured channels are shared with the tabs; this works with no synchronization other
+    // than RefCell because the cargo-embed main loop runs the `.render()` step and the
+    // `.poll_rtt()` step in alternation.
     up_channels: Vec<Rc<RefCell<UpChannel>>>,
 
     client: RttClient,
 }
 
 impl App {
-    pub fn new(client: RttClient, config: config::Config, logname: String) -> Result<Self> {
+    pub fn new(
+        client: RttClient,
+        elf: Option<Vec<u8>>,
+        config: config::Config,
+        timestamp_offset: UtcOffset,
+        logname: String,
+    ) -> Result<Self> {
+        let defmt_data = if let Some(elf) = elf {
+            DefmtState::try_from_bytes(&elf)?
+        } else {
+            None
+        };
+
         let mut tab_config = config.rtt.tabs;
 
         // Create channel states
@@ -65,15 +83,55 @@ impl App {
                 });
             }
 
-            // Is a TCP publish address configured?
-            let stream = config
+            let channel_config = config
                 .rtt
                 .up_channels
                 .iter()
                 .find(|up_config| up_config.channel == number)
-                .and_then(|up_config| up_config.socket);
+                .cloned()
+                .unwrap_or_default();
 
-            up_channels.push(Rc::new(RefCell::new(UpChannel::new(up, stream))));
+            // Where `channel_config` is unspecified, apply default from `default_channel_config`.
+            // TODO: this logic is duplicated in `create_rtt_config` - which function probably
+            // should be removed.
+            let default_channel_config = RttChannelConfig::default();
+            let channel_format = if up.channel_name() == "defmt" {
+                DataFormat::Defmt
+            } else {
+                channel_config
+                    .format
+                    .unwrap_or(default_channel_config.data_format)
+            };
+
+            let data_format = match channel_format {
+                DataFormat::String => RttDecoder::String {
+                    timestamp_offset: Some(timestamp_offset),
+                    last_line_done: false,
+                },
+                DataFormat::BinaryLE => RttDecoder::BinaryLE,
+                DataFormat::Defmt if defmt_data.is_none() => {
+                    tracing::warn!("Defmt data not found in ELF file");
+                    continue;
+                }
+                DataFormat::Defmt => RttDecoder::Defmt {
+                    processor: DefmtProcessor::new(
+                        defmt_data.clone().unwrap(),
+                        channel_config
+                            .show_timestamps
+                            .unwrap_or(default_channel_config.show_timestamps),
+                        channel_config
+                            .show_location
+                            .unwrap_or(default_channel_config.show_location),
+                        channel_config.log_format.as_deref(),
+                    ),
+                },
+            };
+
+            up_channels.push(Rc::new(RefCell::new(UpChannel::new(
+                up,
+                data_format,
+                channel_config.socket,
+            ))));
         }
 
         for down in client.down_channels() {
@@ -83,7 +141,7 @@ impl App {
                 .any(|tab| tab.down_channel == Some(number))
             {
                 tab_config.push(TabConfig {
-                    up_channel: if up_channels.len() > number {
+                    up_channel: if up_channels.len() as u32 > number {
                         number
                     } else {
                         0
@@ -103,7 +161,7 @@ impl App {
             if tab.hide {
                 continue;
             }
-            let Some(up_channel) = up_channels.get(tab.up_channel) else {
+            let Some(up_channel) = up_channels.get(tab.up_channel as usize) else {
                 tracing::warn!(
                     "Configured up channel {} does not exist, skipping tab",
                     tab.up_channel
@@ -239,9 +297,16 @@ impl App {
     }
 
     /// Polls the RTT target for new data on all channels.
-    pub fn poll_rtt(&mut self, core: &mut Core) -> Result<()> {
+    #[expect(
+        clippy::await_holding_refcell_ref,
+        reason = "Main loop alternates between GUI and channel polling accesses"
+    )]
+    pub async fn poll_rtt(&mut self, core: &mut Core<'_>) -> Result<()> {
         for channel in self.up_channels.iter_mut() {
-            channel.borrow_mut().poll_rtt(core, &mut self.client)?;
+            channel
+                .borrow_mut()
+                .poll_rtt(core, &mut self.client)
+                .await?;
         }
 
         Ok(())

@@ -37,7 +37,7 @@ thiserror.workspace = true
 probe-rs-target.workspace = true
 
 bincode = { version = "1", optional = true }
-bitfield = "0.17"
+bitfield = "0.18.0"
 bitvec = "1"
 hidapi = { version = "2", default-features = false, features = [
     "linux-native",
@@ -94,7 +94,7 @@ pretty_assertions = "1"
 test-case = "3"
 test-log = { version = "0.2.16", features = ["trace"] }
 termtree = "0.5"
-insta = { version = "1.38", default-features = false, features = ["yaml"] }
+insta = { version = "1.38", default-features = false }
 
 [[package.metadata.release.pre-release-replacements]]
 file = "../CHANGELOG.md"

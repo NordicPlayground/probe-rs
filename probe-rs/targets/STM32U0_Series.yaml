@@ -13,7 +13,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -42,7 +42,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -70,7 +70,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -98,7 +98,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -126,7 +126,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -152,7 +152,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: Flash
@@ -184,7 +184,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: Flash
@@ -218,7 +218,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -246,7 +246,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -275,7 +275,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -304,7 +304,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -333,7 +333,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -358,13 +358,11 @@ variants:
   package_variants:
   - STM32U073C8Tx
   - STM32U073C8Ux
-  - STM32U073C8Ux
-  - STM32U073C8Tx
   cores:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -389,12 +387,11 @@ variants:
   package_variants:
   - STM32U073CBTx
   - STM32U073CBUx
-  - STM32U073CBTx
   cores:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -423,7 +420,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -449,7 +446,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: Flash
@@ -481,7 +478,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: Flash
@@ -513,7 +510,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: Flash
@@ -543,12 +540,11 @@ variants:
 - name: STM32U073K8
   package_variants:
   - STM32U073K8Ux
-  - STM32U073K8Ux
   cores:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -572,12 +568,11 @@ variants:
 - name: STM32U073KB
   package_variants:
   - STM32U073KBUx
-  - STM32U073KBUx
   cores:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -605,7 +600,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -630,13 +625,11 @@ variants:
   package_variants:
   - STM32U073M8Tx
   - STM32U073M8Ix
-  - STM32U073M8Ix
-  - STM32U073M8Tx
   cores:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -661,13 +654,11 @@ variants:
   package_variants:
   - STM32U073MBTx
   - STM32U073MBIx
-  - STM32U073MBIx
-  - STM32U073MBTx
   cores:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -696,7 +687,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -721,13 +712,11 @@ variants:
   package_variants:
   - STM32U073R8Tx
   - STM32U073R8Ix
-  - STM32U073R8Ix
-  - STM32U073R8Tx
   cores:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -752,13 +741,11 @@ variants:
   package_variants:
   - STM32U073RBTx
   - STM32U073RBIx
-  - STM32U073RBIx
-  - STM32U073RBTx
   cores:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -787,7 +774,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -816,7 +803,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -842,7 +829,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: Flash
@@ -876,7 +863,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -905,7 +892,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -934,7 +921,7 @@ variants:
   - name: main
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1

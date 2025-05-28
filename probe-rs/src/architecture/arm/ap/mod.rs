@@ -1,22 +1,40 @@
-//! Types and functions for interacting with access ports.
+//! Defines types and registers for ADIv5 and ADIv6 access ports (APs).
 
-#[macro_use]
-pub mod register_generation;
 pub(crate) mod generic_ap;
 pub(crate) mod memory_ap;
+mod registers;
+pub mod v1;
+pub mod v2;
 
+pub use generic_ap::GenericAp;
 pub use memory_ap::MemoryAp;
 pub use memory_ap::MemoryApType;
+pub(crate) use registers::define_ap_register;
+pub use registers::{BASE, BASE2, BD0, BD1, BD2, BD3, CFG, CSW, DRW, IDR, MBT, TAR, TAR2};
 
-use crate::architecture::arm::dp::DebugPortError;
+use crate::architecture::arm::{
+    ArmError, DapAccess, DebugPortError, FullyQualifiedApAddress, RegisterParseError,
+};
+
 use crate::probe::DebugProbeError;
 
-pub use generic_ap::{ApClass, ApType, IDR};
-
-use super::{
-    communication_interface::RegisterParseError, ArmError, DapAccess, DpAddress,
-    FullyQualifiedApAddress, Register,
-};
+/// Sum-type of the Memory Access Ports.
+#[derive(Debug)]
+pub enum AccessPort {
+    /// Any memory Access Port.
+    // TODO: Allow each memory by types to be specialised with there specific feature
+    MemoryAp(memory_ap::MemoryAp),
+    /// Other Access Ports not used for memory accesses.
+    Other(GenericAp),
+}
+impl AccessPortType for AccessPort {
+    fn ap_address(&self) -> &FullyQualifiedApAddress {
+        match self {
+            AccessPort::MemoryAp(mem_ap) => mem_ap.ap_address(),
+            AccessPort::Other(o) => o.ap_address(),
+        }
+    }
+}
 
 /// Some error during AP handling occurred.
 #[derive(Debug, thiserror::Error)]
@@ -25,7 +43,7 @@ pub enum AccessPortError {
     #[error("Failed to read register {name} at address {address:#04x}")]
     RegisterRead {
         /// The address of the register.
-        address: u8,
+        address: u64,
         /// The name if the register.
         name: &'static str,
         /// The underlying root error of this access error.
@@ -36,7 +54,7 @@ pub enum AccessPortError {
     #[error("Failed to write register {name} at address {address:#04x}")]
     RegisterWrite {
         /// The address of the register.
-        address: u8,
+        address: u64,
         /// The name if the register.
         name: &'static str,
         /// The underlying root error of this access error.
@@ -57,7 +75,7 @@ pub enum AccessPortError {
 
 impl AccessPortError {
     /// Constructs a [`AccessPortError::RegisterRead`] from just the source error and the register type.
-    pub fn register_read_error<R: Register, E: std::error::Error + Send + Sync + 'static>(
+    pub fn register_read_error<R: ApRegister, E: std::error::Error + Send + Sync + 'static>(
         source: E,
     ) -> Self {
         AccessPortError::RegisterRead {
@@ -68,7 +86,7 @@ impl AccessPortError {
     }
 
     /// Constructs a [`AccessPortError::RegisterWrite`] from just the source error and the register type.
-    pub fn register_write_error<R: Register, E: std::error::Error + Send + Sync + 'static>(
+    pub fn register_write_error<R: ApRegister, E: std::error::Error + Send + Sync + 'static>(
         source: E,
     ) -> Self {
         AccessPortError::RegisterWrite {
@@ -80,11 +98,9 @@ impl AccessPortError {
 }
 
 /// A trait to be implemented by ports types providing access to a register.
-pub trait ApRegAccess<Reg: Register>: AccessPortType {}
+pub trait ApRegAccess<Reg: ApRegister>: AccessPortType {}
 
 /// A trait to be implemented on access port types.
-///
-/// Use the [`define_ap!`] macro to implement this.
 pub trait AccessPortType {
     /// Returns the address of the access port.
     fn ap_address(&self) -> &FullyQualifiedApAddress;
@@ -96,7 +112,7 @@ pub trait ApAccess {
     fn read_ap_register<PORT, R>(&mut self, port: &PORT) -> Result<R, ArmError>
     where
         PORT: AccessPortType + ApRegAccess<R> + ?Sized,
-        R: Register;
+        R: ApRegister;
 
     /// Read a register of the access port using a block transfer.
     /// This can be used to read multiple values from the same register.
@@ -107,13 +123,13 @@ pub trait ApAccess {
     ) -> Result<(), ArmError>
     where
         PORT: AccessPortType + ApRegAccess<R> + ?Sized,
-        R: Register;
+        R: ApRegister;
 
     /// Write a register of the access port.
     fn write_ap_register<PORT, R>(&mut self, port: &PORT, register: R) -> Result<(), ArmError>
     where
         PORT: AccessPortType + ApRegAccess<R> + ?Sized,
-        R: Register;
+        R: ApRegister;
 
     /// Write a register of the access port using a block transfer.
     /// This can be used to write multiple values to the same register.
@@ -124,7 +140,7 @@ pub trait ApAccess {
     ) -> Result<(), ArmError>
     where
         PORT: AccessPortType + ApRegAccess<R> + ?Sized,
-        R: Register;
+        R: ApRegister;
 }
 
 impl<T: DapAccess> ApAccess for T {
@@ -132,7 +148,7 @@ impl<T: DapAccess> ApAccess for T {
     fn read_ap_register<PORT, R>(&mut self, port: &PORT) -> Result<R, ArmError>
     where
         PORT: AccessPortType + ApRegAccess<R> + ?Sized,
-        R: Register,
+        R: ApRegister,
     {
         let raw_value = self.read_raw_ap_register(port.ap_address(), R::ADDRESS)?;
 
@@ -146,7 +162,7 @@ impl<T: DapAccess> ApAccess for T {
     fn write_ap_register<PORT, R>(&mut self, port: &PORT, register: R) -> Result<(), ArmError>
     where
         PORT: AccessPortType + ApRegAccess<R> + ?Sized,
-        R: Register,
+        R: ApRegister,
     {
         tracing::debug!("Writing AP register {}, value={:x?}", R::NAME, register);
         self.write_raw_ap_register(port.ap_address(), R::ADDRESS, register.into())
@@ -160,7 +176,7 @@ impl<T: DapAccess> ApAccess for T {
     ) -> Result<(), ArmError>
     where
         PORT: AccessPortType + ApRegAccess<R> + ?Sized,
-        R: Register,
+        R: ApRegister,
     {
         tracing::debug!(
             "Writing register {}, block with len={} words",
@@ -177,7 +193,7 @@ impl<T: DapAccess> ApAccess for T {
     ) -> Result<(), ArmError>
     where
         PORT: AccessPortType + ApRegAccess<R> + ?Sized,
-        R: Register,
+        R: ApRegister,
     {
         tracing::debug!(
             "Reading register {}, block with len={} words",
@@ -189,112 +205,173 @@ impl<T: DapAccess> ApAccess for T {
     }
 }
 
-/// Determine if an AP exists with the given AP number.
+/// The unit of data that is transferred in one transfer via the DRW commands.
 ///
-/// The test is performed by reading the IDR register, and checking if the register is non-zero.
+/// This can be configured with the CSW command.
 ///
-/// Can fail silently under the hood testing an ap that doesn't exist and would require cleanup.
-pub fn access_port_is_valid<AP>(
-    debug_port: &mut AP,
-    access_port: &FullyQualifiedApAddress,
-) -> Option<IDR>
-where
-    AP: DapAccess,
-{
-    let idr_result: Result<IDR, _> = debug_port
-        .read_raw_ap_register(access_port, IDR::ADDRESS)
-        .and_then(|idr| Ok(IDR::try_from(idr)?));
-
-    match idr_result {
-        Ok(idr) if u32::from(idr) != 0 => Some(idr),
-        Ok(_) => {
-            tracing::debug!("AP {} is not valid, IDR = 0", access_port.ap());
-            None
-        }
-        Err(e) => {
-            tracing::debug!(
-                "Error reading IDR register from AP {}: {}",
-                access_port.ap(),
-                e
-            );
-            None
-        }
-    }
+/// ALL MCUs support `U32`. All other transfer sizes are optionally implemented.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DataSize {
+    /// 1 byte transfers are supported.
+    U8 = 0b000,
+    /// 2 byte transfers are supported.
+    U16 = 0b001,
+    /// 4 byte transfers are supported.
+    #[default]
+    U32 = 0b010,
+    /// 8 byte transfers are supported.
+    U64 = 0b011,
+    /// 16 byte transfers are supported.
+    U128 = 0b100,
+    /// 32 byte transfers are supported.
+    U256 = 0b101,
 }
 
-/// Sum-type of the Memory Access Ports.
-#[derive(Debug)]
-pub enum AccessPort {
-    /// Any memory Access Port.
-    // TODO: Allow each memory by types to be specialised with there specific feature
-    MemoryAp(memory_ap::MemoryAp),
-    /// Other Access Ports not used for memory accesses.
-    Other(GenericAp),
-}
-impl AccessPortType for AccessPort {
-    fn ap_address(&self) -> &FullyQualifiedApAddress {
+impl DataSize {
+    pub(crate) fn to_byte_count(self) -> usize {
         match self {
-            AccessPort::MemoryAp(mem_ap) => mem_ap.ap_address(),
-            AccessPort::Other(o) => o.ap_address(),
+            DataSize::U8 => 1,
+            DataSize::U16 => 2,
+            DataSize::U32 => 4,
+            DataSize::U64 => 8,
+            DataSize::U128 => 16,
+            DataSize::U256 => 32,
         }
     }
 }
 
-/// Return a Vec of all valid access ports found that the target connected to the debug_probe.
-/// Can fail silently under the hood testing an ap that doesn't exist and would require cleanup.
-#[tracing::instrument(skip(debug_port))]
-pub(crate) fn valid_access_ports<DP>(
-    debug_port: &mut DP,
-    dp: DpAddress,
-) -> Vec<FullyQualifiedApAddress>
-where
-    DP: DapAccess,
-{
-    valid_access_ports_allowlist(debug_port, dp, 0..=255)
+/// Invalid data size.
+pub struct InvalidDataSizeError;
+
+impl TryFrom<u8> for DataSize {
+    type Error = InvalidDataSizeError;
+    fn try_from(value: u8) -> Result<Self, InvalidDataSizeError> {
+        match value {
+            0b000 => Ok(DataSize::U8),
+            0b001 => Ok(DataSize::U16),
+            0b010 => Ok(DataSize::U32),
+            0b011 => Ok(DataSize::U64),
+            0b100 => Ok(DataSize::U128),
+            0b101 => Ok(DataSize::U256),
+            _ => Err(InvalidDataSizeError),
+        }
+    }
 }
 
-/// Return a Vec of all valid access ports found that the target connected to the debug_probe.
-/// The search is limited to `allowed_aps`.
+/// The increment to the TAR that is performed after each DRW read or write.
 ///
-/// Can fail silently under the hood testing an ap that doesn't exist and would require cleanup.
-#[tracing::instrument(skip(debug_port, allowed_aps))]
-pub(crate) fn valid_access_ports_allowlist<DP>(
-    debug_port: &mut DP,
-    dp: DpAddress,
-    allowed_aps: impl IntoIterator<Item = u8>,
-) -> Vec<FullyQualifiedApAddress>
-where
-    DP: DapAccess,
-{
-    allowed_aps
-        .into_iter()
-        .map_while(|ap| {
-            let ap = FullyQualifiedApAddress::v1_with_dp(dp, ap);
-            access_port_is_valid(debug_port, &ap).map(|_| ap)
-        })
-        .collect()
+/// This can be used to avoid successive TAR transfers for writes of consecutive addresses.
+/// This will effectively save half the bandwidth!
+///
+/// Can be configured in the CSW.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AddressIncrement {
+    /// No increments are happening after the DRW access. TAR always stays the same.
+    /// Always supported.
+    Off = 0b00,
+    /// Increments the TAR by the size of the access after each DRW access.
+    /// Always supported.
+    #[default]
+    Single = 0b01,
+    /// Enables packed access to the DRW (see C2.2.7).
+    /// Only available if sub-word access is supported by the core.
+    Packed = 0b10,
 }
 
-/// Tries to find the first AP with the given idr value, returns `None` if there isn't any
-pub fn get_ap_by_idr<AP, P>(debug_port: &mut AP, dp: DpAddress, f: P) -> Option<GenericAp>
-where
-    AP: ApAccess,
-    P: Fn(IDR) -> bool,
-{
-    (0..=255)
-        .map(|ap| GenericAp::new(FullyQualifiedApAddress::v1_with_dp(dp, ap)))
-        .find(|ap| {
-            if let Ok(idr) = debug_port.read_ap_register(ap) {
-                f(idr)
-            } else {
-                false
-            }
-        })
+impl AddressIncrement {
+    /// Create a new `AddressIncrement` from a u8.
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0b00 => Some(AddressIncrement::Off),
+            0b01 => Some(AddressIncrement::Single),
+            0b10 => Some(AddressIncrement::Packed),
+            _ => None,
+        }
+    }
 }
 
-define_ap!(
-    /// A generic access port which implements just the register every access port has to implement
-    /// to be compliant with the ADI 5.2 specification.
-    GenericAp
-);
-impl ApRegAccess<IDR> for GenericAp {}
+/// The format of the BASE register (see C2.6.1).
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Default)]
+pub enum BaseAddrFormat {
+    /// The legacy format of very old cores. Very little cores use this.
+    #[default]
+    Legacy = 0,
+    /// The format all newer MCUs use.
+    ADIv5 = 1,
+}
+
+/// Describes the class of an access port defined in the [`ARM Debug Interface v5.2`](https://developer.arm.com/documentation/ihi0031/f/?lang=en) specification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApClass {
+    /// This describes a custom AP that is vendor defined and not defined by ARM
+    #[default]
+    Undefined = 0b0000,
+    /// The standard ARM COM-AP defined in the [`ARM Debug Interface v5.2`](https://developer.arm.com/documentation/ihi0031/f/?lang=en) specification.
+    ComAp = 0b0001,
+    /// The standard ARM MEM-AP defined  in the [`ARM Debug Interface v5.2`](https://developer.arm.com/documentation/ihi0031/f/?lang=en) specification
+    MemAp = 0b1000,
+}
+
+impl ApClass {
+    /// Tries to create an `ApClass` from a given `u8`.
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0b0000 => Some(ApClass::Undefined),
+            0b0001 => Some(ApClass::ComAp),
+            0b1000 => Some(ApClass::MemAp),
+            _ => None,
+        }
+    }
+}
+
+/// The type of AP defined in the [`ARM Debug Interface v5.2`](https://developer.arm.com/documentation/ihi0031/f/?lang=en) specification.
+/// You can find the details in the table C1-2 on page C1-146.
+/// The different types correspond to the different access/memory buses of ARM cores.
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ApType {
+    /// This is the most basic AP that is included in most MCUs and uses SWD or JTAG as an access bus.
+    #[default]
+    JtagComAp = 0x0,
+    /// A AMBA based AHB3 AP (see E1.5).
+    AmbaAhb3 = 0x1,
+    /// A AMBA based APB2 and APB3 AP (see E1.8).
+    AmbaApb2Apb3 = 0x2,
+    /// A AMBA based AXI3 and AXI4 AP (see E1.2).
+    AmbaAxi3Axi4 = 0x4,
+    /// A AMBA based AHB5 AP (see E1.6).
+    AmbaAhb5 = 0x5,
+    /// A AMBA based APB4 and APB5 AP (see E1.9).
+    AmbaApb4Apb5 = 0x6,
+    /// A AMBA based AXI5 AP (see E1.4).
+    AmbaAxi5 = 0x7,
+    /// A AMBA based AHB5 AP with enhanced HPROT (see E1.7).
+    AmbaAhb5Hprot = 0x8,
+}
+
+impl ApType {
+    /// Tries to create an `ApType` from a given `u8`.
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0x0 => Some(ApType::JtagComAp),
+            0x1 => Some(ApType::AmbaAhb3),
+            0x2 => Some(ApType::AmbaApb2Apb3),
+            0x4 => Some(ApType::AmbaAxi3Axi4),
+            0x5 => Some(ApType::AmbaAhb5),
+            0x6 => Some(ApType::AmbaApb4Apb5),
+            0x7 => Some(ApType::AmbaAxi5),
+            0x8 => Some(ApType::AmbaAhb5Hprot),
+            _ => None,
+        }
+    }
+}
+/// Base trait for all versions of access port registers
+pub trait ApRegister:
+    Clone + TryFrom<u32, Error = RegisterParseError> + Into<u32> + Sized + std::fmt::Debug
+{
+    /// The address of the register (in bytes).
+    const ADDRESS: u64;
+
+    /// The name of the register as string.
+    const NAME: &'static str;
+}

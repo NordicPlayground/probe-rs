@@ -3,15 +3,16 @@ use std::{sync::Arc, time::Instant};
 
 use crate::{
     architecture::arm::{
-        ap::memory_ap::registers::CSW, sequences::ArmDebugSequence, ArmError,
-        FullyQualifiedApAddress, Register,
+        ap::{ApRegister, CSW},
+        sequences::ArmDebugSequence,
+        ArmError, FullyQualifiedApAddress,
     },
     session::MissingPermissions,
 };
 
-const RESET: u8 = 0;
-const ERASEALL: u8 = 0x04;
-const ERASEALLSTATUS: u8 = 0x08;
+const RESET: u64 = 0;
+const ERASEALL: u64 = 0x04;
+const ERASEALLSTATUS: u64 = 0x08;
 
 /// The sequence handle for the nRF5340.
 

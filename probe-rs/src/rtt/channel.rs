@@ -212,11 +212,11 @@ impl Channel {
             return Ok(None);
         };
 
-        let this = Channel {
+        let mut this = Channel {
             number,
             core_id: core.id(),
             metadata_ptr,
-            name: read_c_string(core, info.standard_name_pointer())?,
+            name: None,
             info,
             last_read_ptr: None,
         };
@@ -225,6 +225,8 @@ impl Channel {
         // We call read_pointers to validate that the channel pointers are in an expected range.
         // This should at least catch most cases where the control block is partially initialized.
         this.read_pointers(core, "")?;
+        // Read channel name just after the pointer was validated to be within an expected range.
+        this.name = read_c_string(core, this.info.standard_name_pointer())?;
         this.mode(core)?;
 
         Ok(Some(this))
@@ -295,10 +297,13 @@ impl Channel {
                 .filter_map(|mr| mr.as_ram_region())
                 .merge_consecutive()
                 .any(|rr| {
-                    rr.range.contains(&self.info.buffer_start_pointer())
-                        && rr.range.contains(
-                            &(self.info.buffer_start_pointer() + self.info.size_of_buffer()),
-                        )
+                    let start = self.info.buffer_start_pointer();
+                    let end = self.info.buffer_start_pointer() + self.info.size_of_buffer();
+
+                    // `end` points at one beyond the last byte, and so does `rr.range.end`. Since
+                    // `rr.range` is exclusive, `contains` will return `false` if `end` is equal to
+                    // `rr.range.end`.
+                    rr.range.contains(&start) && end <= rr.range.end
                 });
 
             if !buffer_fully_in_memory_region {

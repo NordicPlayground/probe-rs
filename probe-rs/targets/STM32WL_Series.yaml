@@ -14,11 +14,11 @@ variants:
   - name: cm4
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   - name: cm0p
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -57,11 +57,11 @@ variants:
   - name: cm4
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   - name: cm0p
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -100,11 +100,11 @@ variants:
   - name: cm4
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   - name: cm0p
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -143,11 +143,11 @@ variants:
   - name: cm4
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   - name: cm0p
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -186,11 +186,11 @@ variants:
   - name: cm4
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   - name: cm0p
     type: armv6m
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -229,7 +229,7 @@ variants:
   - name: main
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -255,8 +255,6 @@ variants:
       end: 0x20005000
     cores:
     - main
-  flash_algorithms:
-  #- stm32wlexx_128
 - name: STM32WLE4CB
   package_variants:
   - STM32WLE4CBUx
@@ -264,7 +262,7 @@ variants:
   - name: main
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -299,7 +297,7 @@ variants:
   - name: main
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -334,7 +332,7 @@ variants:
   - name: main
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -360,8 +358,6 @@ variants:
       end: 0x20005000
     cores:
     - main
-  flash_algorithms:
-  #- stm32wlexx_128
 - name: STM32WLE4JB
   package_variants:
   - STM32WLE4JBIx
@@ -369,7 +365,7 @@ variants:
   - name: main
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -404,7 +400,7 @@ variants:
   - name: main
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -439,7 +435,7 @@ variants:
   - name: main
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -465,8 +461,6 @@ variants:
       end: 0x20005000
     cores:
     - main
-  flash_algorithms:
-  #- stm32wlexx_128
 - name: STM32WLE5CB
   package_variants:
   - STM32WLE5CBUx
@@ -474,7 +468,7 @@ variants:
   - name: main
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -509,7 +503,7 @@ variants:
   - name: main
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -545,7 +539,7 @@ variants:
   - name: main
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -571,8 +565,6 @@ variants:
       end: 0x20005000
     cores:
     - main
-  flash_algorithms:
-  #- stm32wlexx_128
 - name: STM32WLE5JB
   package_variants:
   - STM32WLE5JBIx
@@ -580,7 +572,7 @@ variants:
   - name: main
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1
@@ -615,7 +607,7 @@ variants:
   - name: main
     type: armv7em
     core_access_options: !Arm
-      ap: 0
+      ap: !v1 0
   memory_map:
   - !Nvm
     name: BANK_1

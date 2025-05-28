@@ -35,7 +35,7 @@ bytesize = "1"
 capstone = "0.12"
 cargo_metadata = "0.19"
 clap = { version = "4", features = ["derive", "env"] }
-colored = "2"
+colored = "3"
 defmt-decoder = "0.4"
 directories = "5"
 dunce = "1"
@@ -79,7 +79,7 @@ ratatui = { version = "0.29.0", default-features = false, features = [
 ] }
 ansi-parser = "0.9.0"
 
-probe-rs = { version = "0.26.0", path = "../probe-rs", features = [
+probe-rs = { version = "0.27.0", path = "../probe-rs", features = [
     "gdb-server",
 ], package = "probe-rs-nordic" }
 parking_lot = "0.12.2"
@@ -91,7 +91,7 @@ zip = { version = "2.0.0", default-features = false, features = [
     "time",
 ] }
 urlencoding = "2"
-probe-rs-debug = { version = "0.26.0", path = "../probe-rs-debug" }
+probe-rs-debug = { version = "0.27.0", path = "../probe-rs-debug" }
 
 [build-dependencies]
 git-version = "0.3"

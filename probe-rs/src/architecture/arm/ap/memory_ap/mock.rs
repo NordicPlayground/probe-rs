@@ -1,17 +1,18 @@
 use crate::architecture::arm::{
     ap::{
-        memory_ap::{amba_ahb3::CSW, registers::CFG, AddressIncrement, DataSize, DRW, TAR},
-        ApClass, ApType, Register, IDR,
+        memory_ap::amba_ahb3::CSW, AddressIncrement, ApClass, ApRegister, ApType, DataSize, CFG,
+        DRW, IDR, TAR,
     },
     communication_interface::FlushableArmAccess,
-    ArmError, DapAccess, DpAddress,
+    dp::{DpAddress, DpRegisterAddress},
+    ArmError, DapAccess,
 };
 use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct MockMemoryAp {
     pub memory: Vec<u8>,
-    store: HashMap<u8, u32>,
+    store: HashMap<u64, u32>,
 }
 
 impl MockMemoryAp {
@@ -57,7 +58,11 @@ impl FlushableArmAccess for MockMemoryAp {
 }
 
 impl DapAccess for MockMemoryAp {
-    fn read_raw_dp_register(&mut self, _dp: DpAddress, _addr: u8) -> Result<u32, ArmError> {
+    fn read_raw_dp_register(
+        &mut self,
+        _dp: DpAddress,
+        _addr: DpRegisterAddress,
+    ) -> Result<u32, ArmError> {
         // Ignore for Tests
         Ok(0)
     }
@@ -65,7 +70,7 @@ impl DapAccess for MockMemoryAp {
     fn write_raw_dp_register(
         &mut self,
         _dp: DpAddress,
-        _addr: u8,
+        _addr: DpRegisterAddress,
         _value: u32,
     ) -> Result<(), ArmError> {
         Ok(())
@@ -74,7 +79,7 @@ impl DapAccess for MockMemoryAp {
     fn read_raw_ap_register(
         &mut self,
         _ap: &crate::architecture::arm::FullyQualifiedApAddress,
-        addr: u8,
+        addr: u64,
     ) -> Result<u32, ArmError> {
         let csw = self.store[&CSW::ADDRESS];
         let address = self.store[&TAR::ADDRESS];
@@ -145,7 +150,7 @@ impl DapAccess for MockMemoryAp {
     fn write_raw_ap_register(
         &mut self,
         _ap: &crate::architecture::arm::FullyQualifiedApAddress,
-        addr: u8,
+        addr: u64,
         value: u32,
     ) -> Result<(), ArmError> {
         tracing::debug!("Mock: Write {:x} to register {:x?}", value, &addr);

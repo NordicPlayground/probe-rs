@@ -1,45 +1,44 @@
 //! Types and functions for interacting with target memory.
 
-pub(crate) mod adi_v5_memory_interface;
+mod adi_memory_interface;
 pub mod romtable;
+
+pub(crate) use adi_memory_interface::ADIMemoryInterface;
 
 use crate::{memory::MemoryInterface, probe::DebugProbeError, CoreStatus};
 
 use super::{
-    ap::memory_ap::MemoryAp, communication_interface::Initialized, ArmCommunicationInterface,
-    ArmError,
+    communication_interface::SwdSequence, ArmError, ArmProbeInterface, DapAccess,
+    FullyQualifiedApAddress,
 };
-pub use romtable::{Component, ComponentId, CoresightComponent, PeripheralType};
+pub use romtable::{Component, ComponentId, CoresightComponent, PeripheralType, RomTable};
 
 /// An ArmMemoryInterface (ArmProbeInterface + MemoryAp)
 pub trait ArmMemoryInterface: ArmMemoryInterfaceShim {
-    /// The underlying MemoryAp.
-    fn ap(&mut self) -> &mut MemoryAp;
+    /// The underlying MemoryAp address.
+    fn fully_qualified_address(&self) -> FullyQualifiedApAddress;
 
     /// The underlying memory AP’s base address.
     fn base_address(&mut self) -> Result<u64, ArmError>;
 
-    /// The underlying `ArmCommunicationInterface` if this is an `ArmCommunicationInterface`.
-    fn get_arm_communication_interface(
-        &mut self,
-    ) -> Result<&mut ArmCommunicationInterface<Initialized>, DebugProbeError>;
+    /// Get this interface as a SwdSequence object.
+    fn get_swd_sequence(&mut self) -> Result<&mut dyn SwdSequence, DebugProbeError>;
 
-    /// The underlying `ArmCommunicationInterface` and memory AP if the probe interface is an
-    /// `ArmCommunicationInterface`.
-    fn try_as_parts(
-        &mut self,
-    ) -> Result<(&mut ArmCommunicationInterface<Initialized>, &mut MemoryAp), DebugProbeError>;
+    /// Get this interface as a [`ArmProbeInterface`] object.
+    fn get_arm_probe_interface(&mut self) -> Result<&mut dyn ArmProbeInterface, DebugProbeError>;
+
+    /// Get this interface as a [`DapAccess`] object.
+    fn get_dap_access(&mut self) -> Result<&mut dyn DapAccess, DebugProbeError>;
+
+    /// Get the current value of the CSW reflected in this probe.
+    fn generic_status(&mut self) -> Result<crate::architecture::arm::ap::CSW, ArmError>;
 
     /// Inform the probe of the [`CoreStatus`] of the chip/core attached to
     /// the probe.
     //
     // NOTE: this function should be infallible as it is usually only
     // a visual indication.
-    fn update_core_status(&mut self, state: CoreStatus) {
-        self.get_arm_communication_interface()
-            .map(|iface| iface.core_status_notification(state))
-            .ok();
-    }
+    fn update_core_status(&mut self, _state: CoreStatus) {}
 }
 
 /// Implementation detail to allow trait upcasting-like behaviour.

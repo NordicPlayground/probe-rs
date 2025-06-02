@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.28.0+nordic"
+version = "0.29.0+nordic"
 edition = "2024"
 
 documentation = "https://docs.rs/probe-rs/"
@@ -26,8 +26,8 @@ members = [
 exclude = ["probe-rs/tests/gpio-hal-blinky"]
 
 [workspace.dependencies]
-probe-rs = { path = "probe-rs", version = "0.28.0", package = "probe-rs-nordic" }
-probe-rs-target = { path = "probe-rs-target", version = "0.28.0", package = "probe-rs-target-nordic", registry = "nordic-artifactory" }
+probe-rs = { path = "probe-rs", version = "0.29.0", package = "probe-rs-nordic" }
+probe-rs-target = { path = "probe-rs-target", version = "0.29.0", package = "probe-rs-target-nordic", registry = "nordic-artifactory" }
 probe-rs-mi = { path = "probe-rs-mi", version = "0.1.0" }
 
 docsplay = "0.1.1"
@@ -54,7 +54,7 @@ precise-builds = true
 # The archive format to use for non-windows builds (defaults .tar.xz)
 unix-archive = ".tar.xz"
 # The installers to generate for each app
- installers = ["shell", "powershell", "homebrew"]
+installers = ["shell", "powershell", "homebrew"]
 # Publish jobs to run in CI
 pr-run-mode = "plan"
 # A GitHub repo to push Homebrew formulas to
@@ -84,6 +84,17 @@ macro_use_imports = "deny"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[profile.dev]
+# Keep stack trace data, but no other debug info by default.
+# See https://kobzol.github.io/rust/rustc/2025/05/20/disable-debuginfo-to-improve-rust-compile-times.html
+# If you have difficulty debugging probe-rs, remove this line temporarily.
+debug = "line-tables-only"
+
+[profile.release]
+# For release builds the default is no debuginfo. Let's instead keep the
+# line tables for better backtraces.
+debug = "line-tables-only"
 
 [profile.dev.package.zip]
 # Set the default for zip in development mode so the creation of the zip does not take forever

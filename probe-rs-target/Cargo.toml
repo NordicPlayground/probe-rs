@@ -1,5 +1,5 @@
 [package]
-name = "probe-rs-target-nordic"
+name = "probe-rs-target"
 version.workspace = true
 edition.workspace = true
 description = "Target description schema for probe-rs."

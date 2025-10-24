@@ -2957,7 +2957,7 @@ dependencies = [
  "parse_int 0.9.0",
  "pretty_assertions",
  "probe-rs-nordic",
- "probe-rs-target-nordic",
+ "probe-rs-target",
  "serde",
  "termtree",
  "test-case",
@@ -3002,7 +3002,7 @@ dependencies = [
  "object 0.36.7",
  "parking_lot",
  "pretty_assertions",
- "probe-rs-target-nordic",
+ "probe-rs-target",
  "rmp-serde",
  "scroll",
  "serde",
@@ -3018,7 +3018,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "probe-rs-target-nordic"
+name = "probe-rs-target"
 version = "0.29.1+nordic"
 dependencies = [
  "base64 0.22.1",
@@ -3073,7 +3073,7 @@ dependencies = [
  "probe-rs-debug",
  "probe-rs-mi",
  "probe-rs-nordic",
- "probe-rs-target-nordic",
+ "probe-rs-target",
  "ratatui",
  "regex",
  "rustls",
@@ -4129,7 +4129,7 @@ dependencies = [
  "log",
  "parse_int 0.9.0",
  "probe-rs-nordic",
- "probe-rs-target-nordic",
+ "probe-rs-target",
  "reqwest",
  "scroll",
  "serde_yaml",

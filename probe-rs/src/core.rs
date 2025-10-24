@@ -8,9 +8,10 @@ use crate::{
     error::Error,
     memory::CoreMemoryInterface,
 };
-pub use probe_rs_target::{Architecture, CoreAccessOptions};
+pub use probe_rs_target::{Architecture, CoreAccessOptions, ArmCoreAccessOptions};
+pub use probe_rs_target::ApAddress as TargetApAddress;
 use probe_rs_target::{
-    ArmCoreAccessOptions, MemoryRegion, RiscvCoreAccessOptions, XtensaCoreAccessOptions,
+     MemoryRegion, RiscvCoreAccessOptions, XtensaCoreAccessOptions,
 };
 use std::{sync::Arc, time::Duration};
 

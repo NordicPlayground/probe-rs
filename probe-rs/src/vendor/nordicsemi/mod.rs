@@ -11,12 +11,12 @@ use sequences::nrf54l::Nrf54L;
 use crate::{
     Error,
     architecture::arm::{
-        ArmChipInfo, ArmProbeInterface, FullyQualifiedApAddress, memory::ArmMemoryInterface,
+        ArmChipInfo, ArmDebugInterface, FullyQualifiedApAddress, memory::ArmMemoryInterface,
     },
     config::{DebugSequence, Registry},
     vendor::{
         Vendor,
-        nordicsemi::sequences::{nrf52::Nrf52, nrf53::Nrf5340, nrf91::Nrf9160},
+        nordicsemi::sequences::{nrf52::Nrf52, nrf53::Nrf5340, nrf91::Nrf9120, nrf91::Nrf9160},
     },
 };
 
@@ -34,6 +34,8 @@ impl Vendor for NordicSemi {
             DebugSequence::Arm(Nrf52::create())
         } else if chip.name.starts_with("nRF9160") {
             DebugSequence::Arm(Nrf9160::create())
+        } else if chip.name.starts_with("nRF91") {
+            DebugSequence::Arm(Nrf9120::create())
         } else if chip.name.starts_with("nRF54L") {
             DebugSequence::Arm(Nrf54L::create())
         } else {
@@ -46,7 +48,7 @@ impl Vendor for NordicSemi {
     fn try_detect_arm_chip(
         &self,
         registry: &Registry,
-        probe: &mut dyn ArmProbeInterface,
+        probe: &mut dyn ArmDebugInterface,
         chip_info: ArmChipInfo,
     ) -> Result<Option<String>, Error> {
         if chip_info.manufacturer.get() != Some("Nordic VLSI ASA") {

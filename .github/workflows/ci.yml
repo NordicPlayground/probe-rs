@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install libudev (linux)
         run: |
@@ -46,7 +46,7 @@ jobs:
         if: (matrix.os == 'ubuntu-latest') || (matrix.os == 'ubuntu-22.04')
 
       - name: Cache Dependencies
-        uses: Swatinem/rust-cache@v2.7.8
+        uses: Swatinem/rust-cache@v2.8.1
 
       - name: cargo check for probe-rs, --no-default-features
         run: cargo check -p probe-rs --no-default-features --locked
@@ -72,7 +72,7 @@ jobs:
 
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install libudev (linux)
         run: |
@@ -85,7 +85,7 @@ jobs:
         run: rustup target add thumbv7m-none-eabi
 
       - name: Cache Dependencies
-        uses: Swatinem/rust-cache@v2.7.8
+        uses: Swatinem/rust-cache@v2.8.1
 
       - name: Run cargo test
         run: cargo test --all-features --locked
@@ -95,7 +95,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Run cargo fmt
         run: cargo fmt --all -- --check
@@ -105,7 +105,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install libudev
         run: |
@@ -113,7 +113,7 @@ jobs:
           sudo apt install -y libudev-dev
 
       - name: Cache Dependencies
-        uses: Swatinem/rust-cache@v2.7.8
+        uses: Swatinem/rust-cache@v2.8.1
 
       - name: Run cargo clippy
         run: cargo clippy --all-features --all-targets --locked -- -D warnings
@@ -121,7 +121,7 @@ jobs:
   cargo-deny:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
     - uses: EmbarkStudios/cargo-deny-action@v2
 
   doc:
@@ -129,7 +129,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install libudev
         run: |
@@ -137,7 +137,7 @@ jobs:
           sudo apt install -y libudev-dev
 
       - name: Cache Dependencies
-        uses: Swatinem/rust-cache@v2.7.8
+        uses: Swatinem/rust-cache@v2.8.1
 
       - name: Run cargo doc
         run: cargo doc -p probe-rs --no-deps --all-features --locked

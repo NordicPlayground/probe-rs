@@ -38,6 +38,10 @@ pub struct BinaryDownloadOptions {
     /// After flashing, read back all the flashed data to verify it has been written correctly.
     #[arg(long, help_heading = "DOWNLOAD CONFIGURATION")]
     pub verify: bool,
+
+    /// Whether to erase the entire chip before downloading
+    #[arg(long, help_heading = "DOWNLOAD CONFIGURATION")]
+    pub chip_erase: bool,
 }
 
 /// Supported bit-widths for read/write commands (not every device may support each width).
@@ -120,7 +124,7 @@ pub struct ProbeOptions {
 }
 
 impl ProbeOptions {
-    pub fn load(self, registry: &mut Registry) -> Result<LoadedProbeOptions, OperationError> {
+    pub fn load(self, registry: &mut Registry) -> Result<LoadedProbeOptions<'_>, OperationError> {
         LoadedProbeOptions::new(self, registry)
     }
 
@@ -273,14 +277,14 @@ impl<'r> LoadedProbeOptions<'r> {
             // Warn the user if they specified a speed the debug probe does not support
             // and a fitting speed was automatically selected.
             let protocol_speed = probe.speed_khz();
-            if let Some(speed) = self.0.speed {
-                if protocol_speed < speed {
-                    tracing::warn!(
-                        "Unable to use specified speed of {} kHz, actual speed used is {} kHz",
-                        speed,
-                        protocol_speed
-                    );
-                }
+            if let Some(speed) = self.0.speed
+                && protocol_speed < speed
+            {
+                tracing::warn!(
+                    "Unable to use specified speed of {} kHz, actual speed used is {} kHz",
+                    speed,
+                    protocol_speed
+                );
             }
 
             tracing::info!("Protocol speed {} kHz", protocol_speed);
@@ -302,9 +306,9 @@ impl<'r> LoadedProbeOptions<'r> {
         }
 
         let session = if self.0.connect_under_reset {
-            probe.attach_under_reset(target, permissions)
+            probe.attach_under_reset_with_registry(target, permissions, self.1)
         } else {
-            probe.attach(target, permissions)
+            probe.attach_with_registry(target, permissions, self.1)
         }
         .map_err(|error| OperationError::AttachingFailed {
             source: error,
@@ -452,7 +456,6 @@ pub enum OperationError {
     NoProbesFound,
 
     #[error("Failed to open the ELF file '{path}' for flashing.")]
-    #[allow(dead_code)]
     FailedToOpenElf {
         #[source]
         source: std::io::Error,
@@ -460,7 +463,6 @@ pub enum OperationError {
     },
 
     #[error("Failed to load the ELF data.")]
-    #[allow(dead_code)]
     FailedToLoadElfData(#[source] FileDownloadError),
 
     #[error("Failed to open the debug probe.")]

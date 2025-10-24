@@ -75,11 +75,12 @@ impl ESP32 {
 
         Ok(())
     }
-}
 
-impl XtensaDebugSequence for ESP32 {
-    fn on_connect(&self, interface: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
-        // Data
+    fn configure_memory_access(
+        &self,
+        interface: &mut XtensaCommunicationInterface<'_>,
+    ) -> Result<(), crate::Error> {
+        // Internal Data Bus
         interface.core_properties().memory_ranges.insert(
             0x3FF8_0000..0x4000_0000,
             MemoryRegionProperties {
@@ -88,7 +89,7 @@ impl XtensaDebugSequence for ESP32 {
                 fast_memory_access: true,
             },
         );
-        // Instruction
+        // Internal Instruction Bus
         interface.core_properties().memory_ranges.insert(
             0x4000_0000..0x400C_2000,
             MemoryRegionProperties {
@@ -97,8 +98,18 @@ impl XtensaDebugSequence for ESP32 {
                 fast_memory_access: true,
             },
         );
+        // External memory busses and peripheral address range uses the default (all false) properties.
 
-        self.disable_wdts(interface)
+        Ok(())
+    }
+}
+
+impl XtensaDebugSequence for ESP32 {
+    fn on_connect(&self, interface: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
+        self.configure_memory_access(interface)?;
+        self.disable_wdts(interface)?;
+
+        Ok(())
     }
 
     fn on_halt(&self, interface: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {

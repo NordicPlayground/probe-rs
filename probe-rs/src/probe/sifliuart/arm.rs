@@ -1,19 +1,17 @@
+use crate::CoreStatus;
 use crate::MemoryInterface;
 use crate::architecture::arm::ap::{
     AccessPortType, ApRegister, CFG, CSW, IDR, MemoryAp, MemoryApType,
 };
-use crate::architecture::arm::communication_interface::{
-    DapProbe, SwdSequence, UninitializedArmProbe,
-};
+use crate::architecture::arm::communication_interface::{DapProbe, SwdSequence};
 use crate::architecture::arm::dp::{DpAddress, DpRegisterAddress};
 use crate::architecture::arm::memory::ArmMemoryInterface;
 use crate::architecture::arm::sequences::ArmDebugSequence;
 use crate::architecture::arm::{
-    ArmError, ArmProbeInterface, DapAccess, FullyQualifiedApAddress, SwoAccess, SwoConfig,
+    ArmDebugInterface, ArmError, DapAccess, FullyQualifiedApAddress, SwoAccess, SwoConfig,
 };
 use crate::probe::sifliuart::{SifliUart, SifliUartCommand, SifliUartResponse};
 use crate::probe::{DebugProbeError, Probe};
-use crate::{CoreStatus, Error as ProbeRsError};
 use std::cmp::{max, min};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -21,13 +19,12 @@ use std::time::Duration;
 use zerocopy::IntoBytes;
 
 #[derive(Debug)]
-pub(crate) struct UninitializedSifliUartArmProbe {
-    pub(crate) probe: Box<SifliUart>,
-}
-
-#[derive(Debug)]
 pub(crate) struct SifliUartArmDebug {
     probe: Box<SifliUart>,
+
+    /// Multidrop is not yet supported for the probe,
+    /// so we only keep track if we are connected or not.
+    pub is_connected_to_dp: bool,
 
     /// Information about the APs of the target.
     /// APs are identified by a number, starting from zero.
@@ -38,86 +35,37 @@ pub(crate) struct SifliUartArmDebug {
 }
 
 impl SifliUartArmDebug {
-    fn new(
-        probe: Box<SifliUart>,
-        _sequence: Arc<dyn ArmDebugSequence>,
-    ) -> Result<Self, (Box<dyn UninitializedArmProbe>, ArmError)> {
-        // Determine the number and type of available APs.
-        let interface = Self {
+    pub fn new(probe: Box<SifliUart>, sequence: Arc<dyn ArmDebugSequence>) -> Self {
+        Self {
             probe,
+            is_connected_to_dp: false,
             _access_ports: BTreeSet::new(),
-            _sequence,
-        };
-
-        Ok(interface)
+            _sequence: sequence,
+        }
     }
 }
 
-#[allow(unused)]
-impl SwdSequence for UninitializedSifliUartArmProbe {
-    fn swj_sequence(&mut self, bit_len: u8, bits: u64) -> Result<(), DebugProbeError> {
-        Err(DebugProbeError::NotImplemented {
-            function_name: "swj_sequence",
-        })
-    }
-
-    fn swj_pins(
-        &mut self,
-        pin_out: u32,
-        pin_select: u32,
-        pin_wait: u32,
-    ) -> Result<u32, DebugProbeError> {
-        Err(DebugProbeError::NotImplemented {
-            function_name: "swj_pins",
-        })
-    }
-}
-
-impl UninitializedArmProbe for UninitializedSifliUartArmProbe {
-    #[tracing::instrument(level = "trace", skip(self, sequence))]
-    fn initialize(
-        self: Box<Self>,
-        sequence: Arc<dyn ArmDebugSequence>,
-        dp: DpAddress,
-    ) -> Result<
-        Box<(dyn ArmProbeInterface + 'static)>,
-        (Box<(dyn UninitializedArmProbe + 'static)>, ProbeRsError),
-    > {
-        assert_eq!(dp, DpAddress::Default, "Multidrop not supported on Sifli");
-
-        let interface = SifliUartArmDebug::new(self.probe, sequence)
-            .map_err(|(s, e)| (s as Box<_>, crate::error::Error::from(e)))?;
-
-        Ok(Box::new(interface))
-    }
-
-    fn close(self: Box<Self>) -> Probe {
-        Probe::from_attached_probe(self.probe)
-    }
-}
-
-#[allow(unused)]
 impl DapAccess for SifliUartArmDebug {
     fn read_raw_dp_register(
         &mut self,
-        dp: DpAddress,
-        addr: DpRegisterAddress,
+        _dp: DpAddress,
+        _addr: DpRegisterAddress,
     ) -> Result<u32, ArmError> {
         Err(ArmError::NotImplemented("dp register read not implemented"))
     }
 
     fn write_raw_dp_register(
         &mut self,
-        dp: DpAddress,
-        addr: DpRegisterAddress,
-        value: u32,
+        _dp: DpAddress,
+        _addr: DpRegisterAddress,
+        _value: u32,
     ) -> Result<(), ArmError> {
         Ok(())
     }
 
     fn read_raw_ap_register(
         &mut self,
-        ap: &FullyQualifiedApAddress,
+        _ap: &FullyQualifiedApAddress,
         addr: u64,
     ) -> Result<u32, ArmError> {
         // Fake a MEM-AP's IDR registers
@@ -134,9 +82,9 @@ impl DapAccess for SifliUartArmDebug {
 
     fn write_raw_ap_register(
         &mut self,
-        ap: &FullyQualifiedApAddress,
-        addr: u64,
-        value: u32,
+        _ap: &FullyQualifiedApAddress,
+        _addr: u64,
+        _value: u32,
     ) -> Result<(), ArmError> {
         Ok(())
     }
@@ -150,9 +98,8 @@ impl DapAccess for SifliUartArmDebug {
     }
 }
 
-#[allow(unused)]
 impl SwdSequence for SifliUartArmDebug {
-    fn swj_sequence(&mut self, bit_len: u8, bits: u64) -> Result<(), DebugProbeError> {
+    fn swj_sequence(&mut self, _bit_len: u8, _bits: u64) -> Result<(), DebugProbeError> {
         Err(DebugProbeError::NotImplemented {
             function_name: "swj_sequence",
         })
@@ -160,9 +107,9 @@ impl SwdSequence for SifliUartArmDebug {
 
     fn swj_pins(
         &mut self,
-        pin_out: u32,
-        pin_select: u32,
-        pin_wait: u32,
+        _pin_out: u32,
+        _pin_select: u32,
+        _pin_wait: u32,
     ) -> Result<u32, DebugProbeError> {
         Err(DebugProbeError::NotImplemented {
             function_name: "swj_pins",
@@ -193,15 +140,7 @@ impl ArmMemoryInterface for SifliUartMemoryInterface<'_> {
         self.current_ap.base_address(self.probe)
     }
 
-    fn get_swd_sequence(&mut self) -> Result<&mut dyn SwdSequence, DebugProbeError> {
-        Ok(self.probe)
-    }
-
-    fn get_arm_probe_interface(&mut self) -> Result<&mut dyn ArmProbeInterface, DebugProbeError> {
-        Ok(self.probe)
-    }
-
-    fn get_dap_access(&mut self) -> Result<&mut dyn DapAccess, DebugProbeError> {
+    fn get_arm_debug_interface(&mut self) -> Result<&mut dyn ArmDebugInterface, DebugProbeError> {
         Ok(self.probe)
     }
 
@@ -219,15 +158,14 @@ impl ArmMemoryInterface for SifliUartMemoryInterface<'_> {
     }
 }
 
-#[allow(unused)]
-impl ArmProbeInterface for SifliUartArmDebug {
+impl ArmDebugInterface for SifliUartArmDebug {
     fn reinitialize(&mut self) -> Result<(), ArmError> {
         Ok(())
     }
 
     fn access_ports(
         &mut self,
-        dp: DpAddress,
+        _dp: DpAddress,
     ) -> Result<BTreeSet<FullyQualifiedApAddress>, ArmError> {
         Err(ArmError::NotImplemented("access_ports not implemented"))
     }
@@ -236,8 +174,21 @@ impl ArmProbeInterface for SifliUartArmDebug {
         Probe::from_attached_probe(self.probe)
     }
 
-    fn current_debug_port(&self) -> DpAddress {
-        DpAddress::Default
+    fn current_debug_port(&self) -> Option<DpAddress> {
+        if self.is_connected_to_dp {
+            Some(DpAddress::Default)
+        } else {
+            None
+        }
+    }
+
+    fn select_debug_port(&mut self, dp: DpAddress) -> Result<(), ArmError> {
+        if dp != DpAddress::Default {
+            return Err(ArmError::NotImplemented("multidrop not implemented"));
+        }
+        self.is_connected_to_dp = true;
+
+        Ok(())
     }
 
     fn memory_interface(
@@ -300,7 +251,7 @@ impl SifliUartMemoryInterface<'_> {
                         addr: block_addr as u32,
                         len: 1,
                     })
-                    .map_err(|e| ArmError::Other(format!("{:?}", e)))?;
+                    .map_err(|e| ArmError::Other(format!("{e:?}")))?;
                 let mut block: [u8; 4] = match resp {
                     SifliUartResponse::MEMRead { data: d } if d.len() == 4 => {
                         [d[0], d[1], d[2], d[3]]
@@ -332,7 +283,7 @@ impl SifliUartMemoryInterface<'_> {
                 addr: start_aligned as u32,
                 data: &words,
             })
-            .map_err(|e| ArmError::Other(format!("{:?}", e)))?;
+            .map_err(|e| ArmError::Other(format!("{e:?}")))?;
 
         Ok(())
     }
@@ -363,7 +314,7 @@ impl SifliUartMemoryInterface<'_> {
                 addr: start_aligned as u32,
                 len: total_words as u16,
             })
-            .map_err(|e| ArmError::Other(format!("{:?}", e)))?;
+            .map_err(|e| ArmError::Other(format!("{e:?}")))?;
 
         let buf = match resp {
             SifliUartResponse::MEMRead { data } if data.len() == total_bytes => data,
@@ -378,7 +329,6 @@ impl SifliUartMemoryInterface<'_> {
     }
 }
 
-#[allow(unused)]
 impl MemoryInterface<ArmError> for SifliUartMemoryInterface<'_> {
     fn supports_native_64bit_access(&mut self) -> bool {
         true

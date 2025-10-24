@@ -14,7 +14,10 @@ use postcard_rpc::{
 use postcard_schema::Schema;
 use probe_rs::{Session, config::Registry, flashing::FlashLoader};
 use serde::{Serialize, de::DeserializeOwned};
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::{
+    sync::{Mutex, MutexGuard, Notify},
+    time::timeout,
+};
 
 use std::{
     collections::HashMap,
@@ -57,6 +60,7 @@ use crate::{
             test::{ListTestsRequest, RunTestRequest, Test, TestResult, Tests},
         },
         transport::memory::{PostcardReceiver, PostcardSender, WireRx, WireTx},
+        utils::semihosting::SemihostingOptions,
     },
     util::{
         cli::MonitorEvent,
@@ -79,7 +83,7 @@ pub async fn connect(host: &str, token: Option<String>) -> anyhow::Result<RpcCli
     };
     use tokio_util::bytes::Bytes;
 
-    let uri = Uri::from_str(&format!("{}/worker", host)).context("Failed to parse server URI")?;
+    let uri = Uri::from_str(&format!("{host}/worker")).context("Failed to parse server URI")?;
 
     let is_localhost = uri
         .host()
@@ -126,7 +130,7 @@ pub async fn connect(host: &str, token: Option<String>) -> anyhow::Result<RpcCli
     let tx = WebsocketTx::new(tx);
     tx.send(challenge_response)
         .await
-        .map_err(|err| anyhow::anyhow!("Failed to send challenge response: {:?}", err))?;
+        .map_err(|err| anyhow::anyhow!("Failed to send challenge response: {err:?}"))?;
 
     let mut client = RpcClient::new_from_wire(
         tx,
@@ -265,9 +269,9 @@ impl RpcClient {
         match self.client.send_resp::<E>(req).await {
             Ok(r) => Ok(r),
             Err(e) => match e {
-                HostErr::Wire(w) => anyhow::bail!("Wire error: {}", w),
+                HostErr::Wire(w) => anyhow::bail!("Wire error: {w}"),
                 HostErr::BadResponse => anyhow::bail!("Bad response"),
-                HostErr::Postcard(error) => anyhow::bail!("Postcard error: {}", error),
+                HostErr::Postcard(error) => anyhow::bail!("Postcard error: {error}"),
                 HostErr::Closed => anyhow::bail!("Connection closed"),
             },
         }
@@ -281,7 +285,7 @@ impl RpcClient {
     {
         match self.send::<E, RpcResult<T>>(req).await? {
             Ok(r) => Ok(r),
-            Err(e) => anyhow::bail!("{}", e),
+            Err(e) => anyhow::bail!("{e}"),
         }
     }
 
@@ -307,18 +311,28 @@ impl RpcClient {
             Ok(stream) => stream,
             Err(err) => anyhow::bail!("Failed to subscribe to '{}': {:?}", err.topic, err.error),
         };
+        let notify = Arc::new(Notify::new());
+        let req_fut = async {
+            let res = self.send_resp::<E, R>(req).await;
+            notify.notify_one();
+            res
+        };
 
-        tokio::select! {
-            biased;
-            _ = stream.stream(on_msg) => anyhow::bail!("Topic reader returned unexpectedly"),
-            r = self.send_resp::<E, R>(req) => r,
-        }
+        let (_, res) = tokio::join! {
+            stream.stream(on_msg, notify.clone()),
+            req_fut,
+        };
+        res
     }
 
     pub async fn upload_file(&self, src_path: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
         use anyhow::Context as _;
 
-        let src_path = src_path.as_ref().canonicalize()?;
+        let src_path = src_path
+            .as_ref()
+            .canonicalize()
+            .unwrap_or_else(|_| src_path.as_ref().to_path_buf());
+
         if self.is_localhost {
             return Ok(src_path);
         }
@@ -518,6 +532,7 @@ impl SessionInterface {
         &self,
         boot_info: BootInfo,
         rtt_client: Option<Key<RttClient>>,
+        semihosting_options: SemihostingOptions,
         on_msg: impl AsyncFnMut(MonitorEvent),
     ) -> anyhow::Result<Tests> {
         self.client
@@ -526,6 +541,7 @@ impl SessionInterface {
                     sessid: self.sessid,
                     boot_info,
                     rtt_client,
+                    semihosting_options,
                 },
                 on_msg,
             )
@@ -536,6 +552,7 @@ impl SessionInterface {
         &self,
         test: Test,
         rtt_client: Option<Key<RttClient>>,
+        semihosting_options: SemihostingOptions,
         on_msg: impl AsyncFnMut(MonitorEvent),
     ) -> anyhow::Result<TestResult> {
         self.client
@@ -544,6 +561,7 @@ impl SessionInterface {
                     sessid: self.sessid,
                     test,
                     rtt_client,
+                    semihosting_options,
                 },
                 on_msg,
             )
@@ -739,13 +757,44 @@ pub(crate) trait MultiSubscription {
     type Message;
 
     async fn next(&mut self) -> Option<Self::Message>;
-    async fn stream(&mut self, mut on_msg: impl AsyncFnMut(Self::Message)) -> anyhow::Result<()> {
-        while let Some(message) = self.next().await {
-            on_msg(message).await;
-        }
 
-        tracing::warn!("Failed to read topic");
-        futures_util::future::pending().await
+    /// Listen to the given stream until either:
+    ///
+    /// * The stream closes, returning a "closed" notification
+    /// * The `stopper` notification is fired, at which point we will continue processing
+    ///   messages until there is a time of 100ms between messages, at which point we will
+    ///   return.
+    ///
+    /// The latter case is intended to cover cases where there could still be enqueued messages
+    /// waiting to be processed.
+    async fn stream(
+        &mut self,
+        mut on_msg: impl AsyncFnMut(Self::Message),
+        stopper: Arc<Notify>,
+    ) -> anyhow::Result<()> {
+        let listen_fut = async {
+            while let Some(message) = self.next().await {
+                on_msg(message).await;
+            }
+        };
+
+        tokio::select! {
+            _ = listen_fut => {
+                tracing::warn!("Failed to read topic");
+                Ok(())
+            }
+            _ = stopper.notified() => {
+                tracing::info!("Received stop");
+
+                // We've received the stop event, now receive any pending messages.
+                loop {
+                    match timeout(Duration::from_millis(100), self.next()).await {
+                        Ok(Some(m)) => on_msg(m).await,
+                        Ok(None) | Err(_) => return Ok(()),
+                    }
+                }
+            }
+        }
     }
 }
 

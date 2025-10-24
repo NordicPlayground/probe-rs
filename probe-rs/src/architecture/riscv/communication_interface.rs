@@ -11,6 +11,7 @@ use crate::{
 };
 use std::any::Any;
 use std::collections::HashMap;
+use std::ops::Range;
 
 /// Some error occurred when working with the RISC-V core.
 #[derive(thiserror::Error, Debug)]
@@ -201,6 +202,72 @@ impl ScratchState {
     }
 }
 
+/// Describes the method which should be used to access memory.
+#[derive(Default, Debug)]
+pub struct MemoryAccessConfig {
+    /// Describes, which memory access method should be used for a given access width
+    default_method: HashMap<RiscvBusAccess, MemoryAccessMethod>,
+
+    region_override: HashMap<(Range<u64>, RiscvBusAccess), MemoryAccessMethod>,
+}
+
+impl MemoryAccessConfig {
+    /// Sets the default memory access method for the given access width.
+    pub fn set_default_method(&mut self, access: RiscvBusAccess, method: MemoryAccessMethod) {
+        self.default_method.insert(access, method);
+    }
+
+    /// Sets a memory access method override for the given access size and address range.
+    pub fn set_region_override(
+        &mut self,
+        access: RiscvBusAccess,
+        range: Range<u64>,
+        method: MemoryAccessMethod,
+    ) {
+        self.region_override.insert((range, access), method);
+    }
+
+    /// Returns the default memory access method for the given access width.
+    pub fn default_method(&self, access: RiscvBusAccess) -> MemoryAccessMethod {
+        self.default_method
+            .get(&access)
+            .copied()
+            .unwrap_or(MemoryAccessMethod::ProgramBuffer)
+    }
+
+    /// Returns the memory access method for the given address and access width.
+    pub fn method(&self, address: u64, access: RiscvBusAccess) -> MemoryAccessMethod {
+        for ((range, method_access), method) in &self.region_override {
+            if range.contains(&address) && method_access == &access {
+                return *method;
+            }
+        }
+
+        self.default_method(access)
+    }
+
+    /// Returns the memory access method for the given address range and access width.
+    pub fn range_method(
+        &self,
+        address_range: Range<u64>,
+        access: RiscvBusAccess,
+    ) -> MemoryAccessMethod {
+        fn range_overlaps(range: &Range<u64>, address_range: &Range<u64>) -> bool {
+            range.start < address_range.end && address_range.start < range.end
+        }
+
+        let mut max = self.default_method(access);
+
+        for ((range, method_access), method) in &self.region_override {
+            if range_overlaps(range, &address_range) && method_access == &access {
+                max = std::cmp::min(*method, max);
+            }
+        }
+
+        max
+    }
+}
+
 /// A state to carry all the state data across multiple core switches in a session.
 #[derive(Debug)]
 pub struct RiscvCommunicationInterfaceState {
@@ -235,9 +302,6 @@ pub struct RiscvCommunicationInterfaceState {
     /// Number of harts
     num_harts: u32,
 
-    /// Describes, which memory access method should be used for a given access width
-    memory_access_info: HashMap<RiscvBusAccess, MemoryAccessMethod>,
-
     /// describes, if the given register can be read / written with an
     /// abstract command
     abstract_cmd_register_info: HashMap<RegisterId, CoreRegisterAbstractCmdSupport>,
@@ -257,15 +321,13 @@ pub struct RiscvCommunicationInterfaceState {
     /// Store the value of the `hasresethaltreq` bit of the `dmstatus` register.
     hasresethaltreq: Option<bool>,
 
-    /// Workaround for certain MCUs. If set, the target will be halted for a sysbus access, even
-    /// though the spec says it should not be necessary.
-    sysbus_requires_halting: bool,
-
     /// Whether the core is currently halted.
     is_halted: bool,
 
     /// The current value of the `dmcontrol` register.
     current_dmcontrol: Dmcontrol,
+
+    memory_access_config: MemoryAccessConfig,
 }
 
 /// Timeout for RISC-V operations.
@@ -303,8 +365,6 @@ impl RiscvCommunicationInterfaceState {
             // We assume only a singe hart exisits initially
             num_harts: 1,
 
-            memory_access_info: HashMap::new(),
-
             abstract_cmd_register_info: HashMap::new(),
 
             s0: ScratchState::default(),
@@ -312,20 +372,30 @@ impl RiscvCommunicationInterfaceState {
             enabled_harts: 0,
             last_selected_hart: 0,
             hasresethaltreq: None,
-            sysbus_requires_halting: false,
             is_halted: false,
 
             current_dmcontrol: Dmcontrol(0),
+
+            memory_access_config: MemoryAccessConfig::default(),
         }
     }
 
     /// Get the memory access method which should be used for an
     /// access with the specified width.
-    fn memory_access_method(&mut self, access_width: RiscvBusAccess) -> MemoryAccessMethod {
-        *self
-            .memory_access_info
-            .entry(access_width)
-            .or_insert(MemoryAccessMethod::ProgramBuffer)
+    fn memory_access_method(
+        &mut self,
+        access_width: RiscvBusAccess,
+        address: u64,
+    ) -> MemoryAccessMethod {
+        self.memory_access_config.method(address, access_width)
+    }
+
+    fn memory_range_access_method(
+        &self,
+        width: RiscvBusAccess,
+        address_range: Range<u64>,
+    ) -> MemoryAccessMethod {
+        self.memory_access_config.range_method(address_range, width)
     }
 }
 
@@ -513,7 +583,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
         let status: Dmstatus = self.read_dm_register()?;
 
         self.state.progbuf_cache.fill(0);
-        self.state.memory_access_info.clear();
+        self.state.memory_access_config = MemoryAccessConfig::default();
         self.state.debug_version = DebugModuleVersion::from(status.version() as u8);
         self.state.is_halted = status.allhalted();
 
@@ -659,32 +729,32 @@ impl<'state> RiscvCommunicationInterface<'state> {
 
             if sbcs.sbaccess8() {
                 self.state
-                    .memory_access_info
-                    .insert(RiscvBusAccess::A8, MemoryAccessMethod::SystemBus);
+                    .memory_access_config
+                    .set_default_method(RiscvBusAccess::A8, MemoryAccessMethod::SystemBus);
             }
 
             if sbcs.sbaccess16() {
                 self.state
-                    .memory_access_info
-                    .insert(RiscvBusAccess::A16, MemoryAccessMethod::SystemBus);
+                    .memory_access_config
+                    .set_default_method(RiscvBusAccess::A16, MemoryAccessMethod::SystemBus);
             }
 
             if sbcs.sbaccess32() {
                 self.state
-                    .memory_access_info
-                    .insert(RiscvBusAccess::A32, MemoryAccessMethod::SystemBus);
+                    .memory_access_config
+                    .set_default_method(RiscvBusAccess::A32, MemoryAccessMethod::SystemBus);
             }
 
             if sbcs.sbaccess64() {
                 self.state
-                    .memory_access_info
-                    .insert(RiscvBusAccess::A64, MemoryAccessMethod::SystemBus);
+                    .memory_access_config
+                    .set_default_method(RiscvBusAccess::A64, MemoryAccessMethod::SystemBus);
             }
 
             if sbcs.sbaccess128() {
                 self.state
-                    .memory_access_info
-                    .insert(RiscvBusAccess::A128, MemoryAccessMethod::SystemBus);
+                    .memory_access_config
+                    .set_default_method(RiscvBusAccess::A128, MemoryAccessMethod::SystemBus);
             }
         } else {
             tracing::debug!(
@@ -1042,11 +1112,29 @@ impl<'state> RiscvCommunicationInterface<'state> {
         }
     }
 
+    // TODO: this would be best executed on the probe. RiscvCommunicationInterface should be refactored to allow that.
+    fn wait_for_idle(&mut self, timeout: Duration) -> Result<(), RiscvError> {
+        let start = Instant::now();
+        loop {
+            let status: Abstractcs = self.read_dm_register()?;
+            match AbstractCommandErrorKind::parse(status) {
+                Ok(_) => return Ok(()),
+                Err(AbstractCommandErrorKind::Busy) => {}
+                Err(other) => return Err(other.into()),
+            }
+
+            if start.elapsed() > timeout {
+                return Err(RiscvError::Timeout);
+            }
+        }
+    }
+
     /// Perform memory read from a single location using the program buffer.
     /// Only reads up to a width of 32 bits are currently supported.
     fn perform_memory_read_progbuf<V: RiscvValue32>(
         &mut self,
         address: u32,
+        wait_for_idle: bool,
     ) -> Result<V, RiscvError> {
         self.halted_access(|core| {
             // assemble
@@ -1075,13 +1163,12 @@ impl<'state> RiscvCommunicationInterface<'state> {
 
             core.schedule_write_dm_register(command)?;
 
-            let abstractcs_idx = core.schedule_read_dm_register::<Abstractcs>()?;
+            if wait_for_idle {
+                core.wait_for_idle(Duration::from_millis(10))?;
+            }
 
             // Read back s0
             let value = core.abstract_cmd_register_read(&registers::S0)?;
-
-            let abstractcs = Abstractcs(core.dtm.read_deferred_result(abstractcs_idx)?.into_u32());
-            AbstractCommandErrorKind::parse(abstractcs)?;
 
             // Restore s0 register
             core.restore_s0(s0)?;
@@ -1094,8 +1181,14 @@ impl<'state> RiscvCommunicationInterface<'state> {
         &mut self,
         address: u32,
         data: &mut [V],
+        wait_for_idle: bool,
     ) -> Result<(), RiscvError> {
         if data.is_empty() {
+            return Ok(());
+        }
+
+        if data.len() == 1 {
+            data[0] = self.perform_memory_read_progbuf(address, wait_for_idle)?;
             return Ok(());
         }
 
@@ -1129,6 +1222,10 @@ impl<'state> RiscvCommunicationInterface<'state> {
 
             core.schedule_write_dm_register(command)?;
 
+            if wait_for_idle {
+                core.wait_for_idle(Duration::from_millis(10))?;
+            }
+
             let data_len = data.len();
 
             let mut result_idxs = Vec::with_capacity(data_len - 1);
@@ -1150,10 +1247,13 @@ impl<'state> RiscvCommunicationInterface<'state> {
                 let value_idx = core.schedule_read_dm_register::<Data0>()?;
 
                 result_idxs.push((out_idx, value_idx));
+
+                if wait_for_idle {
+                    core.wait_for_idle(Duration::from_millis(10))?;
+                }
             }
 
-            // Specifically read the last value first. The result is that this last read is still
-            // part of the command queue we just assembled.
+            // Now read the last value. This will also reset `postexec` to false, so we don't have to wait for the program buffer to execute.
             let last_value = core.abstract_cmd_register_read(&registers::S1)?;
             data[data.len() - 1] = V::from_register_value(last_value);
 
@@ -1212,6 +1312,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
         &mut self,
         address: u32,
         data: V,
+        wait_for_idle: bool,
     ) -> Result<(), RiscvError> {
         self.halted_access(|core| {
             tracing::debug!(
@@ -1249,18 +1350,14 @@ impl<'state> RiscvCommunicationInterface<'state> {
 
             core.schedule_write_dm_register(command)?;
 
-            let status = core.read_dm_register::<Abstractcs>()?;
-
-            let error = AbstractCommandErrorKind::parse(status);
-            if let Err(error) = error {
+            if wait_for_idle && let Err(error) = core.wait_for_idle(Duration::from_millis(10)) {
                 tracing::error!(
-                    "Executing the abstract command for write_{} failed: {:?} ({:x?})",
+                    "Executing the abstract command for write_{} failed: {:?}",
                     V::WIDTH.byte_width() * 8,
-                    error,
-                    status,
+                    error
                 );
 
-                return Err(RiscvError::AbstractCommand(error));
+                return Err(error);
             }
 
             core.restore_s0(s0)?;
@@ -1276,10 +1373,17 @@ impl<'state> RiscvCommunicationInterface<'state> {
         &mut self,
         address: u32,
         data: &[V],
+        wait_for_idle: bool,
     ) -> Result<(), RiscvError> {
         if data.is_empty() {
             return Ok(());
         }
+
+        if data.len() == 1 {
+            self.perform_memory_write_progbuf(address, data[0], wait_for_idle)?;
+            return Ok(());
+        }
+
         self.halted_access(|core| {
             let s0 = core.save_s0()?;
             let s1 = core.save_s1()?;
@@ -1296,7 +1400,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
             core.abstract_cmd_register_write(&registers::S0, address)?;
 
             for value in data {
-                // write address into data 0
+                // write data into data 0
                 core.schedule_write_dm_register(Data0((*value).into()))?;
 
                 // Write s0, then execute program buffer
@@ -1313,21 +1417,16 @@ impl<'state> RiscvCommunicationInterface<'state> {
                 command.set_regno((registers::S1).id.0 as u32);
 
                 core.schedule_write_dm_register(command)?;
-            }
 
-            // Errors are sticky, so we can just check at the end if everything worked.
-            let status = core.read_dm_register::<Abstractcs>()?;
+                if wait_for_idle && let Err(error) = core.wait_for_idle(Duration::from_millis(10)) {
+                    tracing::error!(
+                        "Executing the abstract command for write_multiple_{} failed: {:?}",
+                        V::WIDTH.byte_width() * 8,
+                        error,
+                    );
 
-            let error = AbstractCommandErrorKind::parse(status);
-            if let Err(error) = error {
-                tracing::error!(
-                    "Executing the abstract command for write_multiple_{} failed: {:?} ({:x?})",
-                    V::WIDTH.byte_width() * 8,
-                    error,
-                    status,
-                );
-
-                return Err(RiscvError::AbstractCommand(error));
+                    return Err(error);
+                }
             }
 
             // Restore register s0 and s1
@@ -1579,9 +1678,14 @@ impl<'state> RiscvCommunicationInterface<'state> {
     }
 
     fn read_word<V: RiscvValue32>(&mut self, address: u32) -> Result<V, crate::Error> {
-        let result = match self.state.memory_access_method(V::WIDTH) {
-            MemoryAccessMethod::ProgramBuffer => self.perform_memory_read_progbuf(address)?,
-            MemoryAccessMethod::SystemBus if self.state.sysbus_requires_halting => {
+        let result = match self.state.memory_access_method(V::WIDTH, address as u64) {
+            MemoryAccessMethod::ProgramBuffer => {
+                self.perform_memory_read_progbuf(address, false)?
+            }
+            MemoryAccessMethod::WaitingProgramBuffer => {
+                self.perform_memory_read_progbuf(address, true)?
+            }
+            MemoryAccessMethod::HaltedSystemBus => {
                 self.halted_access(|this| this.perform_memory_read_sysbus(address))?
             }
             MemoryAccessMethod::SystemBus => self.perform_memory_read_sysbus(address)?,
@@ -1598,7 +1702,11 @@ impl<'state> RiscvCommunicationInterface<'state> {
         address: u32,
         data: &mut [V],
     ) -> Result<(), crate::Error> {
-        let access_method = self.state.memory_access_method(V::WIDTH);
+        let start = address as u64;
+        let address_range = start..(start + (data.len() * V::WIDTH.byte_width()) as u64);
+        let access_method = self
+            .state
+            .memory_range_access_method(V::WIDTH, address_range);
         tracing::debug!(
             "read_multiple({:?}) from {:#08x} using {:?}",
             V::WIDTH,
@@ -1608,9 +1716,12 @@ impl<'state> RiscvCommunicationInterface<'state> {
 
         match access_method {
             MemoryAccessMethod::ProgramBuffer => {
-                self.perform_memory_read_multiple_progbuf(address, data)?;
+                self.perform_memory_read_multiple_progbuf(address, data, false)?;
             }
-            MemoryAccessMethod::SystemBus if self.state.sysbus_requires_halting => {
+            MemoryAccessMethod::WaitingProgramBuffer => {
+                self.perform_memory_read_multiple_progbuf(address, data, true)?;
+            }
+            MemoryAccessMethod::HaltedSystemBus => {
                 self.halted_access(|this| this.perform_memory_read_multiple_sysbus(address, data))?
             }
             MemoryAccessMethod::SystemBus => {
@@ -1625,11 +1736,14 @@ impl<'state> RiscvCommunicationInterface<'state> {
     }
 
     fn write_word<V: RiscvValue32>(&mut self, address: u32, data: V) -> Result<(), crate::Error> {
-        match self.state.memory_access_method(V::WIDTH) {
+        match self.state.memory_access_method(V::WIDTH, address as u64) {
             MemoryAccessMethod::ProgramBuffer => {
-                self.perform_memory_write_progbuf(address, data)?
+                self.perform_memory_write_progbuf(address, data, false)?
             }
-            MemoryAccessMethod::SystemBus if self.state.sysbus_requires_halting => {
+            MemoryAccessMethod::WaitingProgramBuffer => {
+                self.perform_memory_write_progbuf(address, data, true)?
+            }
+            MemoryAccessMethod::HaltedSystemBus => {
                 self.halted_access(|this| this.perform_memory_write_sysbus(address, &[data]))?
             }
             MemoryAccessMethod::SystemBus => self.perform_memory_write_sysbus(address, &[data])?,
@@ -1646,13 +1760,21 @@ impl<'state> RiscvCommunicationInterface<'state> {
         address: u32,
         data: &[V],
     ) -> Result<(), crate::Error> {
-        match self.state.memory_access_method(V::WIDTH) {
-            MemoryAccessMethod::SystemBus if self.state.sysbus_requires_halting => {
+        let start = address as u64;
+        let address_range = start..(start + (data.len() * V::WIDTH.byte_width()) as u64);
+        let access_method = self
+            .state
+            .memory_range_access_method(V::WIDTH, address_range);
+        match access_method {
+            MemoryAccessMethod::HaltedSystemBus => {
                 self.halted_access(|this| this.perform_memory_write_sysbus(address, data))?
             }
             MemoryAccessMethod::SystemBus => self.perform_memory_write_sysbus(address, data)?,
             MemoryAccessMethod::ProgramBuffer => {
-                self.perform_memory_write_multiple_progbuf(address, data)?
+                self.perform_memory_write_multiple_progbuf(address, data, false)?
+            }
+            MemoryAccessMethod::WaitingProgramBuffer => {
+                self.perform_memory_write_multiple_progbuf(address, data, true)?
             }
             MemoryAccessMethod::AbstractCommand => {
                 unimplemented!("Memory access using abstract commands is not implemted")
@@ -1864,8 +1986,9 @@ impl<'state> RiscvCommunicationInterface<'state> {
         }
     }
 
-    pub(crate) fn sysbus_requires_halting(&mut self, en: bool) {
-        self.state.sysbus_requires_halting = en;
+    /// Returns a mutable reference to the memory access configuration.
+    pub fn memory_access_config(&mut self) -> &mut MemoryAccessConfig {
+        &mut self.state.memory_access_config
     }
 }
 
@@ -2263,11 +2386,6 @@ impl MemoryInterface for RiscvCommunicationInterface<'_> {
         self.write_multiple(address, data)
     }
 
-    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), crate::Error> {
-        let address = valid_32bit_address(address)?;
-        self.write_multiple(address, data)
-    }
-
     fn supports_8bit_transfers(&self) -> Result<bool, crate::Error> {
         Ok(true)
     }
@@ -2317,13 +2435,16 @@ impl From<RiscvBusAccess> for u8 {
 /// which can be supported by a debug module.
 ///
 /// The `AbstractCommand` method for memory access is not implemented.
-#[derive(Debug, Copy, Clone)]
-#[allow(dead_code)]
-enum MemoryAccessMethod {
-    /// Memory access using the program buffer is supported
-    ProgramBuffer,
+#[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemoryAccessMethod {
     /// Memory access using an abstract command is supported
     AbstractCommand,
+    /// Memory access using the program buffer is supported, with explicit waiting for the instructions to complete
+    WaitingProgramBuffer,
+    /// Memory access using the program buffer is supported
+    ProgramBuffer,
+    /// Memory access using system bus access supported, but only when the core is halted
+    HaltedSystemBus,
     /// Memory access using system bus access supported
     SystemBus,
 }

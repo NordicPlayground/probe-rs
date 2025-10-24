@@ -2,7 +2,7 @@ use time::UtcOffset;
 
 use crate::rpc::client::RpcClient;
 use crate::rpc::functions::monitor::{MonitorMode, MonitorOptions};
-use crate::util::cli::{self, connect_target_output_files, rtt_client};
+use crate::util::cli::{self, connect_target_output_files, parse_semihosting_options, rtt_client};
 
 #[derive(clap::Parser)]
 #[group(skip)]
@@ -24,6 +24,7 @@ impl Cmd {
                 false => crate::rpc::functions::rtt_client::ScanRegion::Ranges(vec![]),
             },
             self.run.shared_options.log_format,
+            !self.run.shared_options.no_timestamps,
             !self.run.shared_options.no_location,
             Some(utc_offset),
         )
@@ -31,6 +32,9 @@ impl Cmd {
 
         let mut target_output_files =
             connect_target_output_files(self.run.shared_options.target_output_file).await?;
+
+        let semihosting_options =
+            parse_semihosting_options(self.run.shared_options.semihosting_file)?;
 
         let client_handle = rtt_client.handle();
 
@@ -43,6 +47,7 @@ impl Cmd {
                 catch_reset: !self.run.run_options.no_catch_reset,
                 catch_hardfault: !self.run.run_options.no_catch_hardfault,
                 rtt_client: Some(client_handle),
+                semihosting_options,
             },
             self.run.shared_options.always_print_stacktrace,
             &mut target_output_files,

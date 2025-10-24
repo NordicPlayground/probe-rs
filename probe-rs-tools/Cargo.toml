@@ -31,41 +31,41 @@ base64 = "0.22"
 docsplay = { workspace = true }
 jep106 = "0.3"
 num-traits = "0.2"
-scroll = "0.12"
+scroll = "0.13"
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
 thiserror = { workspace = true }
 tracing = "0.1"
-typed-path = "0.11"
+typed-path = "0.12"
 probe-rs-mi = { workspace = true }
 
 itertools = "0.14"
 
 # CLI-only
-addr2line = "0.24"
+addr2line = "0.25"
 bytesize = "2"
 capstone = "0.13"
-cargo_metadata = "0.19"
+cargo_metadata = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 colored = "3"
 defmt-decoder = "1.0"
 directories = "6"
 dunce = "1"
 figment = { version = "0.10", features = ["toml", "json", "yaml", "env"] }
-goblin = { version = "0.9", default-features = false, features = [
+goblin = { version = "0.10", default-features = false, features = [
     "std",
     "elf32",
     "elf64",
     "endian_fd",
 ] }
 ihex = "3.0"
-indicatif = "0.17"
+indicatif = "0.18"
 insta = { version = "1.38", default-features = false, features = ["yaml"] }
 itm = { version = "0.9.0-rc.1", default-features = false }
 parse_int = "0.9"
 libtest-mimic = "0.8.0"
 fastrand = "2.1"
-rustyline = { version = "15", default-features = false, features = [
+rustyline = { version = "17", default-features = false, features = [
     "with-dirs",
     "with-file-history",
 ] }
@@ -97,7 +97,7 @@ parking_lot = "0.12.2"
 cargo-config2 = "0.1.26"
 clap_complete = "4.5.2"
 regex = "1.10.4"
-zip = { version = "2.0.0", default-features = false, features = [
+zip = { version = "5.0.0", default-features = false, features = [
     "deflate",
     "time",
 ] }
@@ -108,13 +108,13 @@ svg = "0.18"
 
 # Server-only
 tokio = { version = "1.0", features = ["full"] }
-tokio-util = "0.7"
+tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = { version = "0.3" }
 rustls = { version = "0.23", default-features = false, features = [
     "std",
     "ring",
 ], optional = true }
-tokio-tungstenite = { version = "0.26", features = [
+tokio-tungstenite = { version = "0.28", features = [
     "rustls-tls-webpki-roots",
 ], optional = true }
 axum = { version = "0.8", features = ["ws"], optional = true }
@@ -126,7 +126,7 @@ postcard-schema = { version = "0.2.0", features = ["use-std", "derive"] }
 sha2 = "0.10"
 
 # gdb server
-gdbstub = "0.7"
+gdbstub = "0.7.6"
 
 [build-dependencies]
 git-version = "0.3"

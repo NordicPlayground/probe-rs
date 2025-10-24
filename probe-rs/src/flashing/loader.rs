@@ -1,5 +1,5 @@
 use espflash::flasher::{FlashData, FlashSettings, FlashSize};
-use espflash::targets::XtalFrequency;
+use espflash::image_format::idf::IdfBootloaderFormat;
 use ihex::Record;
 use probe_rs_target::{
     InstructionSet, MemoryRange, MemoryRegion, NvmRegion, RawFlashAlgorithm,
@@ -226,18 +226,8 @@ impl ImageLoader for IdfLoader {
             .split_once('-')
             .map(|(name, _)| name)
             .unwrap_or(target.name.as_str());
-        let chip = espflash::targets::Chip::from_str(target_name)
-            .map_err(|_| FileDownloadError::IdfUnsupported(target.name.to_string()))?
-            .into_target();
-
-        // FIXME: Short-term hack until we can auto-detect the crystal frequency. ESP32 and ESP32-C2
-        // have 26MHz and 40MHz options, ESP32-H2 is 32MHz, the rest is 40MHz. We need to specify
-        // the frequency because different options require different bootloader images.
-        let xtal_frequency = if target_name.eq_ignore_ascii_case("esp32h2") {
-            XtalFrequency::_32Mhz
-        } else {
-            XtalFrequency::_40Mhz
-        };
+        let chip = espflash::target::Chip::from_str(target_name)
+            .map_err(|_| FileDownloadError::IdfUnsupported(target.name.to_string()))?;
 
         let flash_size_result = session.halted_access(|session| {
             // Figure out flash size from the memory map. We need a different bootloader for each size.
@@ -263,15 +253,7 @@ impl ImageLoader for IdfLoader {
             _ => None,
         };
 
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)?;
-        let firmware = espflash::elf::ElfFirmwareImage::try_from(&buf[..])?;
-
         let flash_data = FlashData::new(
-            self.0.bootloader.as_deref(),
-            self.0.partition_table.as_deref(),
-            None,
-            self.0.target_app_partition.clone(),
             {
                 let mut settings = FlashSettings::default();
 
@@ -280,9 +262,22 @@ impl ImageLoader for IdfLoader {
                 settings
             },
             0,
-        )?;
+            None,
+            chip,
+            // TODO: auto-detect the crystal frequency.
+            chip.default_xtal_frequency(),
+        );
 
-        let image = chip.get_flash_image(&firmware, flash_data, None, xtal_frequency)?;
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf)?;
+        let image = IdfBootloaderFormat::new(
+            &buf,
+            &flash_data,
+            self.0.partition_table.as_deref(),
+            self.0.bootloader.as_deref(),
+            None,
+            self.0.target_app_partition.as_deref(),
+        )?;
 
         for data in image.flash_segments() {
             flash_loader.add_data(data.addr.into(), &data.data)?;
@@ -414,10 +409,10 @@ impl FlashLoader {
             for (core, _) in session.list_cores() {
                 match session.core(core) {
                     Ok(mut core) => {
-                        if let Ok(set) = core.instruction_set() {
-                            if !target_archs.contains(&set) {
-                                target_archs.push(set);
-                            }
+                        if let Ok(set) = core.instruction_set()
+                            && !target_archs.contains(&set)
+                        {
+                            target_archs.push(set);
                         }
                     }
                     Err(crate::Error::CoreDisabled(_)) => continue,
@@ -441,7 +436,11 @@ impl FlashLoader {
     }
 
     /// Verifies data on the device.
-    pub fn verify(&self, session: &mut Session, progress: FlashProgress) -> Result<(), FlashError> {
+    pub fn verify(
+        &self,
+        session: &mut Session,
+        progress: &mut FlashProgress<'_>,
+    ) -> Result<(), FlashError> {
         let mut algos = self.prepare_plan(session, false)?;
 
         for flasher in algos.iter_mut() {
@@ -462,7 +461,7 @@ impl FlashLoader {
                 flasher.flash_algorithm.name
             );
 
-            if !flasher.verify(session, &progress, true)? {
+            if !flasher.verify(session, progress, true)? {
                 return Err(FlashError::Verify);
             }
         }
@@ -486,21 +485,14 @@ impl FlashLoader {
         if options.dry_run {
             tracing::info!("Skipping programming, dry run!");
 
-            if let Some(progress) = options.progress {
-                progress.failed_filling();
-                progress.failed_erasing();
-                progress.failed_programming();
-            }
+            options.progress.failed_filling();
+            options.progress.failed_erasing();
+            options.progress.failed_programming();
 
             return Ok(());
         }
 
-        let progress = options
-            .progress
-            .clone()
-            .unwrap_or_else(FlashProgress::empty);
-
-        self.initialize(&mut algos, session, &progress, &mut options)?;
+        self.initialize(&mut algos, session, &mut options)?;
 
         let mut do_chip_erase = options.do_chip_erase;
         let mut did_chip_erase = false;
@@ -511,7 +503,7 @@ impl FlashLoader {
 
             if do_chip_erase {
                 tracing::debug!("    Doing chip erase...");
-                flasher.run_erase_all(session, &progress)?;
+                flasher.run_erase_all(session, &mut options.progress)?;
                 do_chip_erase = false;
                 did_chip_erase = true;
             }
@@ -527,7 +519,7 @@ impl FlashLoader {
             // Program the data.
             flasher.program(
                 session,
-                &progress,
+                &mut options.progress,
                 options.keep_unwritten_bytes,
                 do_use_double_buffering,
                 options.skip_erase || did_chip_erase,
@@ -693,7 +685,7 @@ impl FlashLoader {
 
             let target = session.target();
             let core = target.core_index_by_name(core_name).unwrap();
-            let algo = Self::get_flash_algorithm_for_region(&region, target)?;
+            let algo = Self::get_flash_algorithm_for_region(&region, target, core_name)?;
 
             // We don't usually have more than a handful of regions, linear search should be fine.
             tracing::debug!("     -- using algorithm: {}", algo.name);
@@ -716,7 +708,6 @@ impl FlashLoader {
         &self,
         algos: &mut [Flasher],
         session: &mut Session,
-        progress: &FlashProgress,
         options: &mut DownloadOptions,
     ) -> Result<(), FlashError> {
         let mut phases = vec![];
@@ -734,7 +725,9 @@ impl FlashLoader {
         }
 
         if options.do_chip_erase {
-            progress.add_progress_bar(ProgressOperation::Erase, None);
+            options
+                .progress
+                .add_progress_bar(ProgressOperation::Erase, None);
         }
 
         // Iterate all flash algorithms to initialize a few things.
@@ -761,20 +754,28 @@ impl FlashLoader {
             }
 
             if options.keep_unwritten_bytes {
-                progress.add_progress_bar(ProgressOperation::Fill, Some(fill_size));
+                options
+                    .progress
+                    .add_progress_bar(ProgressOperation::Fill, Some(fill_size));
             }
             if !options.do_chip_erase {
-                progress.add_progress_bar(ProgressOperation::Erase, Some(erase_size));
+                options
+                    .progress
+                    .add_progress_bar(ProgressOperation::Erase, Some(erase_size));
             }
-            progress.add_progress_bar(ProgressOperation::Program, Some(program_size));
+            options
+                .progress
+                .add_progress_bar(ProgressOperation::Program, Some(program_size));
             if options.verify {
-                progress.add_progress_bar(ProgressOperation::Verify, Some(program_size));
+                options
+                    .progress
+                    .add_progress_bar(ProgressOperation::Verify, Some(program_size));
             }
 
             phases.push(phase_layout);
         }
 
-        progress.initialized(phases);
+        options.progress.initialized(phases);
 
         Ok(())
     }
@@ -820,7 +821,20 @@ impl FlashLoader {
     pub(crate) fn get_flash_algorithm_for_region<'a>(
         region: &NvmRegion,
         target: &'a Target,
+        core_name: &String,
     ) -> Result<&'a RawFlashAlgorithm, FlashError> {
+        let available = &target.flash_algorithms;
+        tracing::debug!("Available algorithms:");
+        for algorithm in available {
+            tracing::debug!(
+                "Algorithm: {} for {:?} @ 0x{:08x} - 0x{:08x}  default? {}",
+                algorithm.name,
+                algorithm.cores,
+                algorithm.flash_properties.address_range.start,
+                algorithm.flash_properties.address_range.end,
+                algorithm.default
+            );
+        }
         let algorithms = target
             .flash_algorithms
             .iter()
@@ -829,6 +843,7 @@ impl FlashLoader {
                 fa.flash_properties
                     .address_range
                     .contains_range(&region.range)
+                    && (fa.cores.is_empty() || fa.cores.contains(core_name))
             })
             .collect::<Vec<_>>();
 

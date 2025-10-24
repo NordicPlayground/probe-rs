@@ -1,5 +1,6 @@
 use super::utils::copy_range_to_buf;
 use super::{GdbErrorExt, RuntimeTarget};
+use std::collections::BTreeSet;
 
 use anyhow::anyhow;
 
@@ -104,7 +105,13 @@ fn gdb_memory_map(session: &mut Session, primary_core_id: usize) -> Result<Strin
             let region_kind = match region {
                 MemoryRegion::Ram(_) => "ram",
                 MemoryRegion::Generic(_) => "rom",
-                MemoryRegion::Nvm(_) => "rom",
+                MemoryRegion::Nvm(_) => {
+                    if session.target().flash_algorithms.is_empty() {
+                        "rom"
+                    } else {
+                        continue;
+                    }
+                }
             };
             let range = region.address_range();
             let start = range.start;
@@ -113,6 +120,62 @@ fn gdb_memory_map(session: &mut Session, primary_core_id: usize) -> Result<Strin
                 r#"<memory type="{region_kind}" start="{start:#x}" length="{length:#x}"/>\n"#,
             );
 
+            xml_map.push_str(&region_entry);
+        }
+
+        #[derive(Ord, PartialOrd, Eq, PartialEq)]
+        struct FlashRegion {
+            start: u64,
+            length: u64,
+            blocksize: u64,
+        }
+
+        let mut regions = BTreeSet::new();
+        for algo in session.target().flash_algorithms.iter() {
+            let start = algo.flash_properties.address_range.start;
+            // Use the region end address (if possible) because it seems more correct
+            // than the data in FlashProperties
+            let end = if let Some(region) = session
+                .target()
+                .memory_region_by_address(algo.flash_properties.address_range.start)
+            {
+                region.address_range().end
+            } else {
+                algo.flash_properties.address_range.end
+            };
+            let mut sectors = algo.flash_properties.sectors.clone();
+            sectors.sort_by_key(|s| s.address);
+            // Add dummy sector at the end to calculate the length of the real last sector
+            sectors.push(probe_rs::config::SectorDescription {
+                size: 0,
+                address: end - start,
+            });
+            // Pair each sector with the next one because we need the next sector
+            // start address, which is the current one end address, to calculate the
+            // sector size.
+            for (current, next) in sectors.iter().zip(sectors.iter().skip(1)) {
+                let start = current.address + start;
+                let length = next.address - current.address;
+                let blocksize = current.size;
+                regions.insert(FlashRegion {
+                    start,
+                    length,
+                    blocksize,
+                });
+            }
+        }
+
+        // Only print out a deduplicated list of flash regions to avoid GDB failing
+        // because of overlapping memory regions
+        for FlashRegion {
+            start,
+            length,
+            blocksize,
+        } in regions.iter()
+        {
+            let region_entry = format!(
+                r#"<memory type="flash" start="{start:#x}" length="{length:#x}"><property name="blocksize">{blocksize:#x}</property></memory>\n"#
+            );
             xml_map.push_str(&region_entry);
         }
     }

@@ -3,9 +3,8 @@
 use std::collections::BTreeSet;
 
 use crate::architecture::arm::{
-    ApAddress, ApV2Address, ArmCommunicationInterface, ArmError, ArmProbeInterface,
+    ApAddress, ApV2Address, ArmCommunicationInterface, ArmDebugInterface, ArmError,
     FullyQualifiedApAddress,
-    communication_interface::Initialized,
     dp::DpAddress,
     memory::{
         ADIMemoryInterface, ArmMemoryInterface, Component, PeripheralType,
@@ -17,8 +16,8 @@ mod root_memory_interface;
 use root_memory_interface::RootMemoryInterface;
 
 /// Deeply scans the debug port and returns a list of the addresses the memory access points discovered.
-pub fn enumerate_access_ports<API: ArmProbeInterface>(
-    probe: &mut API,
+pub fn enumerate_access_ports<ADI: ArmDebugInterface>(
+    probe: &mut ADI,
     dp: DpAddress,
 ) -> Result<BTreeSet<FullyQualifiedApAddress>, ArmError> {
     let mut root_interface = RootMemoryInterface::new(probe, dp)?;
@@ -37,8 +36,8 @@ pub fn enumerate_access_ports<API: ArmProbeInterface>(
         .collect())
 }
 
-fn process_root_component<API: ArmProbeInterface>(
-    iface: &mut RootMemoryInterface<API>,
+fn process_root_component<ADI: ArmDebugInterface>(
+    iface: &mut RootMemoryInterface<ADI>,
     component: &Component,
 ) -> Result<BTreeSet<ApV2Address>, ArmError> {
     let mut result = BTreeSet::new();
@@ -49,23 +48,23 @@ fn process_root_component<API: ArmProbeInterface>(
         {
             let rom_table = RomTable::try_parse(iface, c.component_address())?;
             for e in rom_table.entries() {
-                if let Component::CoresightComponent(comp) = e.component() {
-                    if comp.peripheral_id().is_of_type(PeripheralType::MemAp) {
-                        let base_address = ApV2Address::new(comp.component_address());
-                        // TODO: Check this AP for further nested APs.
-                        result.insert(base_address);
-                    }
+                if let Component::CoresightComponent(comp) = e.component()
+                    && comp.peripheral_id().is_of_type(PeripheralType::MemAp)
+                {
+                    let base_address = ApV2Address::new(comp.component_address());
+                    // TODO: Check this AP for further nested APs.
+                    result.insert(base_address);
                 }
             }
         }
         Component::Class1RomTable(_, rom_table) => {
             for e in rom_table.entries() {
-                if let Component::CoresightComponent(comp) = e.component() {
-                    if comp.peripheral_id().is_of_type(PeripheralType::MemAp) {
-                        let base_address = ApV2Address::new(comp.component_address());
-                        // TODO: Check this AP for further nested APs.
-                        result.insert(base_address);
-                    }
+                if let Component::CoresightComponent(comp) = e.component()
+                    && comp.peripheral_id().is_of_type(PeripheralType::MemAp)
+                {
+                    let base_address = ApV2Address::new(comp.component_address());
+                    // TODO: Check this AP for further nested APs.
+                    result.insert(base_address);
                 }
             }
         }
@@ -87,7 +86,7 @@ fn process_root_component<API: ArmProbeInterface>(
 /// Returns a Memory Interface accessing the Memory AP at the given `address` through the `iface`
 /// Arm Communication Interface.
 pub fn new_memory_interface<'i>(
-    iface: &'i mut ArmCommunicationInterface<Initialized>,
+    iface: &'i mut ArmCommunicationInterface,
     address: &FullyQualifiedApAddress,
 ) -> Result<Box<dyn ArmMemoryInterface + 'i>, ArmError> {
     let ApAddress::V2(ap_address) = address.ap() else {

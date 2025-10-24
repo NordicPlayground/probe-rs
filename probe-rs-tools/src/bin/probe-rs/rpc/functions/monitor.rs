@@ -1,4 +1,4 @@
-use std::{num::NonZeroU32, time::Duration};
+use std::time::Duration;
 
 use crate::{
     rpc::{
@@ -7,17 +7,17 @@ use crate::{
             MonitorEndpoint, MultiTopicPublisher, MultiTopicWriter, RpcResult, RpcSpawnContext,
             RttTopic, SemihostingTopic, WireTxImpl, flash::BootInfo,
         },
-        utils::run_loop::{ReturnReason, RunLoop, RunLoopPoller},
+        utils::{
+            run_loop::{ReturnReason, RunLoop, RunLoopPoller},
+            semihosting::{SemihostingFileManager, SemihostingOptions},
+        },
     },
     util::rtt::client::RttClient,
 };
 use anyhow::Context;
 use postcard_rpc::{header::VarHeader, server::Sender};
 use postcard_schema::Schema;
-use probe_rs::{
-    BreakpointCause, Core, HaltReason, Session,
-    semihosting::{CloseRequest, OpenRequest, SemihostingCommand, WriteRequest},
-};
+use probe_rs::{BreakpointCause, Core, HaltReason, Session, semihosting::SemihostingCommand};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, error::SendError};
 use tokio_util::sync::CancellationToken;
@@ -53,6 +53,8 @@ pub struct MonitorOptions {
     pub catch_hardfault: bool,
     /// RTT client if used.
     pub rtt_client: Option<Key<RttClient>>,
+    /// Configure the support for semihosting.
+    pub semihosting_options: SemihostingOptions,
 }
 
 /// Monitor in normal run mode.
@@ -179,7 +181,9 @@ fn monitor_impl(
     let mut session = ctx.session_blocking(request.sessid);
 
     let mut semihosting_sink =
-        MonitorEventHandler::new(|event| sender.send_semihosting_event(event).unwrap());
+        MonitorEventHandler::new(request.options.semihosting_options, |event| {
+            sender.send_semihosting_event(event).unwrap()
+        });
 
     let mut rtt_client = request
         .options
@@ -196,10 +200,10 @@ fn monitor_impl(
     request.mode.prepare(&mut session, run_loop.core_id)?;
 
     let mut core = session.core(run_loop.core_id)?;
-    if request.mode.should_clear_rtt_header() {
-        if let Some(rtt_client) = rtt_client.as_mut() {
-            rtt_client.clear_control_block(&mut core)?;
-        }
+    if request.mode.should_clear_rtt_header()
+        && let Some(rtt_client) = rtt_client.as_mut()
+    {
+        rtt_client.clear_control_block(&mut core)?;
     }
 
     let poller = rtt_client.as_deref_mut().map(|client| RttPoller {
@@ -273,8 +277,8 @@ where
             let bytes = self.rtt_client.poll_channel(core, channel as u32)?;
             if !bytes.is_empty() {
                 // Poll RTT with a frequency of 10 Hz if we do not receive any new data.
-                // Once we receive new data, we bump the frequency to 1kHz.
-                next_poll = Duration::from_millis(1);
+                // Once we receive new data, we poll continuously while we have anything to read.
+                next_poll = Duration::ZERO;
 
                 (self.sender)(RttEvent::Output {
                     channel: channel as u32,
@@ -294,15 +298,15 @@ where
 }
 
 struct MonitorEventHandler<F: FnMut(SemihostingEvent)> {
+    semihosting_file_manager: SemihostingFileManager,
     sender: F,
-    semihosting_reader: SemihostingReader,
 }
 
 impl<F: FnMut(SemihostingEvent)> MonitorEventHandler<F> {
-    pub fn new(sender: F) -> Self {
+    pub fn new(semihosting_options: SemihostingOptions, sender: F) -> Self {
         Self {
+            semihosting_file_manager: SemihostingFileManager::new(semihosting_options),
             sender,
-            semihosting_reader: SemihostingReader::new(),
         }
     }
 
@@ -313,8 +317,7 @@ impl<F: FnMut(SemihostingEvent)> MonitorEventHandler<F> {
     ) -> anyhow::Result<Option<MonitorExitReason>> {
         let HaltReason::Breakpoint(BreakpointCause::Semihosting(cmd)) = halt_reason else {
             return Ok(Some(MonitorExitReason::UnexpectedExit(format!(
-                "{:?}",
-                halt_reason
+                "{halt_reason:?}"
             ))));
         };
 
@@ -341,146 +344,19 @@ impl<F: FnMut(SemihostingEvent)> MonitorEventHandler<F> {
                 );
                 Ok(None) // Continue running
             }
+            SemihostingCommand::Time(request) => {
+                request.write_current_time(core)?;
+                Ok(None)
+            }
             SemihostingCommand::Errno(_) => Ok(None),
-            other if SemihostingReader::is_io(other) => {
-                if let Some((stream, data)) = self.semihosting_reader.handle(other, core)? {
-                    (self.sender)(SemihostingEvent::Output { stream, data });
-                }
+            other if SemihostingFileManager::can_handle(other) => {
+                self.semihosting_file_manager
+                    .handle(other, core, &mut self.sender)?;
                 Ok(None)
             }
             other => Ok(Some(MonitorExitReason::UnexpectedExit(format!(
-                "Unexpected semihosting command {:?}",
-                other,
+                "Unexpected semihosting command {other:?}",
             )))),
         }
     }
-}
-
-pub struct SemihostingReader {
-    stdout_open: bool,
-    stderr_open: bool,
-}
-
-impl SemihostingReader {
-    const STDOUT: NonZeroU32 = NonZeroU32::new(1).unwrap();
-    const STDERR: NonZeroU32 = NonZeroU32::new(2).unwrap();
-
-    pub fn new() -> Self {
-        Self {
-            stdout_open: false,
-            stderr_open: false,
-        }
-    }
-
-    pub fn is_io(other: SemihostingCommand) -> bool {
-        matches!(
-            other,
-            SemihostingCommand::Open(_)
-                | SemihostingCommand::Close(_)
-                | SemihostingCommand::WriteConsole(_)
-                | SemihostingCommand::Write(_)
-        )
-    }
-
-    pub fn handle(
-        &mut self,
-        command: SemihostingCommand,
-        core: &mut Core<'_>,
-    ) -> anyhow::Result<Option<(String, String)>> {
-        let out = match command {
-            SemihostingCommand::Open(request) => {
-                self.handle_open(core, request)?;
-                None
-            }
-            SemihostingCommand::Close(request) => {
-                self.handle_close(core, request)?;
-                None
-            }
-            SemihostingCommand::Write(request) => self.handle_write(core, request)?,
-            SemihostingCommand::WriteConsole(request) => {
-                let str = request.read(core)?;
-                Some((String::from("stdout"), str))
-            }
-
-            _ => None,
-        };
-
-        Ok(out)
-    }
-
-    fn handle_open(&mut self, core: &mut Core<'_>, request: OpenRequest) -> anyhow::Result<()> {
-        let path = request.path(core)?;
-        if path != ":tt" {
-            tracing::warn!(
-                "Target wanted to open file {path}, but probe-rs does not support this operation yet. Continuing..."
-            );
-            return Ok(());
-        }
-
-        match request.mode().as_bytes()[0] {
-            b'w' => {
-                self.stdout_open = true;
-                request.respond_with_handle(core, Self::STDOUT)?;
-            }
-            b'a' => {
-                self.stderr_open = true;
-                request.respond_with_handle(core, Self::STDERR)?;
-            }
-            mode => tracing::warn!(
-                "Target wanted to open file {path} with mode {mode}, but probe-rs does not support this operation yet. Continuing..."
-            ),
-        }
-
-        Ok(())
-    }
-
-    fn handle_close(&mut self, core: &mut Core<'_>, request: CloseRequest) -> anyhow::Result<()> {
-        let handle = request.file_handle(core)?;
-        if handle == Self::STDOUT.get() {
-            self.stdout_open = false;
-            request.success(core)?;
-        } else if handle == Self::STDERR.get() {
-            self.stderr_open = false;
-            request.success(core)?;
-        } else {
-            tracing::warn!(
-                "Target wanted to close file handle {handle}, but probe-rs does not support this operation yet. Continuing..."
-            );
-        }
-
-        Ok(())
-    }
-
-    fn handle_write(
-        &mut self,
-        core: &mut Core<'_>,
-        request: WriteRequest,
-    ) -> anyhow::Result<Option<(String, String)>> {
-        match request.file_handle() {
-            handle if handle == Self::STDOUT.get() => {
-                if self.stdout_open {
-                    let string = read_written_string(core, request)?;
-                    return Ok(Some((String::from("stdout"), string)));
-                }
-            }
-            handle if handle == Self::STDERR.get() => {
-                if self.stderr_open {
-                    let string = read_written_string(core, request)?;
-                    return Ok(Some((String::from("stderr"), string)));
-                }
-            }
-            other => tracing::warn!(
-                "Target wanted to write to file handle {other}, but probe-rs does not support this operation yet. Continuing...",
-            ),
-        }
-
-        Ok(None)
-    }
-}
-
-fn read_written_string(core: &mut Core<'_>, request: WriteRequest) -> anyhow::Result<String> {
-    let bytes = request.read(core)?;
-    let str = String::from_utf8_lossy(&bytes);
-    request.write_status(core, 0)?;
-    Ok(str.to_string())
 }

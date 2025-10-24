@@ -139,7 +139,7 @@ where
                             "Failed to process flash algorithm {}.",
                             flash_algorithm.file_name.display()
                         );
-                        log::warn!("Reason: {:?}", e);
+                        log::warn!("Reason: {e:?}");
                         None
                     }
                 }
@@ -242,15 +242,18 @@ fn core_to_probe_core(value: &Core) -> Result<CoreType, Error> {
 
 // Process all `.pdsc` files in the given directory.
 pub fn visit_dirs(path: &Path, families: &mut Vec<ChipFamily>) -> Result<()> {
-    walk_files(path, &mut |path| {
-        if has_extension(path, "pack") {
-            log::info!("Found .pdsc file: {}", path.display());
+    walk_files(path, &mut |file_path| {
+        if has_extension(file_path, "pdsc") {
+            log::info!("Found .pdsc file: {}", file_path.display());
 
-            let package = Package::from_path(path)
-                .context(format!("Failed to open .pdsc file {}.", path.display()))?;
+            let package = Package::from_path(file_path).context(format!(
+                "Failed to open .pdsc file {}.",
+                file_path.display()
+            ))?;
 
-            extract_families::<fs::File>(package, Kind::Directory(path), families, false)
-                .context(format!("Failed to process .pdsc file {}.", path.display()))?;
+            extract_families::<fs::File>(package, Kind::Directory(path), families, false).context(
+                format!("Failed to process .pdsc file {}.", file_path.display()),
+            )?;
         }
 
         Ok(())
@@ -368,7 +371,7 @@ pub(crate) async fn visit_arm_file(
         }
     };
 
-    log::info!("Trying to open pack file: {}.", url);
+    log::info!("Trying to open pack file: {url}.");
     let zip = std::io::Cursor::new(bytes);
     let mut archive = match zip::ZipArchive::new(zip) {
         Ok(archive) => archive,
@@ -429,7 +432,7 @@ pub(crate) async fn visit_arm_file(
 /// Extracts the pdsc out of a ZIP archive.
 pub(crate) fn find_pdsc_in_archive<T>(
     archive: &mut zip::ZipArchive<T>,
-) -> Result<Option<zip::read::ZipFile<T>>>
+) -> Result<Option<zip::read::ZipFile<'_, T>>>
 where
     T: std::io::Seek + std::io::Read,
 {
@@ -630,14 +633,12 @@ fn ensure_single_ram_region_is_executable(mem_map: &mut [MemoryRegion]) {
         .filter_map(MemoryRegion::as_ram_region)
         .count();
 
-    if ram_regions == 1 {
-        if let Some(MemoryRegion::Ram(ram_region)) = mem_map
+    if ram_regions == 1
+        && let Some(MemoryRegion::Ram(ram_region)) = mem_map
             .iter_mut()
             .find(|region| matches!(region, MemoryRegion::Ram(_)))
-        {
-            if let Some(ref mut access) = ram_region.access {
-                access.execute = true;
-            }
-        }
+        && let Some(ref mut access) = ram_region.access
+    {
+        access.execute = true;
     }
 }

@@ -137,8 +137,7 @@ impl Cmd {
         let session = common_options.attach_session(probe, target)?;
         let target_name = session.target().name.clone();
         println!(
-            "Probe: Probe type {}, debug interface {}, target chip {}\n",
-            probe_name, protocol_name, target_name
+            "Probe: Probe type {probe_name}, debug interface {protocol_name}, target chip {target_name}\n"
         );
         Ok(())
     }
@@ -201,7 +200,7 @@ impl Cmd {
             // Insert another blank line to visually seperate results
             println!();
         } else {
-            println!("failed to set speed {}", speed);
+            println!("failed to set speed {speed}");
         }
         Ok(())
     }

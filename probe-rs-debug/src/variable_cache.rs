@@ -39,7 +39,7 @@ impl Serialize for VariableCache {
             children: Vec<VariableTreeNode<'c>>,
         }
 
-        fn recurse_cache(variable_cache: &VariableCache) -> VariableTreeNode {
+        fn recurse_cache(variable_cache: &VariableCache) -> VariableTreeNode<'_> {
             let root_node = variable_cache.root_variable();
 
             VariableTreeNode {
@@ -56,19 +56,19 @@ impl Serialize for VariableCache {
             variable_cache: &VariableCache,
             parent_variable_key: ObjectRef,
             max_children: Option<usize>,
-        ) -> Vec<VariableTreeNode> {
+        ) -> Vec<VariableTreeNode<'_>> {
             let mut children = variable_cache.get_children(parent_variable_key);
 
             let mut out = Vec::new();
 
             loop {
-                if let Some(max_count) = max_children {
-                    if out.len() >= max_count {
-                        // Be a bit lenient with the limit, avoid showing "1 more" for a single child.
-                        let remaining = children.clone().count();
-                        if remaining > 1 {
-                            break;
-                        }
+                if let Some(max_count) = max_children
+                    && out.len() >= max_count
+                {
+                    // Be a bit lenient with the limit, avoid showing "1 more" for a single child.
+                    let remaining = children.clone().count();
+                    if remaining > 1 {
+                        break;
                     }
                 }
                 let Some(child_variable) = children.next() else {
@@ -94,7 +94,7 @@ impl Serialize for VariableCache {
                 out.push(VariableTreeNode {
                     name: &VariableName::Artifical,
                     type_name: &VariableType::Unknown,
-                    value: format!("... and {} more", remaining),
+                    value: format!("... and {remaining} more"),
                     children: Vec::new(),
                     source_location: None,
                 });
@@ -177,8 +177,7 @@ impl VariableCache {
         // Validate that the parent_key exists ...
         if !self.variable_hash_map.contains_key(&parent_key) {
             return Err(DebugError::Other(format!(
-                "VariableCache: Attempted to add a new variable with non existent `parent_key`: {:?}. Please report this as a bug",
-                parent_key
+                "VariableCache: Attempted to add a new variable with non existent `parent_key`: {parent_key:?}. Please report this as a bug"
             )));
         }
 
@@ -409,8 +408,7 @@ impl VariableCache {
         self.remove_cache_entry_children(variable_key)?;
         if self.variable_hash_map.remove(&variable_key).is_none() {
             return Err(Error::Other(format!(
-                "Failed to remove a `VariableCache` entry with key: {:?}. Please report this as a bug.",
-                variable_key
+                "Failed to remove a `VariableCache` entry with key: {variable_key:?}. Please report this as a bug."
             )));
         };
         Ok(())
@@ -558,7 +556,7 @@ mod test {
     fn show_tree(cache: &VariableCache) {
         let tree = build_tree(cache, cache.root_variable());
 
-        println!("{}", tree);
+        println!("{tree}");
     }
 
     fn build_tree(cache: &VariableCache, variable: &Variable) -> Tree<String> {
@@ -585,7 +583,7 @@ mod test {
 
         let cache_variable = c.root_variable();
 
-        println!("{:#?}", cache_variable);
+        println!("{cache_variable:#?}");
 
         //assert_eq!(cache_variable.parent_key, None);
         assert_eq!(cache_variable.name, VariableName::StaticScopeRoot);

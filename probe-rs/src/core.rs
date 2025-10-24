@@ -5,7 +5,7 @@ use crate::{
         xtensa::sequences::XtensaDebugSequence,
     },
     config::DebugSequence,
-    error::Error,
+    error::{BreakpointError, Error},
     memory::CoreMemoryInterface,
 };
 pub use probe_rs_target::{Architecture, CoreAccessOptions, ArmCoreAccessOptions};
@@ -490,9 +490,8 @@ impl<'probe> Core<'probe> {
                 self.inner.clear_hw_breakpoint(bp_position)?;
                 Ok(())
             }
-            None => Err(Error::Other(format!(
-                "No breakpoint found at address {:#010x}",
-                address
+            None => Err(Error::BreakpointOperation(BreakpointError::NotFound(
+                address,
             ))),
         }
     }
@@ -669,6 +668,12 @@ impl CoreInterface for Core<'_> {
         self.core_type()
     }
 
+    /// Returns the endianness of the current operating mode
+    /// of the core.
+    fn endianness(&mut self) -> Result<Endian, Error> {
+        self.inner.endianness()
+    }
+
     fn instruction_set(&mut self) -> Result<InstructionSet, Error> {
         self.instruction_set()
     }
@@ -731,7 +736,7 @@ impl ResolvedCoreOptions {
         }
     }
 
-    fn interface_idx(&self) -> usize {
+    fn jtag_tap_index(&self) -> usize {
         match self {
             Self::Arm { options, .. } => options.jtag_tap.unwrap_or(0),
             Self::Riscv { options, .. } => options.jtag_tap.unwrap_or(0),

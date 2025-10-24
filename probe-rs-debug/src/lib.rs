@@ -26,9 +26,6 @@ pub mod variable_cache;
 
 pub(crate) mod exception_handling;
 
-#[cfg(test)]
-mod test;
-
 pub use self::{
     debug_info::*, debug_step::SteppingMode, exception_handling::exception_handler_for_core,
     registers::*, source_instructions::SourceLocation, source_instructions::VerifiedBreakpoint,
@@ -238,7 +235,7 @@ fn extract_line(attribute_value: AttributeValue<GimliReader>) -> Option<u64> {
     }
 }
 
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[expect(clippy::unwrap_used)]
 pub(crate) fn _print_all_attributes(
     core: &mut Core<'_>,
     stackframe_cfa: Option<u64>,
@@ -283,7 +280,7 @@ pub(crate) fn _print_all_attributes(
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 fn iterate(
     result: EvaluationResult<DwarfReader>,
     core: &mut Core,

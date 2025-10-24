@@ -8,7 +8,7 @@ use postcard_schema::{Schema, schema};
 use probe_rs::{
     architecture::{
         arm::{
-            self, ApAddress, ApV2Address, ArmProbeInterface,
+            self, ApAddress, ApV2Address, ArmDebugInterface,
             ap::{ApClass, ApRegister, IDR},
             component::Scs,
             dp::{self, Ctrl, DLPIDR, DPIDR, DpRegister, TARGETID},
@@ -301,7 +301,7 @@ async fn try_show_info(
         probe.attach_to_unspecified()?;
     }
 
-    if probe.has_arm_interface() {
+    if probe.has_arm_debug_interface() {
         let dp_addr = if let Some(target_sel) = target_sel {
             vec![dp::DpAddress::Multidrop(target_sel)]
         } else {
@@ -455,20 +455,21 @@ async fn try_show_arm_dp_info(
     dp_address: dp::DpAddress,
 ) -> (Probe, anyhow::Result<dp::DebugPortVersion>) {
     tracing::debug!("Trying to show ARM chip information");
-    match probe
-        .try_into_arm_interface()
+
+    let mut interface = match probe
+        .try_into_arm_debug_interface(DefaultArmSequence::create())
         .map_err(|(iface, e)| (iface, anyhow!(e)))
-        .and_then(|interface| {
-            interface
-                .initialize(DefaultArmSequence::create(), dp_address)
-                .map_err(|(interface, e)| (interface.close(), anyhow!(e)))
-        }) {
-        Ok(mut interface) => {
-            let res = show_arm_info(ctx, &mut *interface, dp_address).await;
-            (interface.close(), res)
-        }
-        Err((probe, e)) => (probe, Err(e)),
+    {
+        Ok(interface) => interface,
+        Err((probe, e)) => return (probe, Err(e)),
+    };
+
+    if let Err(err) = interface.select_debug_port(dp_address) {
+        return (interface.close(), Err(err.into()));
     }
+
+    let res = show_arm_info(ctx, &mut *interface, dp_address).await;
+    (interface.close(), res)
 }
 
 /// Try to show information about the ARM chip, connected to a DP at the given address.
@@ -476,7 +477,7 @@ async fn try_show_arm_dp_info(
 /// Returns the version of the DP.
 async fn show_arm_info(
     ctx: &mut RpcContext,
-    interface: &mut dyn ArmProbeInterface,
+    interface: &mut dyn ArmDebugInterface,
     dp: dp::DpAddress,
 ) -> anyhow::Result<dp::DebugPortVersion> {
     let dp_info = interface.read_raw_dp_register(dp, DPIDR::ADDRESS)?;
@@ -513,7 +514,7 @@ async fn show_arm_info(
 
     ctx.publish::<TargetInfoDataTopic>(
         VarSeq::Seq2(0),
-        &InfoEvent::Message(format!("ARM Chip with debug port {:x?}:", dp)),
+        &InfoEvent::Message(format!("ARM Chip with debug port {dp:x?}:")),
     )
     .await?;
 
@@ -578,7 +579,7 @@ async fn show_arm_info(
 }
 
 fn handle_memory_ap(
-    interface: &mut dyn ArmProbeInterface,
+    interface: &mut dyn ArmDebugInterface,
     access_port: &arm::FullyQualifiedApAddress,
     parent: &mut ComponentTreeNode,
 ) -> anyhow::Result<()> {
@@ -601,7 +602,7 @@ fn handle_memory_ap(
 }
 
 fn coresight_component_tree(
-    interface: &mut dyn ArmProbeInterface,
+    interface: &mut dyn ArmDebugInterface,
     component: Component,
     access_port: &arm::FullyQualifiedApAddress,
     parent: &mut ComponentTreeNode,
@@ -713,7 +714,7 @@ fn coresight_component_tree(
 /// Some manufacturer-specific ROM tables contain more than just entries. This function tries
 /// to make sense of these tables.
 fn process_vendor_rom_tables(
-    interface: &mut dyn ArmProbeInterface,
+    interface: &mut dyn ArmDebugInterface,
     id: &ComponentId,
     _table: &RomTable,
     access_port: &arm::FullyQualifiedApAddress,
@@ -743,7 +744,7 @@ fn process_vendor_rom_tables(
 /// Processes ROM table entries and adds them to the tree.
 fn process_component_entry(
     tree: &mut ComponentTreeNode,
-    interface: &mut dyn ArmProbeInterface,
+    interface: &mut dyn ArmDebugInterface,
     peripheral_id: &PeripheralID,
     component: &Component,
     access_port: &arm::FullyQualifiedApAddress,

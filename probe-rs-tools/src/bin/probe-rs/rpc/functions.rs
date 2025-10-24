@@ -132,7 +132,7 @@ impl From<probe_rs::rtt::Error> for RpcError {
 
 impl From<WireTxErrorKind> for RpcError {
     fn from(e: WireTxErrorKind) -> Self {
-        Self(format!("{:?}", e))
+        Self(format!("{e:?}"))
     }
 }
 
@@ -359,7 +359,7 @@ impl RpcContext {
             .unwrap()
             .publish::<T>(seq_no, msg)
             .await
-            .map_err(|e| anyhow!("{:?}", e))
+            .map_err(|e| anyhow!("{e:?}"))
     }
 
     pub async fn object_mut<T: Any + Send>(

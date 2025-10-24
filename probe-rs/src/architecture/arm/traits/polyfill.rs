@@ -14,7 +14,7 @@ use crate::{
         dp::{Abort, Ctrl, DPIDR, DebugPortError, DpRegister, RdBuff},
     },
     probe::{
-        CommandResult, DebugProbe, DebugProbeError, IoSequenceItem, JtagAccess, JtagCommandQueue,
+        CommandQueue, CommandResult, DebugProbe, DebugProbeError, IoSequenceItem, JtagAccess,
         JtagSequence, JtagWriteCommand, RawSwdIo, WireProtocol, common::bits_to_byte,
     },
 };
@@ -120,7 +120,7 @@ fn perform_jtag_transfers<P: JtagAccess + RawSwdIo>(
     transfers: &mut [DapTransfer],
 ) -> Result<(), DebugProbeError> {
     // Set up the command queue.
-    let mut queue = JtagCommandQueue::new();
+    let mut queue = CommandQueue::new();
 
     let mut results = vec![];
 
@@ -219,23 +219,21 @@ fn perform_jtag_transfers<P: JtagAccess + RawSwdIo>(
 
     if let Some(ctrl_value) = ctrl_value {
         // Check CTRL/STATUS to make sure OK/FAULT meant OK
-        if let Ok(CommandResult::U32(received_value)) = jtag_results.take(ctrl_value) {
-            if Ctrl(received_value).sticky_err() {
-                tracing::debug!("JTAG transaction set failed: {:#X?}", transfers);
+        if let Ok(CommandResult::U32(received_value)) = jtag_results.take(ctrl_value)
+            && Ctrl(received_value).sticky_err()
+        {
+            tracing::debug!("JTAG transaction set failed: {:#X?}", transfers);
 
-                // Clear the sticky bit so future transactions succeed
-                let (_, _) = perform_jtag_transfer(
-                    probe,
-                    &DapTransfer::write(Ctrl::ADDRESS, received_value),
-                )?;
+            // Clear the sticky bit so future transactions succeed
+            let (_, _) =
+                perform_jtag_transfer(probe, &DapTransfer::write(Ctrl::ADDRESS, received_value))?;
 
-                // Mark OK/FAULT transactions as failed. Since the error is sticky, we can assume that
-                // if we received a WAIT, the previous transactions were successful.
-                // The caller will reset the sticky flag and retry if needed
-                for transfer in transfers.iter_mut() {
-                    if transfer.status == TransferStatus::Ok {
-                        transfer.status = TransferStatus::Failed(DapError::FaultResponse);
-                    }
+            // Mark OK/FAULT transactions as failed. Since the error is sticky, we can assume that
+            // if we received a WAIT, the previous transactions were successful.
+            // The caller will reset the sticky flag and retry if needed
+            for transfer in transfers.iter_mut() {
+                if transfer.status == TransferStatus::Ok {
+                    transfer.status = TransferStatus::Failed(DapError::FaultResponse);
                 }
             }
         }
@@ -455,7 +453,10 @@ fn perform_raw_transfers_retry<P: DebugProbe + RawSwdIo + JtagAccess>(
                 TransferStatus::Failed(DapError::WaitResponse) => {
                     tracing::debug!("got WAIT on transfer {}, retrying...", successful_transfers);
 
-                    clear_overrun_and_sticky_err(probe)?;
+                    // Surface this error, because it indicates there's a low-level protocol problem going on.
+                    clear_overrun_and_sticky_err(probe).inspect_err(|e| {
+                        tracing::error!("error clearing sticky overrun/error bits: {e}");
+                    })?;
 
                     // Increase idle cycles of the failed write transfer and the rest of the chunk
                     for transfer in &mut chunk[..] {
@@ -721,6 +722,49 @@ enum TransferStatus {
     Failed(DapError),
 }
 
+/// Output only variant of [`IoSequence`]
+struct OutSequence {
+    bits: Vec<bool>,
+}
+
+impl OutSequence {
+    fn new() -> Self {
+        OutSequence { bits: vec![] }
+    }
+
+    fn from_bytes(data: &[u8], mut bits: usize) -> Self {
+        let mut this = Self::new();
+
+        'outer: for byte in data {
+            for i in 0..8 {
+                this.add_output(byte & (1 << i) != 0);
+                bits -= 1;
+                if bits == 0 {
+                    break 'outer;
+                }
+            }
+        }
+
+        this
+    }
+
+    fn add_output(&mut self, bit: bool) {
+        self.bits.push(bit);
+    }
+
+    fn len(&self) -> usize {
+        self.bits.len()
+    }
+
+    fn bits(&self) -> &[bool] {
+        &self.bits
+    }
+
+    fn io_items(&self) -> impl Iterator<Item = IoSequenceItem> {
+        self.bits.iter().map(|bit| IoSequenceItem::Output(*bit))
+    }
+}
+
 struct IoSequence {
     io: Vec<IoSequenceItem>,
 }
@@ -738,22 +782,6 @@ impl IoSequence {
 
     fn reserve(&mut self, idle_cycles_after: usize) {
         self.io.reserve(idle_cycles_after);
-    }
-
-    fn from_bytes(data: &[u8], mut bits: usize) -> Self {
-        let mut this = Self::new();
-
-        'outer: for byte in data {
-            for i in 0..8 {
-                this.add_output(byte & (1 << i) != 0);
-                bits -= 1;
-                if bits == 0 {
-                    break 'outer;
-                }
-            }
-        }
-
-        this
     }
 
     fn add_output(&mut self, bit: bool) {
@@ -776,6 +804,18 @@ impl IoSequence {
 
     fn extend(&mut self, other: &IoSequence) {
         self.io.extend_from_slice(&other.io);
+    }
+}
+
+impl From<OutSequence> for IoSequence {
+    fn from(out_sequence: OutSequence) -> Self {
+        let mut io_sequence = IoSequence::with_capacity(out_sequence.len());
+
+        for bi in out_sequence.bits {
+            io_sequence.add_output(bi);
+        }
+
+        io_sequence
     }
 }
 
@@ -1123,7 +1163,7 @@ impl<Probe: DebugProbe + RawSwdIo + JtagAccess + 'static> RawDapAccess for Probe
     fn swj_sequence(&mut self, bit_len: u8, bits: u64) -> Result<(), DebugProbeError> {
         let protocol = self.active_protocol().unwrap();
 
-        let io_sequence = IoSequence::from_bytes(&bits.to_le_bytes(), bit_len as usize);
+        let io_sequence = OutSequence::from_bytes(&bits.to_le_bytes(), bit_len as usize);
         send_sequence(self, protocol, &io_sequence)
     }
 
@@ -1135,13 +1175,13 @@ impl<Probe: DebugProbe + RawSwdIo + JtagAccess + 'static> RawDapAccess for Probe
 fn send_sequence<P: RawSwdIo + JtagAccess>(
     probe: &mut P,
     protocol: WireProtocol,
-    sequence: &IoSequence,
+    sequence: &OutSequence,
 ) -> Result<(), DebugProbeError> {
     match protocol {
         WireProtocol::Jtag => {
             // Swj sequences should be shifted out to tms, since that is the pin
             // shared between swd and jtag modes.
-            let mut bits = sequence.io_items().peekable();
+            let mut bits = sequence.bits().iter().peekable();
             while let Some(first) = bits.next() {
                 let mut count = 1;
                 while let Some(next) = bits.peek() {
@@ -1153,7 +1193,7 @@ fn send_sequence<P: RawSwdIo + JtagAccess>(
                 }
 
                 probe.shift_raw_sequence(JtagSequence {
-                    tms: first.into(),
+                    tms: *first,
                     data: bitvec![0; count],
                     tdo_capture: false,
                 })?;
@@ -1189,7 +1229,7 @@ mod test {
 
     use bitvec::prelude::*;
 
-    #[allow(dead_code)]
+    #[expect(dead_code)]
     enum DapAcknowledge {
         Ok,
         Wait,

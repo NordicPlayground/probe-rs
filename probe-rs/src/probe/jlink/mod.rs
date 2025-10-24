@@ -10,6 +10,7 @@ mod speed;
 pub mod swo;
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bitvec::prelude::*;
@@ -24,9 +25,11 @@ use self::error::JlinkError;
 use self::interface::{Interface, Interfaces};
 use self::speed::SpeedConfig;
 use self::swo::SwoMode;
-use crate::architecture::arm::{ArmError, Pins};
+use crate::architecture::arm::sequences::ArmDebugSequence;
+use crate::architecture::arm::{ArmDebugInterface, ArmError, Pins};
+use crate::architecture::riscv::communication_interface::RiscvError;
 use crate::architecture::xtensa::communication_interface::{
-    XtensaCommunicationInterface, XtensaDebugInterfaceState,
+    XtensaCommunicationInterface, XtensaDebugInterfaceState, XtensaError,
 };
 use crate::probe::jlink::bits::IteratorExt;
 use crate::probe::jlink::config::JlinkConfig;
@@ -36,9 +39,7 @@ use crate::probe::{AutoImplementJtagAccess, JtagAccess};
 use crate::{
     architecture::{
         arm::{
-            ArmCommunicationInterface, SwoAccess,
-            communication_interface::{DapProbe, UninitializedArmProbe},
-            swo::SwoConfig,
+            ArmCommunicationInterface, SwoAccess, communication_interface::DapProbe, swo::SwoConfig,
         },
         riscv::{communication_interface::RiscvInterfaceBuilder, dtm::jtag_dtm::JtagDtmBuilder},
     },
@@ -298,7 +299,7 @@ impl Drop for JLink {
 }
 
 #[repr(u8)]
-#[allow(dead_code)]
+#[expect(dead_code)]
 enum Command {
     Version = 0x01,
     Register = 0x09,
@@ -425,8 +426,7 @@ impl JLink {
             let real_caps = self.read_n::<32>().map(Capabilities::from_raw_ex)?;
             if !real_caps.contains_all(caps) {
                 return Err(JlinkError::Other(format!(
-                    "ext. caps are not a superset of legacy caps (legacy: {:?}, ex: {:?})",
-                    caps, real_caps
+                    "ext. caps are not a superset of legacy caps (legacy: {caps:?}, ex: {real_caps:?})"
                 )));
             }
             tracing::debug!("extended caps: {:?}", real_caps);
@@ -473,7 +473,7 @@ impl JLink {
     }
 
     fn read(&self, buf: &mut [u8]) -> Result<(), JlinkError> {
-        let needs_workaround = buf.len() % self.max_read_ep_packet == 0;
+        let needs_workaround = buf.len().is_multiple_of(self.max_read_ep_packet);
         let len = buf.len();
 
         let mut tmp_buffer;
@@ -1088,14 +1088,15 @@ impl DebugProbe for JLink {
 
     fn try_get_riscv_interface_builder<'probe>(
         &'probe mut self,
-    ) -> Result<Box<dyn RiscvInterfaceBuilder<'probe> + 'probe>, DebugProbeError> {
+    ) -> Result<Box<dyn RiscvInterfaceBuilder<'probe> + 'probe>, RiscvError> {
         if self.supported_protocols.contains(&WireProtocol::Jtag) {
             self.select_protocol(WireProtocol::Jtag)?;
             Ok(Box::new(JtagDtmBuilder::new(self)))
         } else {
             Err(DebugProbeError::InterfaceNotAvailable {
                 interface_name: "JTAG",
-            })
+            }
+            .into())
         }
     }
 
@@ -1123,13 +1124,11 @@ impl DebugProbe for JLink {
         Some(self)
     }
 
-    fn try_get_arm_interface<'probe>(
+    fn try_get_arm_debug_interface<'probe>(
         self: Box<Self>,
-    ) -> Result<Box<dyn UninitializedArmProbe + 'probe>, (Box<dyn DebugProbe>, DebugProbeError)>
-    {
-        let uninitialized_interface = ArmCommunicationInterface::new(self, true);
-
-        Ok(Box::new(uninitialized_interface))
+        sequence: Arc<dyn ArmDebugSequence>,
+    ) -> Result<Box<dyn ArmDebugInterface + 'probe>, (Box<dyn DebugProbe>, ArmError)> {
+        Ok(ArmCommunicationInterface::create(self, sequence, true))
     }
 
     fn get_target_voltage(&mut self) -> Result<Option<f32>, DebugProbeError> {
@@ -1140,14 +1139,15 @@ impl DebugProbe for JLink {
     fn try_get_xtensa_interface<'probe>(
         &'probe mut self,
         state: &'probe mut XtensaDebugInterfaceState,
-    ) -> Result<XtensaCommunicationInterface<'probe>, DebugProbeError> {
+    ) -> Result<XtensaCommunicationInterface<'probe>, XtensaError> {
         if self.supported_protocols.contains(&WireProtocol::Jtag) {
             self.select_protocol(WireProtocol::Jtag)?;
             Ok(XtensaCommunicationInterface::new(self, state))
         } else {
             Err(DebugProbeError::InterfaceNotAvailable {
                 interface_name: "JTAG",
-            })
+            }
+            .into())
         }
     }
 
@@ -1345,7 +1345,7 @@ impl HardwareVersion {
 impl fmt::Display for HardwareVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(hw) = self.hardware_type() {
-            write!(f, "{} ", hw)?;
+            write!(f, "{hw} ")?;
         }
         write!(f, "{}.{}.{}", self.major(), self.minor(), self.revision())
     }

@@ -27,17 +27,14 @@ pub fn run_flash_download(
     download_options: &BinaryDownloadOptions,
     probe_options: &LoadedProbeOptions,
     loader: FlashLoader,
-    do_chip_erase: bool,
 ) -> Result<(), OperationError> {
     let mut options = DownloadOptions::default();
     options.keep_unwritten_bytes = download_options.restore_unwritten;
     options.dry_run = probe_options.dry_run();
-    options.do_chip_erase = do_chip_erase;
+    options.do_chip_erase = download_options.chip_erase;
     options.disable_double_buffering = download_options.disable_double_buffering;
     options.verify = download_options.verify;
     options.preverify = download_options.preverify;
-
-    let flash_layout_output_path = download_options.flash_layout_output_path.clone();
 
     let pb = if download_options.disable_progressbars {
         None
@@ -45,27 +42,26 @@ pub fn run_flash_download(
         Some(CliProgressBars::new())
     };
 
-    options.progress = Some(FlashProgress::new(move |event| {
-        if let Some(ref path) = flash_layout_output_path {
-            if let probe_rs::flashing::ProgressEvent::FlashLayoutReady {
+    options.progress = FlashProgress::new(move |event| {
+        if let Some(ref path) = download_options.flash_layout_output_path
+            && let probe_rs::flashing::ProgressEvent::FlashLayoutReady {
                 flash_layout: ref phases,
             } = event
-            {
-                let mut flash_layout = FlashLayout::default();
-                for phase_layout in phases {
-                    flash_layout.merge_from(phase_layout.into());
-                }
-
-                // Visualise flash layout to file if requested.
-                let visualizer = flash_layout.visualize();
-                _ = visualizer.write_svg(path);
+        {
+            let mut flash_layout = FlashLayout::default();
+            for phase_layout in phases {
+                flash_layout.merge_from(phase_layout.into());
             }
+
+            // Visualise flash layout to file if requested.
+            let visualizer = flash_layout.visualize();
+            _ = visualizer.write_svg(path);
         }
 
         if let Some(ref pb) = pb {
             ProgressEvent::from_library_event(event, |event| pb.handle(event));
         }
-    }));
+    });
 
     // Start timer.
     let flash_timer = Instant::now();
@@ -137,7 +133,7 @@ impl ProgressBars {
                 Operation::Program => "Programming",
                 Operation::Verify => "Verifying",
             };
-            ProgressBarGroup::new(format!("{:>13}", message))
+            ProgressBarGroup::new(format!("{message:>13}"))
         })
     }
 }

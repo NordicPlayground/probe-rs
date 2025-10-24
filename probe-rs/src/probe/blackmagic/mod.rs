@@ -3,24 +3,29 @@ use std::{
     char,
     io::{BufReader, BufWriter, Read, Write},
     net::SocketAddr,
+    sync::Arc,
     time::Duration,
 };
 
 use crate::{
     architecture::{
         arm::{
-            ArmCommunicationInterface,
-            communication_interface::{DapProbe, UninitializedArmProbe},
+            ArmCommunicationInterface, ArmDebugInterface, ArmError,
+            communication_interface::DapProbe, sequences::ArmDebugSequence,
         },
-        riscv::{communication_interface::RiscvInterfaceBuilder, dtm::jtag_dtm::JtagDtmBuilder},
+        riscv::{
+            communication_interface::{RiscvError, RiscvInterfaceBuilder},
+            dtm::jtag_dtm::JtagDtmBuilder,
+        },
         xtensa::communication_interface::{
-            XtensaCommunicationInterface, XtensaDebugInterfaceState,
+            XtensaCommunicationInterface, XtensaDebugInterfaceState, XtensaError,
         },
     },
     probe::{
         AutoImplementJtagAccess, DebugProbe, DebugProbeError, DebugProbeInfo, DebugProbeSelector,
         IoSequenceItem, JtagAccess, JtagDriverState, ProbeCreationError, ProbeError, ProbeFactory,
         ProbeStatistics, RawJtagIo, RawSwdIo, SwdSettings, WireProtocol,
+        blackmagic::arm::BlackMagicProbeArmDebug,
     },
 };
 use bitvec::vec::BitVec;
@@ -34,7 +39,6 @@ const BLACK_MAGIC_PROTOCOL_RESPONSE_END: u8 = b'#';
 pub(crate) const BLACK_MAGIC_REMOTE_SIZE_MAX: usize = 1024;
 
 mod arm;
-use arm::UninitializedBlackMagicArmProbe;
 
 /// A factory for creating [`BlackMagicProbe`] instances.
 #[derive(Debug)]
@@ -75,7 +79,7 @@ impl core::fmt::Display for ProtocolVersion {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[derive(Debug)]
 enum RemoteCommand<'a> {
     Handshake(&'a mut [u8]),
@@ -277,7 +281,7 @@ impl RemoteCommand<'_> {
 
 // Implement `ToString` instead of `Display` as this is for generating
 // strings to send over the network, and is not meant for human consumption.
-#[allow(clippy::to_string_trait_impl)]
+#[expect(clippy::to_string_trait_impl)]
 impl std::string::ToString for RemoteCommand<'_> {
     fn to_string(&self) -> String {
         match self {
@@ -285,7 +289,7 @@ impl std::string::ToString for RemoteCommand<'_> {
             RemoteCommand::GetVoltage => " !GV#".to_string(),
             RemoteCommand::GetSpeedKhz => "!Gf#".to_string(),
             RemoteCommand::SetSpeedHz(speed) => {
-                format!("!GF{:08x}#", speed)
+                format!("!GF{speed:08x}#")
             }
             RemoteCommand::HighLevelCheck => "!HC#".to_string(),
             RemoteCommand::SetNrst(set) => format!("!GZ{}#", if *set { '1' } else { '0' }),
@@ -295,10 +299,10 @@ impl std::string::ToString for RemoteCommand<'_> {
             }
             RemoteCommand::SpeedKhz => "!Gf#".to_string(),
             RemoteCommand::RawAccessV0P { rnw, addr, value } => {
-                format!("!HL{:02x}{:04x}{:08x}#", rnw, addr, value)
+                format!("!HL{rnw:02x}{addr:04x}{value:08x}#")
             }
             RemoteCommand::ReadDpV0P { addr } => {
-                format!("!Hdff{:04x}#", addr)
+                format!("!Hdff{addr:04x}#")
             }
             RemoteCommand::ReadApV0P { apsel, addr } => {
                 format!("!Ha{:02x}{:04x}#", apsel, 0x100 | *addr as u16)
@@ -334,7 +338,7 @@ impl std::string::ToString for RemoteCommand<'_> {
                     data.len(),
                 );
                 for b in data.iter() {
-                    s.push_str(&format!("{:02x}", b));
+                    s.push_str(&format!("{b:02x}"));
                 }
                 s.push('#');
                 s
@@ -346,10 +350,10 @@ impl std::string::ToString for RemoteCommand<'_> {
                 addr,
                 value,
             } => {
-                format!("!HL{:02x}{:02x}{:04x}{:08x}#", index, rnw, addr, value)
+                format!("!HL{index:02x}{rnw:02x}{addr:04x}{value:08x}#")
             }
             RemoteCommand::ReadDpV1 { index, addr } => {
-                format!("!Hd{:02x}ff{:04x}#", index, addr)
+                format!("!Hd{index:02x}ff{addr:04x}#")
             }
             RemoteCommand::ReadApV1 { index, apsel, addr } => {
                 format!("!Ha{:02x}{:02x}{:04x}#", index, apsel, 0x100 | *addr as u16)
@@ -398,7 +402,7 @@ impl std::string::ToString for RemoteCommand<'_> {
                     data.len()
                 );
                 for b in data.iter() {
-                    s.push_str(&format!("{:02x}", b));
+                    s.push_str(&format!("{b:02x}"));
                 }
                 s.push('#');
                 s
@@ -410,10 +414,10 @@ impl std::string::ToString for RemoteCommand<'_> {
                 addr,
                 value,
             } => {
-                format!("!AR{:02x}{:02x}{:04x}{:08x}#", index, rnw, addr, value)
+                format!("!AR{index:02x}{rnw:02x}{addr:04x}{value:08x}#")
             }
             RemoteCommand::ReadDpV3 { index, addr } => {
-                format!("!Ad{:02x}ff{:04x}#", index, addr)
+                format!("!Ad{index:02x}ff{addr:04x}#")
             }
             RemoteCommand::ReadApV3 { index, apsel, addr } => {
                 format!("!Aa{:02x}{:02x}{:04x}#", index, apsel, 0x100 | *addr as u16)
@@ -462,7 +466,7 @@ impl std::string::ToString for RemoteCommand<'_> {
                     data.len()
                 );
                 for b in data.iter() {
-                    s.push_str(&format!("{:02x}", b));
+                    s.push_str(&format!("{b:02x}"));
                 }
                 s.push('#');
                 s
@@ -500,7 +504,7 @@ impl std::string::ToString for RemoteCommand<'_> {
                     data.len()
                 );
                 for b in data.iter() {
-                    s.push_str(&format!("{:02x}", b));
+                    s.push_str(&format!("{b:02x}"));
                 }
                 s.push('#');
                 s
@@ -570,8 +574,8 @@ impl core::fmt::Display for RemoteError {
             Self::ParameterError(e) => write!(f, "Remote paramater error with result {:016x}", *e),
             Self::Error(e) => write!(f, "Remote error with result {:016x}", *e),
             Self::Unsupported(e) => write!(f, "Remote command unsupported with result {:016x}", *e),
-            Self::ProbeError(e) => write!(f, "Probe error {}", e),
-            Self::UnsupportedVersion(e) => write!(f, "Only versions 0-4 are supported, not {}", e),
+            Self::ProbeError(e) => write!(f, "Probe error {e}"),
+            Self::UnsupportedVersion(e) => write!(f, "Only versions 0-4 are supported, not {e}"),
         }
     }
 }
@@ -720,7 +724,7 @@ impl BlackMagicProbe {
     ) -> Result<(), RemoteError> {
         let s = command.to_string();
         tracing::debug!(" > {}", s);
-        write!(writer, "{}", s).map_err(RemoteError::ProbeError)?;
+        write!(writer, "{s}").map_err(RemoteError::ProbeError)?;
         writer.flush().map_err(RemoteError::ProbeError)
     }
 
@@ -910,10 +914,6 @@ impl BlackMagicProbe {
     }
 
     /// Perform a single SWDIO command
-    ///
-    /// The caller needs to ensure that the given iterators are not longer than the maximum transfer size
-    /// allowed. It seems that the maximum transfer size is determined by [`self.max_mem_block_size`].
-    #[allow(clippy::unnecessary_fallible_conversions)] //  IoSequenceItem conversion may panic
     fn perform_swdio_transfer<S>(&mut self, swdio: S) -> Result<Vec<bool>, DebugProbeError>
     where
         S: IntoIterator<Item = IoSequenceItem>,
@@ -1129,7 +1129,7 @@ impl DebugProbe for BlackMagicProbe {
 
     fn try_get_riscv_interface_builder<'probe>(
         &'probe mut self,
-    ) -> Result<Box<dyn RiscvInterfaceBuilder<'probe> + 'probe>, DebugProbeError> {
+    ) -> Result<Box<dyn RiscvInterfaceBuilder<'probe> + 'probe>, RiscvError> {
         Ok(Box::new(JtagDtmBuilder::new(self)))
     }
 
@@ -1142,10 +1142,10 @@ impl DebugProbe for BlackMagicProbe {
     }
 
     /// Turn this probe into an ARM probe
-    fn try_get_arm_interface<'probe>(
+    fn try_get_arm_debug_interface<'probe>(
         mut self: Box<Self>,
-    ) -> Result<Box<dyn UninitializedArmProbe + 'probe>, (Box<dyn DebugProbe>, DebugProbeError)>
-    {
+        sequence: Arc<dyn ArmDebugSequence>,
+    ) -> Result<Box<dyn ArmDebugInterface + 'probe>, (Box<dyn DebugProbe>, ArmError)> {
         let has_adiv5 = match self.remote_protocol {
             ProtocolVersion::V0 => false,
             ProtocolVersion::V0P
@@ -1162,9 +1162,12 @@ impl DebugProbe for BlackMagicProbe {
         };
 
         if has_adiv5 {
-            Ok(Box::new(UninitializedBlackMagicArmProbe::new(self)))
+            match BlackMagicProbeArmDebug::new(self, sequence) {
+                Ok(interface) => Ok(Box::new(interface)),
+                Err((probe, err)) => Err((probe.into_probe(), err)),
+            }
         } else {
-            Ok(Box::new(ArmCommunicationInterface::new(self, true)))
+            Ok(ArmCommunicationInterface::create(self, sequence, true)) // TODO: Fixup the error type here
         }
     }
 
@@ -1175,7 +1178,7 @@ impl DebugProbe for BlackMagicProbe {
     fn try_get_xtensa_interface<'probe>(
         &'probe mut self,
         state: &'probe mut XtensaDebugInterfaceState,
-    ) -> Result<XtensaCommunicationInterface<'probe>, DebugProbeError> {
+    ) -> Result<XtensaCommunicationInterface<'probe>, XtensaError> {
         Ok(XtensaCommunicationInterface::new(self, state))
     }
 
@@ -1420,15 +1423,15 @@ impl ProbeFactory for BlackMagicProbeFactory {
 
         // If the serial number is a valid "address:port" string, attempt to
         // connect to it via TCP.
-        if let Some(serial_number) = &selector.serial_number {
-            if let Ok(connection) = std::net::TcpStream::connect(serial_number) {
-                let reader = connection;
-                let writer = reader.try_clone().map_err(|e| {
-                    DebugProbeError::ProbeCouldNotBeCreated(ProbeCreationError::Usb(e))
-                })?;
-                return BlackMagicProbe::new(Box::new(reader), Box::new(writer))
-                    .map(|p| Box::new(p) as Box<dyn DebugProbe>);
-            }
+        if let Some(serial_number) = &selector.serial_number
+            && let Ok(connection) = std::net::TcpStream::connect(serial_number)
+        {
+            let reader = connection;
+            let writer = reader
+                .try_clone()
+                .map_err(|e| DebugProbeError::ProbeCouldNotBeCreated(ProbeCreationError::Usb(e)))?;
+            return BlackMagicProbe::new(Box::new(reader), Box::new(writer))
+                .map(|p| Box::new(p) as Box<dyn DebugProbe>);
         }
 
         // Otherwise, treat it as a serial port and iterate through all ports.

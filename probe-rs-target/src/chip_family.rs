@@ -77,6 +77,15 @@ impl CoreType {
                 | CoreType::Armv8m
         )
     }
+
+    /// Returns the parent architecture family of this core type.
+    pub fn architecture(&self) -> Architecture {
+        match self {
+            CoreType::Riscv => Architecture::Riscv,
+            CoreType::Xtensa => Architecture::Xtensa,
+            _ => Architecture::Arm,
+        }
+    }
 }
 
 /// The architecture family of a specific [`CoreType`].
@@ -88,17 +97,6 @@ pub enum Architecture {
     Riscv,
     /// An Xtensa core.
     Xtensa,
-}
-
-impl CoreType {
-    /// Returns the parent architecture family of this core type.
-    pub fn architecture(&self) -> Architecture {
-        match self {
-            CoreType::Riscv => Architecture::Riscv,
-            CoreType::Xtensa => Architecture::Xtensa,
-            _ => Architecture::Arm,
-        }
-    }
 }
 
 /// Instruction set used by a core
@@ -228,7 +226,7 @@ impl ChipFamily {
     /// This method should be called right after the [`ChipFamily`] is created!
     pub fn validate(&self) -> Result<(), String> {
         self.reject_duplicate_target_names()?;
-        self.ensure_algorithms_exists()?;
+        self.ensure_algorithms_exist()?;
         self.ensure_at_least_one_core()?;
         self.reject_incorrect_core_access_options()?;
         self.validate_memory_regions()?;
@@ -257,7 +255,7 @@ impl ChipFamily {
     }
 
     /// Make sure the algorithms used on the variant actually exist on the family (this is basically a check for typos).
-    fn ensure_algorithms_exists(&self) -> Result<(), String> {
+    fn ensure_algorithms_exist(&self) -> Result<(), String> {
         for variant in &self.variants {
             for algorithm_name in variant.flash_algorithms.iter() {
                 if !self
@@ -266,8 +264,10 @@ impl ChipFamily {
                     .any(|algorithm| &algorithm.name == algorithm_name)
                 {
                     return Err(format!(
-                        "unknown flash algorithm `{}` for variant `{}`",
-                        algorithm_name, variant.name
+                        "The chip variant {chip_name} refers to a flash algorithm {algorithm_name}, \
+                        which is not defined in the {family_name} family.",
+                        chip_name = variant.name,
+                        family_name = self.name,
                     ));
                 }
             }

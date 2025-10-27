@@ -128,7 +128,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                 Ok(())
             }
             Err(error) => {
-                self.send_response::<()>(request, Err(&DebuggerError::Other(anyhow!("{}", error))))
+                self.send_response::<()>(request, Err(&DebuggerError::Other(anyhow!("{error}"))))
             }
         }
     }
@@ -219,8 +219,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             self.send_response::<()>(
                 request,
                 Err(&DebuggerError::Other(anyhow!(
-                    "Could not read any data at address {:#010x}",
-                    address
+                    "Could not read any data at address {address:#010x}"
                 ))),
             )
         }
@@ -313,7 +312,8 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             presentation_hint: None,
             result: format!("<invalid expression {:?}>", arguments.expression),
             type_: None,
-            variables_reference: 0_i64,
+            variables_reference: 0,
+            value_location_reference: None,
         };
 
         if let Some(context) = &arguments.context {
@@ -518,8 +518,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
 
         let Some(repl_command) = repl_commands.first() else {
             return Err(DebuggerError::UserMessage(format!(
-                "Invalid REPL command: {:?}.",
-                command_root
+                "Invalid REPL command: {command_root:?}."
             )));
         };
 
@@ -563,6 +562,8 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             type_: None,
             value: String::new(),
             variables_reference: None,
+            memory_reference: None,
+            value_location_reference: None,
         };
 
         // The arguments.variables_reference contains the reference of the variable container. This can be:
@@ -602,14 +603,13 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                 let mut cache_variable: Option<probe_rs_debug::Variable> = None;
                 let mut variable_cache: Option<&mut probe_rs_debug::VariableCache> = None;
                 for search_frame in target_core.core_data.stack_frames.iter_mut() {
-                    if let Some(search_cache) = &mut search_frame.local_variables {
-                        if let Some(search_variable) =
+                    if let Some(search_cache) = &mut search_frame.local_variables
+                        && let Some(search_variable) =
                             search_cache.get_variable_by_name_and_parent(&variable_name, parent_key)
-                        {
-                            cache_variable = Some(search_variable);
-                            variable_cache = Some(search_cache);
-                            break;
-                        }
+                    {
+                        cache_variable = Some(search_variable);
+                        variable_cache = Some(search_cache);
+                        break;
                     }
                 }
 
@@ -638,10 +638,8 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                             return self.send_response::<SetVariableResponseBody>(
                                 request,
                                 Err(&DebuggerError::Other(anyhow!(
-                                    "Failed to update variable: {}, with new value {:?} : {:?}",
+                                    "Failed to update variable: {}, with new value {new_value:?}: {error:?}",
                                     cache_variable.name,
-                                    new_value,
-                                    error
                                 ))),
                             );
                         }
@@ -676,10 +674,10 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                 if let Some(request) = request {
                     return self.send_response::<()>(
                         request,
-                        Err(&DebuggerError::Other(anyhow!("{}", error))),
+                        Err(&DebuggerError::Other(anyhow!("{error}"))),
                     );
                 } else {
-                    return self.show_error_message(&DebuggerError::Other(anyhow!("{}", error)));
+                    return self.show_error_message(&DebuggerError::Other(anyhow!("{error}")));
                 }
             }
         }
@@ -690,10 +688,8 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
         if let Some(request) = request {
             // Use reset_and_halt(), and then resume again afterwards, depending on the reset_after_halt flag.
             if let Err(error) = target_core.core.reset_and_halt(Duration::from_millis(500)) {
-                return self.send_response::<()>(
-                    request,
-                    Err(&DebuggerError::Other(anyhow!("{}", error))),
-                );
+                return self
+                    .send_response::<()>(request, Err(&DebuggerError::Other(anyhow!("{error}"))));
             }
 
             // Ensure ebreak enters debug mode, this is necessary for soft breakpoints to work on architectures like RISC-V.
@@ -734,7 +730,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                     }
                     Err(error) => self.send_response::<()>(
                         request,
-                        Err(&DebuggerError::Other(anyhow!("{}", error))),
+                        Err(&DebuggerError::Other(anyhow!("{error}"))),
                     ),
                 }
             } else {
@@ -761,7 +757,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             let core_info = match target_core.core.reset_and_halt(Duration::from_millis(500)) {
                 Ok(core_info) => core_info,
                 Err(error) => {
-                    return self.show_error_message(&DebuggerError::Other(anyhow!("{}", error)));
+                    return self.show_error_message(&DebuggerError::Other(anyhow!("{error}")));
                 }
             };
 
@@ -854,8 +850,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                     return self.send_response::<()>(
                         request,
                         Err(&DebuggerError::Other(anyhow!(
-                            "Failed to clear existing breakpoints before setting new ones : {}",
-                            error
+                            "Failed to clear existing breakpoints before setting new ones: {error}"
                         ))),
                     );
                 }
@@ -907,6 +902,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                             instruction_reference: Some(format!("{address:#010X}")),
                             offset: None,
                             verified: true,
+                            reason: None,
                         }),
                         Err(error) => created_breakpoints.push(Breakpoint {
                             column: None,
@@ -919,6 +915,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                             instruction_reference: None,
                             offset: None,
                             verified: false,
+                            reason: Some("failed".to_string()),
                         }),
                     };
                 }
@@ -963,11 +960,11 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
 
         // In addition to the response values, also show a message to users for any breakpoints that could not be verified.
         for breakpoint_response in &instruction_breakpoint_body.breakpoints {
-            if !breakpoint_response.verified {
-                if let Some(message) = &breakpoint_response.message {
-                    self.log_to_console(format!("Warning: {message}"));
-                    self.show_message(MessageSeverity::Warning, message.clone());
-                }
+            if !breakpoint_response.verified
+                && let Some(message) = &breakpoint_response.message
+            {
+                self.log_to_console(format!("Warning: {message}"));
+                self.show_message(MessageSeverity::Warning, message.clone());
             }
         }
 
@@ -994,8 +991,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
         self.send_response::<()>(
             request,
             Err(&DebuggerError::Other(anyhow!(
-                "Received request for `threads`, while last known core status was {:?}",
-                current_core_status
+                "Received request for `threads`, while last known core status was {current_core_status:?}",
             ))),
         )
     }
@@ -1088,8 +1084,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             return self.send_response::<()>(
                 request,
                 Err(&DebuggerError::Other(anyhow!(
-                    "Request for stack trace failed with invalid arguments: {:?}",
-                    arguments
+                    "Request for stack trace failed with invalid arguments: {arguments:?}"
                 ))),
             );
         }
@@ -1281,8 +1276,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
 
         if assembly_lines.is_empty() {
             Err(DebuggerError::Other(anyhow::anyhow!(
-                "No valid instructions found at memory reference {:#010x?}",
-                memory_reference
+                "No valid instructions found at memory reference {memory_reference:#010x?}"
             )))
         } else {
             Ok(assembly_lines)
@@ -1365,49 +1359,50 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
             .core_peripherals
             .as_ref()
             .map(|cp| &cp.svd_variable_cache)
+            && svd_cache.get_variable_by_key(variable_ref).is_some()
         {
-            if svd_cache.get_variable_by_key(variable_ref).is_some() {
-                let dap_variables: Vec<Variable> = svd_cache
-                    .get_children(variable_ref)
-                    .iter()
-                    // Convert the `probe_rs::debug::Variable` to `probe_rs_debugger::dap_types::Variable`
-                    .map(|variable| {
-                        let (variables_reference, named_child_variables_cnt) =
-                            get_svd_variable_reference(variable, svd_cache);
+            let dap_variables: Vec<Variable> = svd_cache
+                .get_children(variable_ref)
+                .iter()
+                // Convert the `probe_rs::debug::Variable` to `probe_rs_debugger::dap_types::Variable`
+                .map(|variable| {
+                    let (variables_reference, named_child_variables_cnt) =
+                        get_svd_variable_reference(variable, svd_cache);
 
-                        // We use fully qualified Peripheral.Register.Field form to ensure the `evaluate` request can find the right registers and fields by name.
-                        let name = if let Some(last_part) =
-                            variable.name().split_terminator('.').next_back()
-                        {
-                            last_part.to_string()
-                        } else {
-                            variable.name().to_string()
-                        };
+                    // We use fully qualified Peripheral.Register.Field form to ensure the `evaluate` request can find the right registers and fields by name.
+                    let name = if let Some(last_part) =
+                        variable.name().split_terminator('.').next_back()
+                    {
+                        last_part.to_string()
+                    } else {
+                        variable.name().to_string()
+                    };
 
-                        Variable {
-                            name,
-                            evaluate_name: Some(variable.name().to_string()),
-                            memory_reference: variable.memory_reference(),
-                            indexed_variables: None,
-                            named_variables: Some(named_child_variables_cnt),
-                            presentation_hint: None,
-                            type_: variable.type_name(),
-                            value: {
-                                // The SVD cache is not automatically refreshed on every stack trace, and we only need to refresh the field values.
-                                variable.get_value(&mut target_core.core)
-                            },
-                            variables_reference: variables_reference.into(),
-                        }
-                    })
-                    .collect();
+                    Variable {
+                        name,
+                        evaluate_name: Some(variable.name().to_string()),
+                        memory_reference: variable.memory_reference(),
+                        indexed_variables: None,
+                        named_variables: Some(named_child_variables_cnt),
+                        presentation_hint: None,
+                        type_: variable.type_name(),
+                        value: {
+                            // The SVD cache is not automatically refreshed on every stack trace, and we only need to refresh the field values.
+                            variable.get_value(&mut target_core.core)
+                        },
+                        variables_reference: variables_reference.into(),
+                        declaration_location_reference: None,
+                        value_location_reference: None,
+                    }
+                })
+                .collect();
 
-                return self.send_response(
-                    request,
-                    Ok(Some(VariablesResponseBody {
-                        variables: dap_variables,
-                    })),
-                );
-            }
+            return self.send_response(
+                request,
+                Ok(Some(VariablesResponseBody {
+                    variables: dap_variables,
+                })),
+            );
         }
 
         let mut parent_variable: Option<probe_rs_debug::Variable> = None;
@@ -1416,36 +1411,36 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
 
         let registers;
 
-        if let Some(search_cache) = &mut target_core.core_data.static_variables {
-            if let Some(search_variable) = search_cache.get_variable_by_key(variable_ref) {
-                parent_variable = Some(search_variable);
-                variable_cache = Some(search_cache);
+        if let Some(search_cache) = &mut target_core.core_data.static_variables
+            && let Some(search_variable) = search_cache.get_variable_by_key(variable_ref)
+        {
+            parent_variable = Some(search_variable);
+            variable_cache = Some(search_cache);
 
-                if let Some(top_level_frame) = target_core.core_data.stack_frames.first() {
-                    registers = top_level_frame.registers.clone();
+            if let Some(top_level_frame) = target_core.core_data.stack_frames.first() {
+                registers = top_level_frame.registers.clone();
 
-                    frame_info = Some(StackFrameInfo {
-                        registers: &registers,
-                        frame_base: top_level_frame.frame_base,
-                        canonical_frame_address: top_level_frame.canonical_frame_address,
-                    });
-                }
+                frame_info = Some(StackFrameInfo {
+                    registers: &registers,
+                    frame_base: top_level_frame.frame_base,
+                    canonical_frame_address: top_level_frame.canonical_frame_address,
+                });
             }
         }
 
         if parent_variable.is_none() {
             for stack_frame in target_core.core_data.stack_frames.iter_mut() {
-                if let Some(search_cache) = &mut stack_frame.local_variables {
-                    if let Some(search_variable) = search_cache.get_variable_by_key(variable_ref) {
-                        parent_variable = Some(search_variable);
-                        variable_cache = Some(search_cache);
-                        frame_info = Some(StackFrameInfo {
-                            registers: &stack_frame.registers,
-                            frame_base: stack_frame.frame_base,
-                            canonical_frame_address: stack_frame.canonical_frame_address,
-                        });
-                        break;
-                    }
+                if let Some(search_cache) = &mut stack_frame.local_variables
+                    && let Some(search_variable) = search_cache.get_variable_by_key(variable_ref)
+                {
+                    parent_variable = Some(search_variable);
+                    variable_cache = Some(search_cache);
+                    frame_info = Some(StackFrameInfo {
+                        registers: &stack_frame.registers,
+                        frame_base: stack_frame.frame_base,
+                        canonical_frame_address: stack_frame.canonical_frame_address,
+                    });
+                    break;
                 }
 
                 if stack_frame.id == variable_ref {
@@ -1465,6 +1460,8 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                             type_: Some(format!("{}", VariableName::RegistersRoot)),
                             value: register.value.unwrap_or_default().to_string(),
                             variables_reference: 0,
+                            declaration_location_reference: None,
+                            value_location_reference: None,
                         })
                         .collect();
                     return self.send_response(
@@ -1480,23 +1477,22 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
         // During the intial stack unwind operation, if encounter [Variable]'s with [VariableNodeType::is_deferred()], they will not be auto-expanded and included in the variable cache.
         // TODO: Use the DAP "Invalidated" event to refresh the variables for this stackframe. It will allow the UI to see updated compound values for pointer variables based on the newly resolved children.
         if let Some(variable_cache) = variable_cache {
-            if let Some(parent_variable) = parent_variable.as_mut() {
-                if parent_variable.variable_node_type.is_deferred()
-                    && !variable_cache.has_children(parent_variable)
-                {
-                    if let Some(frame_info) = frame_info {
-                        target_core.core_data.debug_info.cache_deferred_variables(
-                            variable_cache,
-                            &mut target_core.core,
-                            parent_variable,
-                            frame_info,
-                        )?;
-                    } else {
-                        tracing::error!(
-                            "Could not cache deferred child variables for variable: {}. No register data available.",
-                            parent_variable.name
-                        );
-                    }
+            if let Some(parent_variable) = parent_variable.as_mut()
+                && parent_variable.variable_node_type.is_deferred()
+                && !variable_cache.has_children(parent_variable)
+            {
+                if let Some(frame_info) = frame_info {
+                    target_core.core_data.debug_info.cache_deferred_variables(
+                        variable_cache,
+                        &mut target_core.core,
+                        parent_variable,
+                        frame_info,
+                    )?;
+                } else {
+                    tracing::error!(
+                        "Could not cache deferred child variables for variable: {}. No register data available.",
+                        parent_variable.name
+                    );
                 }
             }
 
@@ -1535,6 +1531,8 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
                         type_: Some(variable.type_name()),
                         value: variable.to_string(variable_cache),
                         variables_reference: variables_reference.into(),
+                        declaration_location_reference: None,
+                        value_location_reference: None,
                     }
                 })
                 .collect();
@@ -1562,7 +1560,7 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
         request: &Request,
     ) -> Result<()> {
         if let Err(error) = target_core.core.run() {
-            self.send_response::<()>(request, Err(&DebuggerError::Other(anyhow!("{}", error))))?;
+            self.send_response::<()>(request, Err(&DebuggerError::Other(anyhow!("{error}"))))?;
             return Err(error.into());
         }
 
@@ -1769,13 +1767,13 @@ impl<P: ProtocolAdapter> DebugAdapter<P> {
         self.adapter.send_event(event_type, event_body)
     }
 
-    pub fn log_to_console<S: Into<String>>(&mut self, message: S) -> bool {
+    pub fn log_to_console(&mut self, message: impl AsRef<str>) -> bool {
         self.adapter.log_to_console(message)
     }
 
     /// Send a custom "probe-rs-show-message" event to the MS DAP Client.
     /// The `severity` field can be one of `information`, `warning`, or `error`.
-    pub fn show_message(&mut self, severity: MessageSeverity, message: impl Into<String>) -> bool {
+    pub fn show_message(&mut self, severity: MessageSeverity, message: impl AsRef<str>) -> bool {
         self.adapter.show_message(severity, message)
     }
 
@@ -1912,11 +1910,15 @@ pub fn get_arguments<T: DeserializeOwned, P: ProtocolAdapter>(
     match serde_json::from_value(raw_arguments.to_owned()) {
         Ok(value) => Ok(value),
         Err(e) => {
+            let err = anyhow!(
+                "Failed to deserialize {} arguments: {}, error: {}",
+                req.command,
+                raw_arguments,
+                e
+            );
+
             debug_adapter.send_response::<()>(req, Err(&e.into()))?;
-            Err(DebuggerError::Other(anyhow!(
-                "Failed to deserialize {} arguments",
-                req.command
-            )))
+            Err(DebuggerError::Other(err))
         }
     }
 }

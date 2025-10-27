@@ -175,18 +175,17 @@ impl DebugInfo {
                             //
                             // (If we don't do this, you get the artificial effect where the debugger
                             // steps to the top of the file when it is steppping out of a function.)
-                            if let Some(previous_row) = previous_row {
-                                if let Some(path) =
+                            if let Some(previous_row) = previous_row
+                                && let Some(path) =
                                     self.find_file_and_directory(unit, previous_row.file_index())
-                                {
-                                    tracing::debug!("{:#010x} - {:?}", address, previous_row.isa());
-                                    return Some(SourceLocation {
-                                        line: previous_row.line().map(NonZeroU64::get),
-                                        column: Some(previous_row.column().into()),
-                                        path,
-                                        address: Some(previous_row.address()),
-                                    });
-                                }
+                            {
+                                tracing::debug!("{:#010x} - {:?}", address, previous_row.isa());
+                                return Some(SourceLocation {
+                                    line: previous_row.line().map(NonZeroU64::get),
+                                    column: Some(previous_row.column().into()),
+                                    path,
+                                    address: Some(previous_row.address()),
+                                });
                             }
                         }
                         Ordering::Less => {}
@@ -467,7 +466,7 @@ impl DebugInfo {
 
         // Handle last function, which contains no further inlined functions
         // `unwrap`: Checked at beginning of loop, functions must contain at least one value
-        #[allow(clippy::unwrap_used)]
+        #[expect(clippy::unwrap_used)]
         let last_function = functions.last().unwrap();
 
         let function_name = last_function
@@ -921,7 +920,7 @@ impl DebugInfo {
     pub(crate) fn get_function_dies(
         &self,
         address: u64,
-    ) -> Result<(&UnitInfo, Vec<FunctionDie>), DebugError> {
+    ) -> Result<(&UnitInfo, Vec<FunctionDie<'_>>), DebugError> {
         for unit_info in &self.unit_infos {
             let function_dies = unit_info.get_function_dies(self, address)?;
 
@@ -1009,8 +1008,7 @@ pub fn get_unwind_info<'a>(
 ) -> Result<&'a gimli::UnwindTableRow<GimliReaderOffset>, DebugError> {
     let transform_error = |error| {
         DebugError::Other(format!(
-            "UNWIND: Error reading FrameDescriptorEntry at PC={:x} : {}",
-            frame_program_counter, error
+            "UNWIND: Error reading FrameDescriptorEntry at PC={frame_program_counter:x} : {error}"
         ))
     };
 
@@ -1289,8 +1287,7 @@ fn unwind_register_using_rule(
                 }
                 _ => {
                     return Err(Error::Other(format!(
-                        "UNWIND: Address size {} not supported.",
-                        address_size
+                        "UNWIND: Address size {address_size} not supported."
                     )));
                 }
             };
@@ -1353,8 +1350,9 @@ fn unwind_program_counter_register(
                     //
                     // We have to clear the last bit to ensure the PC is half-word aligned. (on ARM architecture,
                     // when in Thumb state for certain instruction types will set the LSB to 1)
-                    *register_rule_string = "PC=(unwound LR & !0b1) (dwarf Undefined)".to_string();
-                    Some(RegisterValue::U32(return_address & !0b1))
+                    *register_rule_string =
+                        "PC=(unwound (LR - 2) & !0b1) (dwarf Undefined)".to_string();
+                    Some(RegisterValue::U32((return_address - 2) & !0b1))
                 }
                 Some(InstructionSet::RV32C) => {
                     *register_rule_string = "PC=(unwound x1 - 2) (dwarf Undefined)".to_string();
@@ -1410,8 +1408,7 @@ fn add_to_address(address: u64, offset: i64, address_size_in_bytes: usize) -> u6
         }
         _ => {
             panic!(
-                "UNWIND: Address size {} not supported.  Please report this as a bug.",
-                address_size_in_bytes
+                "UNWIND: Address size {address_size_in_bytes} not supported.  Please report this as a bug."
             );
         }
     }
@@ -1426,7 +1423,6 @@ mod test {
             exception_handler_for_core,
         },
         stack_frame::{StackFrameInfo, TestFormatter},
-        test::debug_registers,
     };
 
     use gimli::RegisterRule;
@@ -1712,7 +1708,7 @@ mod test {
             "__cortex_m_rt_SVCall_trampoline".to_string()
         );
 
-        assert_eq!(frames[1].pc, RegisterValue::U32(0x0000018A)); // <-- This is the instruction *after* the jump into the topmost frame.
+        assert_eq!(frames[1].pc, RegisterValue::U32(0x00000188)); // <-- This is the instruction for the jump into the topmost frame.
 
         // The PC value in the exception data
         // depends on the exception type, and for some exceptions, it will
@@ -1940,7 +1936,7 @@ mod test {
         let mut adapter = CoreDump::load_raw(coredump).unwrap();
         let debug_info = DebugInfo::from_file(elf).unwrap();
 
-        let initial_registers = debug_registers(&adapter);
+        let initial_registers = DebugRegisters::from_coredump(&adapter);
         let exception_handler = exception_handler_for_core(adapter.core_type());
         let instruction_set = adapter.instruction_set();
 
@@ -1985,7 +1981,7 @@ mod test {
 
         let snapshot_name = test_name.to_string();
 
-        let initial_registers = debug_registers(&adapter);
+        let initial_registers = DebugRegisters::from_coredump(&adapter);
         let exception_handler = exception_handler_for_core(adapter.core_type());
         let instruction_set = adapter.instruction_set();
 
@@ -2037,7 +2033,7 @@ mod test {
         let coredump_path = coredump_path(format!("debug-unwind-tests/{chip_name}"));
         let mut adapter = CoreDump::load(&coredump_path).unwrap();
 
-        let initial_registers = debug_registers(&adapter);
+        let initial_registers = DebugRegisters::from_coredump(&adapter);
 
         let snapshot_name = format!("{chip_name}_static_variables");
 
@@ -2069,8 +2065,7 @@ mod test {
             .find(|path| path.exists())
             .unwrap_or_else(|| {
                 panic!(
-                    "No coredump found for chip {base}. Expected one of: {:?}",
-                    possible_coredump_paths
+                    "No coredump found for chip {base}. Expected one of: {possible_coredump_paths:?}"
                 )
             })
             .clone()

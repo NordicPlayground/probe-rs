@@ -7,8 +7,8 @@ use bitvec::prelude::*;
 use probe_rs_target::ScanChainElement;
 
 use crate::probe::{
-    AutoImplementJtagAccess, BatchExecutionError, ChainParams, CommandResult, DebugProbeError,
-    DeferredResultSet, JtagAccess, JtagCommand, JtagCommandQueue, JtagSequence, RawJtagIo,
+    AutoImplementJtagAccess, BatchExecutionError, ChainParams, CommandQueue, CommandResult,
+    DebugProbeError, DeferredResultSet, JtagAccess, JtagCommand, JtagSequence, RawJtagIo,
 };
 
 pub(crate) fn bits_to_byte(bits: impl IntoIterator<Item = bool>) -> u32 {
@@ -110,6 +110,7 @@ pub(crate) fn extract_idcodes<T: BitStore>(
     mut dr: &BitSlice<T>,
 ) -> Result<Vec<Option<IdCode>>, ScanChainError> {
     let mut idcodes = Vec::new();
+    let mut accumulated_bypass_taps = 0;
 
     while !dr.is_empty() {
         if dr[0] {
@@ -130,12 +131,19 @@ pub(crate) fn extract_idcodes<T: BitStore>(
                 tracing::error!("Invalid IDCODE: {:08X}", idcode.0);
                 return Err(ScanChainError::InvalidIdCode);
             }
+
+            if accumulated_bypass_taps != 0 {
+                tracing::info!("Appending {accumulated_bypass_taps} bypass taps");
+                for _ in 0..accumulated_bypass_taps {
+                    idcodes.push(None);
+                }
+                accumulated_bypass_taps = 0;
+            }
             tracing::info!("Found IDCODE: {idcode}");
             idcodes.push(Some(idcode));
             dr = &dr[32..];
         } else {
-            idcodes.push(None);
-            tracing::info!("Found bypass TAP");
+            accumulated_bypass_taps += 1;
             dr = &dr[1..];
         }
     }
@@ -249,11 +257,11 @@ pub(crate) fn extract_ir_lengths<T: BitStore>(
             let mut irlens = starts_to_lengths(&starts, ir.len()).into_iter();
             let mut merged = Vec::new();
             while let Some(len) = irlens.next() {
-                if len == 2 {
-                    if let Some(next) = irlens.next() {
-                        merged.push(len + next);
-                        continue;
-                    }
+                if len == 2
+                    && let Some(next) = irlens.next()
+                {
+                    merged.push(len + next);
+                    continue;
                 }
                 merged.push(len);
             }
@@ -533,8 +541,7 @@ fn prepare_write_register(
 ) -> Result<usize, DebugProbeError> {
     if address > protocol.state().max_ir_address() {
         return Err(DebugProbeError::Other(format!(
-            "Invalid instruction register access: {}",
-            address
+            "Invalid instruction register access: {address}"
         )));
     }
 
@@ -709,8 +716,8 @@ impl<Probe: AutoImplementJtagAccess> JtagAccess for Probe {
     #[tracing::instrument(skip(self, writes))]
     fn write_register_batch(
         &mut self,
-        writes: &JtagCommandQueue,
-    ) -> Result<DeferredResultSet, BatchExecutionError> {
+        writes: &CommandQueue<JtagCommand>,
+    ) -> Result<DeferredResultSet<CommandResult>, BatchExecutionError> {
         let mut bits = Vec::with_capacity(writes.len());
         let t1 = std::time::Instant::now();
         tracing::debug!("Preparing {} writes...", writes.len());
@@ -781,10 +788,10 @@ mod tests {
 
     #[test]
     fn id_code_display() {
-        let debug_fmt = format!("{idcode}", idcode = ARM_TAP);
+        let debug_fmt = format!("{ARM_TAP}");
         assert_eq!(debug_fmt, "0x4BA00477 (ARM Ltd)");
 
-        let debug_fmt = format!("{idcode}", idcode = STM_BS_TAP);
+        let debug_fmt = format!("{STM_BS_TAP}");
         assert_eq!(debug_fmt, "0x06433041 (STMicroelectronics)");
     }
 

@@ -449,10 +449,10 @@ fn print_fragment_list(fragment_list: FragmentList, pr: Option<u64>) -> Result<(
     let message = fragment_list.display();
     println!("{message}");
 
-    if !fragment_list.is_ok() {
-        if let Some(pr) = pr {
-            write_comment(pr, &message)?;
-        }
+    if !fragment_list.is_ok()
+        && let Some(pr) = pr
+    {
+        write_comment(pr, &message)?;
     }
 
     Ok(())
@@ -513,7 +513,7 @@ fn assemble_changelog(
         "No fragments found for changelog, aborting."
     );
 
-    println!("Assembled changelog for version {}:", version);
+    println!("Assembled changelog for version {version}:");
     println!("{}", String::from_utf8(assembled.clone())?);
 
     let old_changelong_content = std::fs::read_to_string(CHANGELOG_FILE)?;
@@ -528,10 +528,10 @@ fn assemble_changelog(
             content_inserted = true
         }
 
-        writeln!(changelog_file, "{}", line)?;
+        writeln!(changelog_file, "{line}")?;
     }
 
-    println!("Changelog {} updated.", CHANGELOG_FILE);
+    println!("Changelog {CHANGELOG_FILE} updated.");
 
     if !no_cleanup {
         println!("Cleaning up fragments...");
@@ -564,7 +564,7 @@ fn write_changelog_section(
     heading: &str,
     fragments: &[Fragment],
 ) -> anyhow::Result<()> {
-    writeln!(writer, "### {}", heading)?;
+    writeln!(writer, "### {heading}")?;
     writeln!(writer)?;
 
     for fragment in fragments {
@@ -584,12 +584,12 @@ fn write_changelog_section(
             anyhow::bail!("Empty changelog fragment {}", fragment.path.display());
         };
 
-        write!(writer, " - {}", first_line)?;
+        write!(writer, " - {first_line}")?;
 
         // Write remaining lines
         for line in lines {
             writeln!(writer)?;
-            write!(writer, "   {}", line)?;
+            write!(writer, "   {line}")?;
         }
 
         if let Some(pr_number) = &fragment.pr_number {

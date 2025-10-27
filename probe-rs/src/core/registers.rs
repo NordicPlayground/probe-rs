@@ -53,9 +53,9 @@ pub enum RegisterRole {
 impl Display for RegisterRole {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            RegisterRole::Core(name) => write!(f, "{}", name),
-            RegisterRole::Argument(name) => write!(f, "{}", name),
-            RegisterRole::Return(name) => write!(f, "{}", name),
+            RegisterRole::Core(name) => write!(f, "{name}"),
+            RegisterRole::Argument(name) => write!(f, "{name}"),
+            RegisterRole::Return(name) => write!(f, "{name}"),
             RegisterRole::ProgramCounter => write!(f, "PC"),
             RegisterRole::FramePointer => write!(f, "FP"),
             RegisterRole::StackPointer => write!(f, "SP"),
@@ -65,7 +65,7 @@ impl Display for RegisterRole {
             RegisterRole::ReturnAddress => write!(f, "LR"),
             RegisterRole::FloatingPoint => write!(f, "FPU"),
             RegisterRole::FloatingPointStatus => write!(f, "FPSR"),
-            RegisterRole::Other(name) => write!(f, "{}", name),
+            RegisterRole::Other(name) => write!(f, "{name}"),
         }
     }
 }
@@ -117,7 +117,7 @@ pub struct CoreRegister {
 
 impl PartialOrd for CoreRegister {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.id.cmp(&other.id))
+        Some(self.cmp(other))
     }
 }
 
@@ -130,11 +130,11 @@ impl Ord for CoreRegister {
 impl Display for CoreRegister {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let primary_name = self.name();
-        write!(f, "{}", primary_name)?;
+        write!(f, "{primary_name}")?;
         if !self.roles.is_empty() {
             for role in self.roles {
                 if primary_name != role.to_string() {
-                    write!(f, "/{}", role)?;
+                    write!(f, "/{role}")?;
                 }
             }
         }
@@ -249,8 +249,7 @@ impl RegisterValue {
                     Ok(())
                 } else {
                     Err(Error::Other(format!(
-                        "Overflow error: Attempting to add {} bytes to Register value {}",
-                        bytes, self
+                        "Overflow error: Attempting to add {bytes} bytes to Register value {self}"
                     )))
                 }
             }
@@ -260,8 +259,7 @@ impl RegisterValue {
                     Ok(())
                 } else {
                     Err(Error::Other(format!(
-                        "Overflow error: Attempting to add {} bytes to Register value {}",
-                        bytes, self
+                        "Overflow error: Attempting to add {bytes} bytes to Register value {self}"
                     )))
                 }
             }
@@ -271,8 +269,7 @@ impl RegisterValue {
                     Ok(())
                 } else {
                     Err(Error::Other(format!(
-                        "Overflow error: Attempting to add {} bytes to Register value {}",
-                        bytes, self
+                        "Overflow error: Attempting to add {bytes} bytes to Register value {self}"
                     )))
                 }
             }
@@ -288,8 +285,7 @@ impl RegisterValue {
                     Ok(())
                 } else {
                     Err(Error::Other(format!(
-                        "Overflow error: Attempting to subtract {} bytes to Register value {}",
-                        bytes, self
+                        "Overflow error: Attempting to subtract {bytes} bytes to Register value {self}"
                     )))
                 }
             }
@@ -299,8 +295,7 @@ impl RegisterValue {
                     Ok(())
                 } else {
                     Err(Error::Other(format!(
-                        "Overflow error: Attempting to subtract {} bytes to Register value {}",
-                        bytes, self
+                        "Overflow error: Attempting to subtract {bytes} bytes to Register value {self}"
                     )))
                 }
             }
@@ -310,8 +305,7 @@ impl RegisterValue {
                     Ok(())
                 } else {
                     Err(Error::Other(format!(
-                        "Overflow error: Attempting to subtract {} bytes to Register value {}",
-                        bytes, self
+                        "Overflow error: Attempting to subtract {bytes} bytes to Register value {self}"
                     )))
                 }
             }
@@ -411,10 +405,10 @@ impl TryInto<u32> for RegisterValue {
             Self::U32(v) => Ok(v),
             Self::U64(v) => v
                 .try_into()
-                .map_err(|_| crate::Error::Other(format!("Value '{}' too large for u32", v))),
+                .map_err(|_| crate::Error::Other(format!("Value '{v}' too large for u32"))),
             Self::U128(v) => v
                 .try_into()
-                .map_err(|_| crate::Error::Other(format!("Value '{}' too large for u32", v))),
+                .map_err(|_| crate::Error::Other(format!("Value '{v}' too large for u32"))),
         }
     }
 }
@@ -428,7 +422,7 @@ impl TryInto<u64> for RegisterValue {
             Self::U64(v) => Ok(v),
             Self::U128(v) => v
                 .try_into()
-                .map_err(|_| crate::Error::Other(format!("Value '{}' too large for u64", v))),
+                .map_err(|_| crate::Error::Other(format!("Value '{v}' too large for u64"))),
         }
     }
 }
@@ -605,6 +599,20 @@ impl CoreRegisters {
             .iter()
             .find(|r| r.register_has_role(RegisterRole::FloatingPointStatus))
             .cloned()
+    }
+
+    /// Returns an iterator over the descriptions of all the registers of this core.
+    pub fn fpu_status_registers(&self) -> Option<impl Iterator<Item = &CoreRegister>> {
+        let mut fpu_registers = self
+            .0
+            .iter()
+            .filter(|r| r.register_has_role(RegisterRole::FloatingPointStatus))
+            .peekable();
+        if fpu_registers.peek().is_some() {
+            Some(fpu_registers.cloned())
+        } else {
+            None
+        }
     }
 
     /// Returns an iterator over the descriptions of all the registers of this core.

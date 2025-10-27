@@ -6,7 +6,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use bitvec::{bitvec, order::Lsb0, vec::BitVec, view::BitView};
+use bitvec::{bitvec, field::BitField, order::Lsb0, vec::BitVec, view::BitView};
 use nusb::DeviceInfo;
 use probe_rs_target::ScanChainElement;
 
@@ -14,7 +14,8 @@ use self::{commands::Speed, usb_interface::WchLinkUsbDevice};
 use super::JtagAccess;
 use crate::{
     architecture::riscv::{
-        communication_interface::RiscvInterfaceBuilder, dtm::jtag_dtm::JtagDtmBuilder,
+        communication_interface::{RiscvError, RiscvInterfaceBuilder},
+        dtm::jtag_dtm::JtagDtmBuilder,
     },
     probe::{
         DebugProbe, DebugProbeError, DebugProbeInfo, DebugProbeSelector, JtagSequence, ProbeError,
@@ -226,7 +227,7 @@ impl WchLink {
         self.v_minor = probe_info.minor_version;
 
         if self.v_major != 0x02 && self.v_minor < 0x07 {
-            return Err(WchLinkError::UnsupportedFirmwareVersion.into());
+            return Err(WchLinkError::UnsupportedFirmwareVersion("2.7").into());
         }
 
         self.variant = probe_info.variant;
@@ -251,8 +252,8 @@ impl WchLink {
             version_code
         );
 
-        if self.v_major != 0x02 && self.v_minor > 7 {
-            return Err(WchLinkError::UnsupportedFirmwareVersion.into());
+        if self.v_major != 0x02 && self.v_minor < 0x7 {
+            return Err(WchLinkError::UnsupportedFirmwareVersion("2.7").into());
         }
         self.name = format!("{} v{}.{}", self.variant, self.v_major, self.v_minor);
 
@@ -370,7 +371,7 @@ impl DebugProbe for WchLink {
 
     fn try_get_riscv_interface_builder<'probe>(
         &'probe mut self,
-    ) -> Result<Box<dyn RiscvInterfaceBuilder<'probe> + 'probe>, DebugProbeError> {
+    ) -> Result<Box<dyn RiscvInterfaceBuilder<'probe> + 'probe>, RiscvError> {
         Ok(Box::new(JtagDtmBuilder::new(self)))
     }
 }
@@ -393,16 +394,19 @@ impl JtagAccess for WchLink {
         tracing::debug!("read register 0x{:08x}", address);
         assert_eq!(len, 32);
 
+        let mut ret = bitvec![0; len as usize];
         match address as u8 {
             REG_IDCODE_ADDRESS => {
                 // using hard coded idcode 0x00000001, the same as WCH's openocd fork
                 tracing::debug!("using hard coded idcode 0x00000001");
-                Ok(0x1_usize.view_bits().to_bitvec())
+                ret[0..8].store_le::<u8>(0x1);
+                Ok(ret)
             }
             REG_DTMCS_ADDRESS => {
                 // See: RISC-V Debug Specification, 6.1.4
                 // 0x71: abits=7, version=1(1.0)
-                Ok(0x71_usize.view_bits().to_bitvec())
+                ret[0..8].store_le::<u8>(0x71);
+                Ok(ret)
             }
             REG_BYPASS_ADDRESS => Ok(bitvec![0; 4]),
             _ => panic!("unknown read register address {address:08x}"),
@@ -436,7 +440,9 @@ impl JtagAccess for WchLink {
                     return Err(WchLinkError::UnsupportedOperation.into());
                 }
 
-                Ok(0x71_usize.view_bits().to_bitvec())
+                let mut ret = bitvec![0; len as usize];
+                ret[0..8].store_le::<u8>(0x71);
+                Ok(ret)
             }
             REG_DMI_ADDRESS => {
                 assert_eq!(
@@ -491,12 +497,12 @@ impl JtagAccess for WchLink {
                     | (op as u128);
 
                 let ret_bytes = ret.to_le_bytes();
-                let mut ret = bitvec![0;32];
-                for byte in ret_bytes.iter() {
-                    ret.extend_from_bitslice(byte.view_bits::<Lsb0>());
-                }
-
-                Ok(ret)
+                Ok(ret_bytes
+                    .iter()
+                    .fold(BitVec::with_capacity(128), |mut acc, s| {
+                        acc.extend_from_bitslice(s.view_bits::<Lsb0>());
+                        acc
+                    }))
             }
             _ => unreachable!("unknown register address 0x{:08x}", address),
         }
@@ -549,8 +555,8 @@ fn list_wlink_devices() -> Vec<DebugProbeInfo> {
 pub(crate) enum WchLinkError {
     /// Unknown WCH-Link device.
     UnknownDevice,
-    /// Firmware version is not supported.
-    UnsupportedFirmwareVersion,
+    /// The firmware on the probe is outdated, and not supported by probe-rs. The minimum supported firmware version is {0}.
+    UnsupportedFirmwareVersion(&'static str),
     /// Not enough bytes written.
     NotEnoughBytesWritten { is: usize, should: usize },
     /// Not enough bytes read.

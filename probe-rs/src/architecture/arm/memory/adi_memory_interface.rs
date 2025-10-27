@@ -1,17 +1,13 @@
-use std::any::Any;
-
 use zerocopy::IntoBytes;
 
 use crate::{
     CoreStatus, MemoryInterface,
     architecture::arm::{
-        ArmCommunicationInterface, ArmError, ArmProbeInterface, DapAccess, FullyQualifiedApAddress,
+        ArmDebugInterface, ArmError, DapAccess, FullyQualifiedApAddress,
         ap::{
             AccessPortType, ApAccess, CSW, DataSize,
             memory_ap::{MemoryAp, MemoryApType},
         },
-        communication_interface::{FlushableArmAccess, Initialized},
-        dp::DpAccess,
         memory::ArmMemoryInterface,
     },
     probe::DebugProbeError,
@@ -33,7 +29,7 @@ pub(crate) struct ADIMemoryInterface<'interface, APA> {
 
 impl<'interface, APA> ADIMemoryInterface<'interface, APA>
 where
-    APA: ApAccess + DapAccess,
+    APA: DapAccess,
 {
     /// Creates a new MemoryInterface for given AccessPort.
     pub fn new(
@@ -48,11 +44,9 @@ where
     }
 }
 
-impl<APA> ADIMemoryInterface<'_, APA> where APA: ApAccess {}
-
 impl<AP> MemoryInterface<ArmError> for ADIMemoryInterface<'_, AP>
 where
-    AP: FlushableArmAccess + ApAccess + DpAccess,
+    AP: DapAccess,
 {
     /// Read a block of 64 bit words at `address`.
     ///
@@ -64,7 +58,7 @@ where
             return Ok(());
         }
 
-        if (address % 8) != 0 {
+        if !address.is_multiple_of(8) {
             return Err(ArmError::alignment_error(address, 8));
         }
 
@@ -117,7 +111,7 @@ where
             return Ok(());
         }
 
-        if (address % 4) != 0 {
+        if !address.is_multiple_of(4) {
             return Err(ArmError::alignment_error(address, 4));
         }
 
@@ -159,7 +153,7 @@ where
             return Err(ArmError::UnsupportedTransferWidth(16));
         }
 
-        if (address % 2) != 0 {
+        if !address.is_multiple_of(2) {
             return Err(ArmError::alignment_error(address, 2));
         }
 
@@ -257,7 +251,7 @@ where
 
     fn read(&mut self, address: u64, data: &mut [u8]) -> Result<(), ArmError> {
         let len = data.len();
-        if address % 4 == 0 && len % 4 == 0 {
+        if address.is_multiple_of(4) && len.is_multiple_of(4) {
             let mut buffer = vec![0u32; len / 4];
             self.read_32(address, &mut buffer)?;
             for (bytes, value) in data.chunks_exact_mut(4).zip(buffer.iter()) {
@@ -283,7 +277,7 @@ where
     /// The address where the write should be performed at has to be a multiple of 8.
     /// Returns `ArmError::MemoryNotAligned` if this does not hold true.
     fn write_64(&mut self, mut address: u64, mut data: &[u64]) -> Result<(), ArmError> {
-        if (address % 8) != 0 {
+        if !address.is_multiple_of(8) {
             return Err(ArmError::alignment_error(address, 8));
         }
 
@@ -341,7 +335,7 @@ where
     /// The address where the write should be performed at has to be a multiple of 4.
     /// Returns `ArmError::MemoryNotAligned` if this does not hold true.
     fn write_32(&mut self, mut address: u64, mut data: &[u32]) -> Result<(), ArmError> {
-        if (address % 4) != 0 {
+        if !address.is_multiple_of(4) {
             return Err(ArmError::alignment_error(address, 4));
         }
 
@@ -392,7 +386,7 @@ where
         if self.memory_ap.supports_only_32bit_data_size() {
             return Err(ArmError::UnsupportedTransferWidth(16));
         }
-        if (address % 2) != 0 {
+        if !address.is_multiple_of(2) {
             return Err(ArmError::alignment_error(address, 2));
         }
         if data.is_empty() {
@@ -513,7 +507,7 @@ where
 
 impl<APA> ArmMemoryInterface for ADIMemoryInterface<'_, APA>
 where
-    APA: std::any::Any + FlushableArmAccess + ApAccess + DpAccess + ArmProbeInterface,
+    APA: ApAccess + ArmDebugInterface,
 {
     fn base_address(&mut self) -> Result<u64, ArmError> {
         self.memory_ap.base_address(self.interface)
@@ -523,49 +517,19 @@ where
         self.memory_ap.ap_address().clone()
     }
 
-    fn get_swd_sequence(
-        &mut self,
-    ) -> Result<
-        &mut dyn crate::architecture::arm::communication_interface::SwdSequence,
-        DebugProbeError,
-    > {
-        Ok(self.interface)
-    }
-
-    fn get_arm_probe_interface(
-        &mut self,
-    ) -> Result<&mut dyn crate::architecture::arm::ArmProbeInterface, DebugProbeError> {
-        Ok(self.interface)
-    }
-
-    fn get_dap_access(&mut self) -> Result<&mut dyn DapAccess, DebugProbeError> {
+    fn get_arm_debug_interface(&mut self) -> Result<&mut dyn ArmDebugInterface, DebugProbeError> {
         Ok(self.interface)
     }
 
     fn generic_status(&mut self) -> Result<CSW, ArmError> {
-        // TODO: This assumes that the base type is `ArmCommunicationInterface`,
-        // which will fail if something else implements `ADIMemoryInterface`.
-        let Some(iface) = (self.interface as &mut dyn Any)
-            .downcast_mut::<ArmCommunicationInterface<Initialized>>()
-        else {
-            return Err(ArmError::Probe(DebugProbeError::Other(
-                "Not an ArmCommunicationInterface".to_string(),
-            )));
-        };
-
-        self.memory_ap.generic_status(iface)
+        self.memory_ap.generic_status(self.interface)
     }
 
     fn update_core_status(&mut self, state: CoreStatus) {
-        // TODO: This assumes that the base type is `ArmCommunicationInterface`,
-        // which will fail if something else implements `ADIMemoryInterface`.
-        let Some(iface) = (self.interface as &mut dyn Any)
-            .downcast_mut::<ArmCommunicationInterface<Initialized>>()
-        else {
-            return;
-        };
-
-        iface.probe_mut().core_status_notification(state).ok();
+        if let Some(probe) = self.interface.try_dap_probe_mut() {
+            // Ignore errors setting the core status
+            let _ = probe.core_status_notification(state);
+        }
     }
 }
 

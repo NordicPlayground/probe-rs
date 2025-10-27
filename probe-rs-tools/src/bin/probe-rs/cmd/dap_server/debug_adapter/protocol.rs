@@ -1,8 +1,8 @@
 use crate::cmd::dap_server::{
     DebuggerError,
     debug_adapter::dap::dap_types::{
-        ErrorResponseBody, Event, Message, MessageSeverity, OutputEventBody, ProtocolMessage,
-        Request, Response, ShowMessageEventBody,
+        ErrorResponseBody, Event, MessageSeverity, OutputEventBody, Request, Response,
+        ShowMessageEventBody,
     },
     server::configuration::ConsoleLog,
 };
@@ -10,10 +10,16 @@ use anyhow::{Context, anyhow};
 use serde::Serialize;
 use std::{
     collections::{BTreeMap, HashMap},
-    io::{BufRead, BufReader, Read, Write},
+    io::{BufRead, BufReader, ErrorKind, Read, Write},
     str,
 };
+use tokio_util::{
+    bytes::BytesMut,
+    codec::{Decoder, Encoder},
+};
 use tracing::instrument;
+
+use super::codec::{DapCodec, Frame, Message};
 
 pub trait ProtocolAdapter {
     /// Listen for a request. This call should be non-blocking, and if not request is available, it should
@@ -26,20 +32,23 @@ pub trait ProtocolAdapter {
         event_body: Option<S>,
     ) -> anyhow::Result<()>;
 
-    fn send_raw_response(&mut self, response: &Response) -> anyhow::Result<()>;
+    fn send_raw_response(&mut self, response: Response) -> anyhow::Result<()>;
 
     fn remove_pending_request(&mut self, request_seq: i64) -> Option<String>;
 
     fn set_console_log_level(&mut self, log_level: ConsoleLog);
 
     fn console_log_level(&self) -> ConsoleLog;
+
+    /// Increases the sequence number by 1 and returns it.
+    fn get_next_seq(&mut self) -> i64;
 }
 
 pub trait ProtocolHelper {
-    fn show_message(&mut self, severity: MessageSeverity, message: impl Into<String>) -> bool;
+    fn show_message(&mut self, severity: MessageSeverity, message: impl AsRef<str>) -> bool;
 
     /// Log a message to the console. Returns false if logging the message failed.
-    fn log_to_console(&mut self, message: impl Into<String>) -> bool;
+    fn log_to_console(&mut self, message: impl AsRef<str>) -> bool;
 
     fn send_response<S: Serialize + std::fmt::Debug>(
         &mut self,
@@ -52,14 +61,14 @@ impl<P> ProtocolHelper for P
 where
     P: ProtocolAdapter,
 {
-    fn show_message(&mut self, severity: MessageSeverity, message: impl Into<String>) -> bool {
-        let msg = message.into();
+    fn show_message(&mut self, severity: MessageSeverity, message: impl AsRef<str>) -> bool {
+        let msg = message.as_ref();
 
         tracing::debug!("show_message: {msg}");
 
         let event_body = match serde_json::to_value(ShowMessageEventBody {
             severity,
-            message: format!("{}\n", msg),
+            message: format!("{msg}\n"),
         }) {
             Ok(event_body) => event_body,
             Err(_) => {
@@ -70,9 +79,9 @@ where
             .is_ok()
     }
 
-    fn log_to_console(&mut self, message: impl Into<String>) -> bool {
+    fn log_to_console(&mut self, message: impl AsRef<str>) -> bool {
         let event_body = match serde_json::to_value(OutputEventBody {
-            output: format!("{}\n", message.into()),
+            output: format!("{}\n", message.as_ref()),
             category: Some("console".to_owned()),
             variables_reference: None,
             source: None,
@@ -80,6 +89,7 @@ where
             column: None,
             data: None,
             group: Some("probe-rs-debug".to_owned()),
+            location_reference: None,
         }) {
             Ok(event_body) => event_body,
             Err(_) => {
@@ -101,7 +111,7 @@ where
             Ok(value) => Response {
                 command: request.command.clone(),
                 request_seq: request.seq,
-                seq: request.seq,
+                seq: self.get_next_seq(),
                 success: true,
                 type_: "response".to_owned(),
                 message: None,
@@ -131,7 +141,7 @@ where
                 self.log_to_console(&response_message);
 
                 let response_body = ErrorResponseBody {
-                    error: Some(Message {
+                    error: Some(super::dap::dap_types::Message {
                         format: "{response_message}".to_string(),
                         variables: Some(BTreeMap::from([(
                             "response_message".to_string(),
@@ -149,7 +159,7 @@ where
                 Response {
                     command: request.command.clone(),
                     request_seq: request.seq,
-                    seq: request.seq,
+                    seq: self.get_next_seq(),
                     success: false,
                     type_: "response".to_owned(),
                     message: Some("cancelled".to_string()), // Predefined value in the MSDAP spec.
@@ -170,7 +180,7 @@ where
             );
         }
 
-        self.send_raw_response(&encoded_resp)
+        self.send_raw_response(encoded_resp.clone())
             .context("Unexpected Error while sending response.")?;
 
         if response_is_ok {
@@ -202,6 +212,9 @@ pub struct DapAdapter<R: Read, W: Write> {
     seq: i64,
 
     pending_requests: HashMap<i64, String>,
+
+    codec: DapCodec<Message>,
+    input_buffer: BytesMut,
 }
 
 impl<R: Read, W: Write> DapAdapter<R, W> {
@@ -209,100 +222,46 @@ impl<R: Read, W: Write> DapAdapter<R, W> {
         Self {
             input: BufReader::new(reader),
             output: writer,
-            seq: 1,
+            seq: 0,
             console_log_level: ConsoleLog::Console,
             pending_requests: HashMap::new(),
+
+            codec: DapCodec::new(),
+            input_buffer: BytesMut::with_capacity(4096),
         }
     }
 
     #[instrument(level = "trace", skip_all)]
-    fn send_data(&mut self, raw_data: &[u8]) -> Result<(), std::io::Error> {
-        let mut response_body = raw_data;
-
-        let response_header = format!("Content-Length: {}\r\n\r\n", response_body.len());
-
-        self.output.write_all(response_header.as_bytes())?;
+    fn send_data(&mut self, item: Frame<Message>) -> Result<(), std::io::Error> {
+        let mut buf = BytesMut::with_capacity(4096);
+        self.codec.encode(item, &mut buf)?;
+        self.output.write_all(&buf)?;
         self.output.flush()?;
-
-        // NOTE: Sometimes when writing large response, the debugger will fail with an IO error (ErrorKind::WouldBlock == error.kind())
-        let mut bytes_remaining = response_body.len();
-        while bytes_remaining > 0 {
-            match self.output.write(response_body) {
-                Ok(bytes_written) => {
-                    bytes_remaining = bytes_remaining.saturating_sub(bytes_written);
-                    response_body = &response_body[bytes_written..];
-                }
-                Err(error) => {
-                    if error.kind() == std::io::ErrorKind::WouldBlock {
-                        // The client is not ready to receive data (probably still processing the last chunk we sent),
-                        // so we need to keep trying.
-                    } else {
-                        tracing::error!("Failed to send a response to the client: {}", error);
-                        return Err(error);
-                    }
-                }
-            }
-        }
-        self.output.flush()?;
-
-        self.seq += 1;
-
         Ok(())
     }
 
     /// Receive data from `self.input`. Data has to be in the format specified by the Debug Adapter Protocol (DAP).
     /// The returned data is the content part of the request, as raw bytes.
-    fn receive_data(&mut self) -> Result<Vec<u8>, DebuggerError> {
-        let mut header = String::new();
-
-        match self.input.read_line(&mut header) {
-            Ok(_data_length) => {}
-            Err(error) => {
-                // There is no data available, so do something else (like checking the probe status) or try again.
-                return Err(DebuggerError::NonBlockingReadError {
-                    original_error: error,
-                });
+    fn receive_data(&mut self) -> Result<Option<Frame<Message>>, DebuggerError> {
+        match self.input.fill_buf() {
+            Ok(data) => {
+                // New data is here. Shove it into the buffer.
+                self.input_buffer.extend_from_slice(data);
+                let consumed = data.len();
+                self.input.consume(consumed);
             }
-        }
-
-        // We should read an empty line here.
-        let mut buff = String::new();
-        match self.input.read_line(&mut buff) {
-            Ok(_data_length) => {}
-            Err(error) => {
-                // There is no data available, so do something else (like checking the probe status) or try again.
-                return Err(DebuggerError::NonBlockingReadError {
-                    original_error: error,
-                });
-            }
-        }
-
-        let data_length = get_content_len(&header).ok_or_else(|| {
-            DebuggerError::Other(anyhow!(
-                "Failed to read content length from header '{}'",
-                header
-            ))
-        })?;
-
-        let mut content = vec![0u8; data_length];
-        let bytes_read = match self.input.read(&mut content) {
-            Ok(len) => len,
-            Err(error) => {
-                // There is no data available, so do something else (like checking the probe status) or try again.
-                return Err(DebuggerError::NonBlockingReadError {
-                    original_error: error,
-                });
-            }
+            Err(error) => match error.kind() {
+                // No new data is here and we also have nothing buffered, go back to polling.
+                ErrorKind::WouldBlock if self.input_buffer.is_empty() => return Ok(None),
+                // No new data is here but we have some buffered, so go to work the data and produce frames.
+                ErrorKind::WouldBlock if !self.input_buffer.is_empty() => {}
+                // An error ocurred, report it.
+                _ => return Err(error.into()),
+            },
         };
 
-        if bytes_read == data_length {
-            Ok(content)
-        } else {
-            Err(DebuggerError::Other(anyhow!(
-                "Failed to read the expected {} bytes from incoming data",
-                data_length
-            )))
-        }
+        // Process the next message from the buffer.
+        Ok(self.codec.decode(&mut self.input_buffer)?)
     }
 
     fn listen_for_request_and_respond(&mut self) -> anyhow::Result<Option<Request>> {
@@ -343,42 +302,21 @@ impl<R: Read, W: Write> DapAdapter<R, W> {
 
     fn receive_msg_content(&mut self) -> Result<Option<Request>, DebuggerError> {
         match self.receive_data() {
-            Ok(message_content) => {
+            Ok(Some(frame)) => {
                 // Extract protocol message
-                match serde_json::from_slice::<ProtocolMessage>(&message_content) {
-                    Ok(protocol_message) if protocol_message.type_ == "request" => {
-                        match serde_json::from_slice::<Request>(&message_content) {
-                            Ok(request) => Ok(Some(request)),
-                            Err(error) => Err(DebuggerError::Other(anyhow!(
-                                "Error encoding ProtocolMessage to Request: {:?}",
-                                error
-                            ))),
-                        }
-                    }
-                    Ok(protocol_message) => Err(DebuggerError::Other(anyhow!(
-                        "Received an unexpected message type: '{}'",
-                        protocol_message.type_
-                    ))),
-                    Err(error) => Err(DebuggerError::Other(anyhow!("{}", error))),
+                if let Message::Request(request) = frame.content {
+                    Ok(Some(request))
+                } else {
+                    Err(DebuggerError::Other(anyhow!(
+                        "Received an unexpected message type: '{:?}'",
+                        frame.content.kind()
+                    )))
                 }
             }
+            Ok(None) => Ok(None),
             Err(error) => {
-                match error {
-                    DebuggerError::NonBlockingReadError { original_error } => {
-                        if original_error.kind() == std::io::ErrorKind::WouldBlock {
-                            // Non-blocking read is waiting for incoming data that is not ready yet.
-                            // This is not a real error, so use this opportunity to check on probe status and notify the debug client if required.
-                            Ok(None)
-                        } else {
-                            // This is a legitimate error. Tell the client about it.
-                            Err(DebuggerError::StdIO(original_error))
-                        }
-                    }
-                    _ => {
-                        // This is a legitimate error. Tell the client about it.
-                        Err(DebuggerError::Other(anyhow!("{}", error)))
-                    }
-                }
+                // This is a legitimate error. Tell the client about it.
+                Err(DebuggerError::Other(anyhow!("{error}")))
             }
         }
     }
@@ -396,24 +334,22 @@ impl<R: Read, W: Write> ProtocolAdapter for DapAdapter<R, W> {
         event_body: Option<S>,
     ) -> anyhow::Result<()> {
         let new_event = Event {
-            seq: self.seq,
+            seq: self.get_next_seq(),
             type_: "event".to_string(),
             event: event_type.to_string(),
             body: event_body.map(|event_body| serde_json::to_value(event_body).unwrap_or_default()),
         };
 
-        let encoded_event = serde_json::to_vec(&new_event)?;
-
         let result = self
-            .send_data(&encoded_event)
+            .send_data(Frame::new(new_event.clone().into()))
             .context("Unexpected Error while sending event.");
 
-        if new_event.event != "output" {
+        if event_type != "output" {
             // This would result in an endless loop.
             match self.console_log_level {
                 ConsoleLog::Console => {}
                 ConsoleLog::Info => {
-                    self.log_to_console(format!("\nTriggered DAP Event: {}", new_event.event));
+                    self.log_to_console(format!("\nTriggered DAP Event: {event_type}"));
                 }
                 ConsoleLog::Debug => {
                     self.log_to_console(format!("INFO: Triggered DAP Event: {new_event:#?}"));
@@ -436,25 +372,15 @@ impl<R: Read, W: Write> ProtocolAdapter for DapAdapter<R, W> {
         self.pending_requests.remove(&request_seq)
     }
 
-    fn send_raw_response(&mut self, response: &Response) -> anyhow::Result<()> {
-        let encoded_response = serde_json::to_vec(&response)?;
-
-        self.send_data(&encoded_response)?;
+    fn send_raw_response(&mut self, response: Response) -> anyhow::Result<()> {
+        self.send_data(Frame::new(Message::Response(response)))?;
 
         Ok(())
     }
-}
 
-fn get_content_len(header: &str) -> Option<usize> {
-    let mut parts = header.trim_end().split_ascii_whitespace();
-
-    // discard first part
-    let first_part = parts.next()?;
-
-    if first_part == "Content-Length:" {
-        parts.next()?.parse::<usize>().ok()
-    } else {
-        None
+    fn get_next_seq(&mut self) -> i64 {
+        self.seq += 1;
+        self.seq
     }
 }
 
@@ -501,24 +427,6 @@ mod test {
     }
 
     #[test]
-    fn receive_request_with_wrong_content_length() {
-        let content = "{ \"seq\": 3, \"type\": \"request\", \"command\": \"test\" }";
-
-        let input = format!("Content-Length: {}\r\n\r\n{}", content.len() + 10, content);
-
-        let mut output = Vec::new();
-
-        let mut adapter = DapAdapter::new(input.as_bytes(), &mut output);
-        adapter.console_log_level = super::ConsoleLog::Info;
-
-        let _request = adapter.listen_for_request().unwrap_err();
-
-        let output_str = String::from_utf8(output).unwrap();
-
-        insta::assert_snapshot!(output_str);
-    }
-
-    #[test]
     fn receive_request_with_invalid_json() {
         let content = "{ \"seq\": 3, \"type\": \"request\", \"command\": \"test }";
 
@@ -557,20 +465,6 @@ mod test {
         insta::assert_snapshot!(output_str);
 
         assert!(request.is_none());
-    }
-
-    #[test]
-    fn parse_valid_header() {
-        let header = "Content-Length: 234\r\n";
-
-        assert_eq!(234, get_content_len(header).unwrap());
-    }
-
-    #[test]
-    fn parse_invalid_header() {
-        let header = "Content: 234\r\n";
-
-        assert!(get_content_len(header).is_none());
     }
 
     struct FailingWriter {}

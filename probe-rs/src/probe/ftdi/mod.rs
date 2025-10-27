@@ -2,12 +2,15 @@
 use crate::{
     architecture::{
         arm::{
-            ArmCommunicationInterface,
-            communication_interface::{DapProbe, UninitializedArmProbe},
+            ArmCommunicationInterface, ArmDebugInterface, ArmError,
+            communication_interface::DapProbe, sequences::ArmDebugSequence,
         },
-        riscv::{communication_interface::RiscvInterfaceBuilder, dtm::jtag_dtm::JtagDtmBuilder},
+        riscv::{
+            communication_interface::{RiscvError, RiscvInterfaceBuilder},
+            dtm::jtag_dtm::JtagDtmBuilder,
+        },
         xtensa::communication_interface::{
-            XtensaCommunicationInterface, XtensaDebugInterfaceState,
+            XtensaCommunicationInterface, XtensaDebugInterfaceState, XtensaError,
         },
     },
     probe::{
@@ -20,6 +23,7 @@ use bitvec::prelude::*;
 use nusb::DeviceInfo;
 use std::{
     io::{Read, Write},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -121,7 +125,7 @@ impl JtagAdapter {
         }
 
         // If `speed_khz` is not a divisor of the maximum supported speed, we need to round up
-        let is_exact = self.ftdi.max_clock % speed_khz == 0;
+        let is_exact = self.ftdi.max_clock.is_multiple_of(speed_khz);
 
         // If `speed_khz` is 0, use the maximum supported speed
         let divisor =
@@ -377,7 +381,7 @@ impl DebugProbe for FtdiProbe {
 
     fn try_get_riscv_interface_builder<'probe>(
         &'probe mut self,
-    ) -> Result<Box<dyn RiscvInterfaceBuilder<'probe> + 'probe>, DebugProbeError> {
+    ) -> Result<Box<dyn RiscvInterfaceBuilder<'probe> + 'probe>, RiscvError> {
         Ok(Box::new(JtagDtmBuilder::new(self)))
     }
 
@@ -389,13 +393,11 @@ impl DebugProbe for FtdiProbe {
         self
     }
 
-    fn try_get_arm_interface<'probe>(
+    fn try_get_arm_debug_interface<'probe>(
         self: Box<Self>,
-    ) -> Result<Box<dyn UninitializedArmProbe + 'probe>, (Box<dyn DebugProbe>, DebugProbeError)>
-    {
-        let uninitialized_interface = ArmCommunicationInterface::new(self, true);
-
-        Ok(Box::new(uninitialized_interface))
+        sequence: Arc<dyn ArmDebugSequence>,
+    ) -> Result<Box<dyn ArmDebugInterface + 'probe>, (Box<dyn DebugProbe>, ArmError)> {
+        Ok(ArmCommunicationInterface::create(self, sequence, true))
     }
 
     fn has_arm_interface(&self) -> bool {
@@ -405,7 +407,7 @@ impl DebugProbe for FtdiProbe {
     fn try_get_xtensa_interface<'probe>(
         &'probe mut self,
         state: &'probe mut XtensaDebugInterfaceState,
-    ) -> Result<XtensaCommunicationInterface<'probe>, DebugProbeError> {
+    ) -> Result<XtensaCommunicationInterface<'probe>, XtensaError> {
         Ok(XtensaCommunicationInterface::new(self, state))
     }
 

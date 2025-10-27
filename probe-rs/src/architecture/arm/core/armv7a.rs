@@ -11,25 +11,95 @@ use super::{
             AARCH32_CORE_REGISTERS, AARCH32_WITH_FP_16_CORE_REGISTERS,
             AARCH32_WITH_FP_32_CORE_REGISTERS,
         },
-        cortex_m::{FP, PC, RA, SP},
+        cortex_m::{FP, PC, RA, SP, XPSR},
     },
 };
 use crate::{
-    Architecture, CoreInformation, CoreInterface, CoreRegister, CoreStatus, CoreType,
+    Architecture, CoreInformation, CoreInterface, CoreRegister, CoreStatus, CoreType, Endian,
     InstructionSet, MemoryInterface,
     architecture::arm::{
-        ArmError, core::armv7a_debug_regs::*, memory::ArmMemoryInterface,
+        ArmError, DapAccess, FullyQualifiedApAddress,
+        ap::{ApRegister, BD0, BD1, BD2, BD3, TAR, TAR2},
+        core::armv7a_debug_regs::*,
+        memory::ArmMemoryInterface,
         sequences::ArmDebugSequence,
     },
     core::{CoreRegisters, MemoryMappedRegister, RegisterId, RegisterValue},
     error::Error,
-    memory::valid_32bit_address,
+    memory::{MemoryNotAlignedError, valid_32bit_address},
 };
 use std::{
     mem::size_of,
     sync::Arc,
     time::{Duration, Instant},
 };
+use zerocopy::{FromBytes, IntoBytes};
+
+/// Addresses for accessing debug registers when in banked mode
+struct BankedAccess<'a> {
+    /// Keep a reference to the `interface` to prevent anyone else
+    /// from changing the TAR while we're doing banked operations.
+    interface: &'a mut dyn DapAccess,
+    ap: FullyQualifiedApAddress,
+    dtrtx: u64,
+    itr: u64,
+    dscr: u64,
+    dtrrx: u64,
+}
+
+impl<'a> BankedAccess<'a> {
+    fn set_dtrtx(&mut self, value: u32) -> Result<(), ArmError> {
+        self.interface
+            .write_raw_ap_register(&self.ap, self.dtrtx, value)
+    }
+
+    fn dscr(&mut self) -> Result<Dbgdscr, ArmError> {
+        self.interface
+            .read_raw_ap_register(&self.ap, self.dscr)
+            .map(Dbgdscr::from)
+    }
+
+    fn set_dscr(&mut self, value: Dbgdscr) -> Result<(), ArmError> {
+        self.interface
+            .write_raw_ap_register(&self.ap, self.dscr, value.into())
+    }
+
+    fn set_itr(&mut self, value: u32) -> Result<(), ArmError> {
+        self.interface
+            .write_raw_ap_register(&self.ap, self.itr, value)
+    }
+
+    fn dtrrx(&mut self) -> Result<u32, ArmError> {
+        self.interface.read_raw_ap_register(&self.ap, self.dtrrx)
+    }
+
+    /// Operate the core in DCC Fast mode. For more information, see
+    /// ARM Architecture Reference Manual ARMv7-A and ARMv7-R edition
+    /// section C8.2.2.
+    ///
+    /// In this mode, writing to the ITR register does not immediately
+    /// trigger the instruction. Instead, it waits for a read from DTRRX
+    /// or a write to DTRTX. By placing an instruction with address-increment
+    /// in the pipeline this way, a load or store can be retriggered
+    /// repeatedly to quickly stream memory.
+    fn with_dcc_fast_mode<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Result<R, ArmError>,
+    ) -> Result<R, ArmError> {
+        // Place DSCR in DCC Fast mode
+        let mut dscr = self.dscr()?;
+        dscr.set_extdccmode(2);
+        self.set_dscr(dscr)?;
+        let result = f(self);
+
+        // Return DSCR back to DCC Non Blocking mode
+        let mut dscr = self.dscr()?;
+        dscr.set_extdccmode(0);
+        self.set_dscr(dscr)?;
+
+        result
+    }
+}
 
 /// Errors for the ARMv7-A state machine
 #[derive(thiserror::Error, Debug)]
@@ -60,6 +130,8 @@ pub struct Armv7a<'probe> {
     num_breakpoints: Option<u32>,
 
     itr_enabled: bool,
+
+    endianness: Option<Endian>,
 }
 
 impl<'probe> Armv7a<'probe> {
@@ -96,6 +168,7 @@ impl<'probe> Armv7a<'probe> {
             sequence,
             num_breakpoints: None,
             itr_enabled: false,
+            endianness: None,
         };
 
         if !core.state.initialized() {
@@ -200,50 +273,50 @@ impl<'probe> Armv7a<'probe> {
         let writeback_iter = (17u16..=48).chain(15u16..=16).chain(0u16..=14);
 
         for i in writeback_iter {
-            if let Some((val, writeback)) = self.state.register_cache[i as usize] {
-                if writeback {
-                    match i {
-                        0..=14 => {
-                            let instruction = build_mrc(14, 0, i, 0, 5, 0);
+            if let Some((val, writeback)) = self.state.register_cache[i as usize]
+                && writeback
+            {
+                match i {
+                    0..=14 => {
+                        let instruction = build_mrc(14, 0, i, 0, 5, 0);
 
-                            self.execute_instruction_with_input(instruction, val.try_into()?)?;
-                        }
-                        15 => {
-                            // Move val to r0
-                            let instruction = build_mrc(14, 0, 0, 0, 5, 0);
+                        self.execute_instruction_with_input(instruction, val.try_into()?)?;
+                    }
+                    15 => {
+                        // Move val to r0
+                        let instruction = build_mrc(14, 0, 0, 0, 5, 0);
 
-                            self.execute_instruction_with_input(instruction, val.try_into()?)?;
+                        self.execute_instruction_with_input(instruction, val.try_into()?)?;
 
-                            // Use `mov pc, r0` rather than `bx r0` because the `bx` instruction is
-                            // `UNPREDICTABLE` in the debug state (ARM Architecture Reference Manual,
-                            // ARMv7-A and ARMv7-R edition, C5.3: "Executing instructions in Debug state").
-                            let instruction = build_mov(15, 0);
-                            self.execute_instruction(instruction)?;
-                        }
-                        16 => {
-                            // msr cpsr_fsxc, r0
-                            let instruction = build_msr(0);
-                            self.execute_instruction_with_input(instruction, val.try_into()?)?;
-                        }
-                        17..=48 => {
-                            // Move value to r0, r1
-                            let value: u64 = val.try_into()?;
-                            let low_word = value as u32;
-                            let high_word = (value >> 32) as u32;
+                        // Use `mov pc, r0` rather than `bx r0` because the `bx` instruction is
+                        // `UNPREDICTABLE` in the debug state (ARM Architecture Reference Manual,
+                        // ARMv7-A and ARMv7-R edition, C5.3: "Executing instructions in Debug state").
+                        let instruction = build_mov(15, 0);
+                        self.execute_instruction(instruction)?;
+                    }
+                    16 => {
+                        // msr cpsr_fsxc, r0
+                        let instruction = build_msr(0);
+                        self.execute_instruction_with_input(instruction, val.try_into()?)?;
+                    }
+                    17..=48 => {
+                        // Move value to r0, r1
+                        let value: u64 = val.try_into()?;
+                        let low_word = value as u32;
+                        let high_word = (value >> 32) as u32;
 
-                            let instruction = build_mrc(14, 0, 0, 0, 5, 0);
-                            self.execute_instruction_with_input(instruction, low_word)?;
+                        let instruction = build_mrc(14, 0, 0, 0, 5, 0);
+                        self.execute_instruction_with_input(instruction, low_word)?;
 
-                            let instruction = build_mrc(14, 0, 1, 0, 5, 0);
-                            self.execute_instruction_with_input(instruction, high_word)?;
+                        let instruction = build_mrc(14, 0, 1, 0, 5, 0);
+                        self.execute_instruction_with_input(instruction, high_word)?;
 
-                            // VMOV
-                            let instruction = build_vmov(0, 0, 1, i - 17);
-                            self.execute_instruction(instruction)?;
-                        }
-                        _ => {
-                            panic!("Logic missing for writeback of register {i}");
-                        }
+                        // VMOV
+                        let instruction = build_vmov(0, 0, 1, i - 17);
+                        self.execute_instruction(instruction)?;
+                    }
+                    _ => {
+                        panic!("Logic missing for writeback of register {i}");
                     }
                 }
             }
@@ -299,6 +372,30 @@ impl<'probe> Armv7a<'probe> {
         }
 
         result
+    }
+
+    /// For greater performance, place DBGDTRTX, DBGDTRRX, DBGITR, and DBGDCSR
+    /// into the banked register window. This will allow us to directly access
+    /// these four values.
+    fn banked_access(&mut self) -> Result<BankedAccess<'_>, Error> {
+        let address = Dbgdtrtx::get_mmio_address_from_base(self.base_address)?;
+        let ap = self.memory.fully_qualified_address();
+        let is_64_bit = self.is_64_bit();
+        let interface = self.memory.get_arm_debug_interface()?;
+
+        if is_64_bit {
+            interface.write_raw_ap_register(&ap, TAR2::ADDRESS, (address >> 32) as u32)?;
+        }
+        interface.write_raw_ap_register(&ap, TAR::ADDRESS, address as u32)?;
+
+        Ok(BankedAccess {
+            interface,
+            ap,
+            dtrtx: BD0::ADDRESS,
+            itr: BD1::ADDRESS,
+            dscr: BD2::ADDRESS,
+            dtrrx: BD3::ADDRESS,
+        })
     }
 }
 
@@ -429,6 +526,25 @@ pub(crate) fn get_hw_breakpoint(
     Ok(if bp_control.e() { Some(bp_value) } else { None })
 }
 
+fn check_and_clear_data_abort(
+    memory: &mut dyn ArmMemoryInterface,
+    base_address: u64,
+    dbgdscr: Dbgdscr,
+) -> Result<(), ArmError> {
+    // Check if we had any aborts, if so clear them and fail
+    if dbgdscr.adabort_l() || dbgdscr.sdabort_l() {
+        let address = Dbgdrcr::get_mmio_address_from_base(base_address)?;
+        let mut dbgdrcr = Dbgdrcr(0);
+        dbgdrcr.set_cse(true);
+
+        memory.write_word_32(address, dbgdrcr.into())?;
+        return Err(ArmError::Armv7a(
+            crate::architecture::arm::armv7a::Armv7aError::DataAbort,
+        ));
+    }
+    Ok(())
+}
+
 /// Execute a single instruction.
 fn execute_instruction(
     memory: &mut dyn ArmMemoryInterface,
@@ -448,16 +564,7 @@ fn execute_instruction(
     }
 
     // Check if we had any aborts, if so clear them and fail
-    if dbgdscr.adabort_l() || dbgdscr.sdabort_l() {
-        let address = Dbgdrcr::get_mmio_address_from_base(base_address)?;
-        let mut dbgdrcr = Dbgdrcr(0);
-        dbgdrcr.set_cse(true);
-
-        memory.write_word_32(address, dbgdrcr.into())?;
-        return Err(ArmError::Armv7a(
-            crate::architecture::arm::armv7a::Armv7aError::DataAbort,
-        ));
-    }
+    check_and_clear_data_abort(memory, base_address, dbgdscr)?;
 
     Ok(dbgdscr)
 }
@@ -619,6 +726,10 @@ impl CoreInterface for Armv7a<'_> {
         // Reset our cached values
         self.reset_register_cache();
 
+        // Recompute / verify current state
+        self.set_core_status(CoreStatus::Running);
+        let _ = self.status()?;
+
         Ok(())
     }
 
@@ -720,10 +831,10 @@ impl CoreInterface for Armv7a<'_> {
         let reg_num = address.0;
 
         // check cache
-        if (reg_num as usize) < self.state.register_cache.len() {
-            if let Some(cached_result) = self.state.register_cache[reg_num as usize] {
-                return Ok(cached_result.0);
-            }
+        if (reg_num as usize) < self.state.register_cache.len()
+            && let Some(cached_result) = self.state.register_cache[reg_num as usize]
+        {
+            return Ok(cached_result.0);
         }
 
         // Generate instruction to extract register
@@ -939,13 +1050,31 @@ impl CoreInterface for Armv7a<'_> {
     }
 
     fn instruction_set(&mut self) -> Result<InstructionSet, Error> {
-        let cpsr: u32 = self.read_core_reg(RegisterId(16))?.try_into()?;
+        let cpsr: u32 = self.read_core_reg(XPSR.id())?.try_into()?;
 
         // CPSR bit 5 - T - Thumb mode
         match (cpsr >> 5) & 1 {
             1 => Ok(InstructionSet::Thumb2),
             _ => Ok(InstructionSet::A32),
         }
+    }
+
+    fn endianness(&mut self) -> Result<Endian, Error> {
+        if let Some(endianness) = self.endianness {
+            return Ok(endianness);
+        }
+        self.halted_access(|core| {
+            let endianness = {
+                let psr = TryInto::<u32>::try_into(core.read_core_reg(XPSR.id())?).unwrap();
+                if psr & 1 << 9 == 0 {
+                    Endian::Little
+                } else {
+                    Endian::Big
+                }
+            };
+            core.endianness = Some(endianness);
+            Ok(endianness)
+        })
     }
 
     fn fpu_support(&mut self) -> Result<bool, Error> {
@@ -1005,8 +1134,14 @@ impl MemoryInterface for Armv7a<'_> {
 
     fn read_word_64(&mut self, address: u64) -> Result<u64, Error> {
         self.halted_access(|core| {
-            let mut ret: u64 = core.read_word_32(address)? as u64;
-            ret |= (core.read_word_32(address + 4)? as u64) << 32;
+            #[repr(align(4))]
+            struct AlignedBytes([u8; 8]);
+            let mut bytes = AlignedBytes([0u8; 8]);
+            core.read(address, &mut bytes.0)?;
+            let ret = match core.endianness()? {
+                Endian::Little => u64::from_le_bytes(bytes.0),
+                Endian::Big => u64::from_be_bytes(bytes.0),
+            };
 
             Ok(ret)
         })
@@ -1033,13 +1168,26 @@ impl MemoryInterface for Armv7a<'_> {
     fn read_word_16(&mut self, address: u64) -> Result<u16, Error> {
         self.halted_access(|core| {
             // Find the word this is in and its byte offset
-            let byte_offset = address % 4;
+            let mut byte_offset = address % 4;
             let word_start = address - byte_offset;
 
             // Read the word
             let data = core.read_word_32(word_start)?;
 
-            // Return the byte
+            // We do 32-bit reads, so we need to take a different field
+            // if we're running on a big endian device.
+            if Endian::Big == core.endianness()? {
+                // TODO: This doesn't work accessing 16-bit words that are not aligned.
+                if address & 1 != 0 {
+                    return Err(Error::MemoryNotAligned(MemoryNotAlignedError {
+                        address,
+                        alignment: 2,
+                    }));
+                }
+                byte_offset = 2 - byte_offset;
+            }
+
+            // Return the 16-bit word
             Ok((data >> (byte_offset * 8)) as u16)
         })
     }
@@ -1047,11 +1195,18 @@ impl MemoryInterface for Armv7a<'_> {
     fn read_word_8(&mut self, address: u64) -> Result<u8, Error> {
         self.halted_access(|core| {
             // Find the word this is in and its byte offset
-            let byte_offset = address % 4;
+            let mut byte_offset = address % 4;
+
             let word_start = address - byte_offset;
 
             // Read the word
             let data = core.read_word_32(word_start)?;
+
+            // We do 32-bit reads, so we need to take a different field
+            // if we're running on a big endian device.
+            if Endian::Big == core.endianness()? {
+                byte_offset = 3 - byte_offset;
+            }
 
             // Return the byte
             Ok(data.to_le_bytes()[byte_offset as usize])
@@ -1070,8 +1225,52 @@ impl MemoryInterface for Armv7a<'_> {
 
     fn read_32(&mut self, address: u64, data: &mut [u32]) -> Result<(), Error> {
         self.halted_access(|core| {
-            for (i, word) in data.iter_mut().enumerate() {
-                *word = core.read_word_32(address + ((i as u64) * 4))?;
+            let count = data.len();
+            if count > 2 {
+                // Save r0
+                core.prepare_r0_for_clobber()?;
+                core.set_r0(valid_32bit_address(address)?)?;
+
+                let mut banked = core.banked_access()?;
+
+                // Ignore any errors encountered here -- they will set a Data Abort
+                // which we will pick up in `check_and_clear_data_abort()`
+                if banked
+                    .with_dcc_fast_mode(|banked| {
+                        // LDC p14, c5, [r0], #4
+                        banked.set_itr(build_ldc(14, 5, 0, 4))?;
+
+                        // Throw away the first value, which is from a previous operation
+                        let _ = banked.dtrrx()?;
+
+                        // Continually write the tx register, which will auto-increment.
+                        // Because reads lag by one instruction, we need to break before
+                        // we read the final value. If we don't we will end up reading one
+                        // extra word past the buffer, which may end up outside valid RAM.
+                        for word in data[0..count - 1].iter_mut() {
+                            *word = banked.dtrrx()?;
+                        }
+                        Ok(())
+                    })
+                    .is_ok()
+                {
+                    // Grab the last value that we skipped during the main sequence.
+                    // Ignore any errors here since they will generate an abort that
+                    // will be caught below.
+                    if let Ok(last) = banked.dtrrx()
+                        && let Some(v) = data.last_mut()
+                    {
+                        *v = last;
+                    }
+                }
+
+                // Check if we had any aborts, if so clear them and fail
+                let dscr = banked.dscr()?;
+                check_and_clear_data_abort(&mut *core.memory, core.base_address, dscr)?;
+            } else {
+                for (i, word) in data.iter_mut().enumerate() {
+                    *word = core.read_word_32(address + ((i as u64) * 4))?;
+                }
             }
 
             Ok(())
@@ -1089,22 +1288,57 @@ impl MemoryInterface for Armv7a<'_> {
     }
 
     fn read_8(&mut self, address: u64, data: &mut [u8]) -> Result<(), Error> {
-        self.halted_access(|core| {
-            for (i, byte) in data.iter_mut().enumerate() {
-                *byte = core.read_word_8(address + (i as u64))?;
-            }
+        self.read(address, data)
+    }
 
+    fn read(&mut self, address: u64, data: &mut [u8]) -> Result<(), Error> {
+        self.halted_access(|core| {
+            if address.is_multiple_of(4) && data.len().is_multiple_of(4) {
+                // Avoid heap allocation and copy if we don't need it.
+                if let Ok((aligned_buffer, _)) =
+                    <[u32]>::mut_from_prefix_with_elems(data, data.len() / 4)
+                {
+                    core.read_32(address, aligned_buffer)?;
+                } else {
+                    let mut temporary_buffer = vec![0u32; data.len() / 4];
+                    core.read_32(address, &mut temporary_buffer)?;
+                    data.copy_from_slice(temporary_buffer.as_bytes());
+                }
+
+                // We used 32-bit accesses, so swap the 32-bit values if necessary.
+                if core.endianness()? == Endian::Big {
+                    for word in data.chunks_exact_mut(4) {
+                        word.reverse();
+                    }
+                }
+            } else {
+                let start_address = address & !3;
+                let end_address = address + (data.len() as u64);
+                let end_address = end_address + (4 - (end_address & 3));
+                let start_extra_count = address as usize % 4;
+                let mut buffer = vec![0u32; (end_address - start_address) as usize / 4];
+                core.read_32(start_address, &mut buffer)?;
+                if core.endianness()? == Endian::Big {
+                    for word in buffer.iter_mut() {
+                        *word = word.swap_bytes();
+                    }
+                }
+                data.copy_from_slice(
+                    &buffer.as_bytes()[start_extra_count..start_extra_count + data.len()],
+                );
+            }
             Ok(())
         })
     }
 
     fn write_word_64(&mut self, address: u64, data: u64) -> Result<(), Error> {
         self.halted_access(|core| {
-            let data_low = data as u32;
-            let data_high = (data >> 32) as u32;
+            let (data_low, data_high) = match core.endianness()? {
+                Endian::Little => (data as u32, (data >> 32) as u32),
+                Endian::Big => ((data >> 32) as u32, data as u32),
+            };
 
-            core.write_word_32(address, data_low)?;
-            core.write_word_32(address + 4, data_high)
+            core.write_32(address, &[data_low, data_high])
         })
     }
 
@@ -1129,8 +1363,14 @@ impl MemoryInterface for Armv7a<'_> {
     fn write_word_8(&mut self, address: u64, data: u8) -> Result<(), Error> {
         self.halted_access(|core| {
             // Find the word this is in and its byte offset
-            let byte_offset = address % 4;
+            let mut byte_offset = address % 4;
             let word_start = address - byte_offset;
+
+            // We do 32-bit reads and writes, so we need to take a different field
+            // if we're running on a big endian device.
+            if Endian::Big == core.endianness()? {
+                byte_offset = 3 - byte_offset;
+            }
 
             // Get the current word value
             let current_word = core.read_word_32(word_start)?;
@@ -1144,8 +1384,21 @@ impl MemoryInterface for Armv7a<'_> {
     fn write_word_16(&mut self, address: u64, data: u16) -> Result<(), Error> {
         self.halted_access(|core| {
             // Find the word this is in and its byte offset
-            let byte_offset = address % 4;
+            let mut byte_offset = address % 4;
             let word_start = address - byte_offset;
+
+            // We do 32-bit reads and writes, so we need to take a different field
+            // if we're running on a big endian device.
+            if Endian::Big == core.endianness()? {
+                // TODO: This doesn't work when accessing 16-bit words that are not aligned.
+                if address & 1 != 0 {
+                    return Err(Error::MemoryNotAligned(MemoryNotAlignedError {
+                        address,
+                        alignment: 2,
+                    }));
+                }
+                byte_offset = 2 - byte_offset;
+            }
 
             // Get the current word value
             let mut word = core.read_word_32(word_start)?;
@@ -1170,8 +1423,34 @@ impl MemoryInterface for Armv7a<'_> {
 
     fn write_32(&mut self, address: u64, data: &[u32]) -> Result<(), Error> {
         self.halted_access(|core| {
-            for (i, word) in data.iter().enumerate() {
-                core.write_word_32(address + ((i as u64) * 4), *word)?;
+            if data.len() > 2 {
+                // Save r0
+                core.prepare_r0_for_clobber()?;
+                core.set_r0(valid_32bit_address(address)?)?;
+
+                let mut banked = core.banked_access()?;
+
+                banked
+                    .with_dcc_fast_mode(|banked| {
+                        // STC p14, c5, [r0], #4
+                        banked.set_itr(build_stc(14, 5, 0, 4))?;
+
+                        // Continually write the tx register, which will auto-increment
+                        for word in data.iter() {
+                            banked.set_dtrtx(*word)?;
+                        }
+                        Ok(())
+                    })
+                    .ok();
+
+                // Check if we had any aborts, if so clear them and fail
+                let dscr = banked.dscr()?;
+                check_and_clear_data_abort(&mut *core.memory, core.base_address, dscr)?;
+            } else {
+                // Slow path -- perform multiple writes
+                for (i, word) in data.iter().enumerate() {
+                    core.write_word_32(address + ((i as u64) * 4), *word)?;
+                }
             }
 
             Ok(())
@@ -1189,10 +1468,36 @@ impl MemoryInterface for Armv7a<'_> {
     }
 
     fn write_8(&mut self, address: u64, data: &[u8]) -> Result<(), Error> {
+        self.write(address, data)
+    }
+
+    fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Error> {
         self.halted_access(|core| {
-            for (i, byte) in data.iter().enumerate() {
-                core.write_word_8(address + (i as u64), *byte)?;
+            let len = data.len();
+            let start_extra_count = ((4 - (address % 4) as usize) % 4).min(len);
+            let end_extra_count = (len - start_extra_count) % 4;
+            assert!(start_extra_count < 4);
+            assert!(end_extra_count < 4);
+
+            // Fall back to slower bytewise access if it's not aligned
+            if start_extra_count != 0 || end_extra_count != 0 {
+                for (i, byte) in data.iter().enumerate() {
+                    core.write_word_8(address + (i as u64), *byte)?;
+                }
+                return Ok(());
             }
+
+            // Make sure we don't try to do an empty but potentially unaligned write
+            // We do a 32 bit write of the remaining bytes that are 4 byte aligned.
+            let mut buffer = vec![0u32; data.len() / 4];
+            let endianness = core.endianness()?;
+            for (bytes, value) in data.chunks_exact(4).zip(buffer.iter_mut()) {
+                *value = match endianness {
+                    Endian::Little => u32::from_le_bytes(bytes.try_into().unwrap()),
+                    Endian::Big => u32::from_be_bytes(bytes.try_into().unwrap()),
+                }
+            }
+            core.write_32(address, &buffer)?;
 
             Ok(())
         })
@@ -1226,6 +1531,7 @@ mod test {
         ((address - TEST_BASE_ADDRESS) / 4) as u32
     }
 
+    #[derive(Debug)]
     pub struct ExpectedMemoryOp {
         read: bool,
         address: u64,
@@ -1376,25 +1682,11 @@ mod test {
             todo!()
         }
 
-        fn get_swd_sequence(&mut self) -> Result<&mut dyn SwdSequence, DebugProbeError> {
-            Err(DebugProbeError::NotImplemented {
-                function_name: "get_swd_sequence",
-            })
-        }
-
-        fn get_arm_probe_interface(
+        fn get_arm_debug_interface(
             &mut self,
-        ) -> Result<&mut dyn crate::architecture::arm::ArmProbeInterface, DebugProbeError> {
+        ) -> Result<&mut dyn crate::architecture::arm::ArmDebugInterface, DebugProbeError> {
             Err(DebugProbeError::NotImplemented {
-                function_name: "get_arm_probe_interface",
-            })
-        }
-
-        fn get_dap_access(
-            &mut self,
-        ) -> Result<&mut dyn crate::architecture::arm::DapAccess, DebugProbeError> {
-            Err(DebugProbeError::NotImplemented {
-                function_name: "get_dap_access",
+                function_name: "get_arm_debug_interface",
             })
         }
 
@@ -1570,6 +1862,14 @@ mod test {
         );
     }
 
+    impl Drop for MockProbe {
+        fn drop(&mut self) {
+            if !self.expected_ops.is_empty() {
+                panic!("self.expected_ops is not empty: {:?}", self.expected_ops);
+            }
+        }
+    }
+
     #[test]
     fn armv7a_new() {
         let mut probe = MockProbe::new();
@@ -1719,7 +2019,6 @@ mod test {
             Dbgdscr::get_mmio_address_from_base(TEST_BASE_ADDRESS).unwrap(),
             dbgdscr.into(),
         );
-        add_read_fp_count_expectations(&mut probe);
 
         let mock_mem = Box::new(probe) as _;
 
@@ -1845,13 +2144,13 @@ mod test {
         // First read will hit expectations
         assert_eq!(
             RegisterValue::from(REG_VALUE),
-            armv7a.read_core_reg(RegisterId(16)).unwrap()
+            armv7a.read_core_reg(XPSR.id()).unwrap()
         );
 
         // Second read will cache, no new expectations
         assert_eq!(
             RegisterValue::from(REG_VALUE),
-            armv7a.read_core_reg(RegisterId(16)).unwrap()
+            armv7a.read_core_reg(XPSR.id()).unwrap()
         );
     }
 
@@ -2150,12 +2449,7 @@ mod test {
         assert_eq!(MEMORY_VALUE, armv7a.read_word_32(MEMORY_ADDRESS).unwrap());
     }
 
-    #[test]
-    fn armv7a_read_word_8() {
-        const MEMORY_VALUE: u32 = 0xBA5EBA11;
-        const MEMORY_ADDRESS: u64 = 0x12345679;
-        const MEMORY_WORD_ADDRESS: u64 = 0x12345678;
-
+    fn test_read_word(value: u32, address: u64, memory_word_address: u64, endian: Endian) -> u8 {
         let mut probe = MockProbe::new();
         let mut state = CortexAState::new();
 
@@ -2166,7 +2460,11 @@ mod test {
         add_read_fp_count_expectations(&mut probe);
 
         // Read memory
-        add_read_memory_expectations(&mut probe, MEMORY_WORD_ADDRESS, MEMORY_VALUE);
+        add_read_memory_expectations(&mut probe, memory_word_address, value);
+
+        // Set endianx
+        let cpsr = if endian == Endian::Big { 1 << 9 } else { 0 };
+        add_read_cpsr_expectations(&mut probe, cpsr);
 
         let mock_mem = Box::new(probe) as _;
 
@@ -2177,7 +2475,40 @@ mod test {
             DefaultArmSequence::create(),
         )
         .unwrap();
+        armv7a.read_word_8(address).unwrap()
+    }
 
-        assert_eq!(0xBA, armv7a.read_word_8(MEMORY_ADDRESS).unwrap());
+    #[test]
+    fn armv7a_read_word_8() {
+        const MEMORY_VALUE: u32 = 0xBA5EBB11;
+        const MEMORY_ADDRESS: u64 = 0x12345679;
+        const MEMORY_WORD_ADDRESS: u64 = 0x12345678;
+
+        assert_eq!(
+            0xBB,
+            test_read_word(
+                MEMORY_VALUE,
+                MEMORY_ADDRESS,
+                MEMORY_WORD_ADDRESS,
+                Endian::Little
+            )
+        );
+    }
+
+    #[test]
+    fn armv7a_read_word_8_be() {
+        const MEMORY_VALUE: u32 = 0xBA5EBB11;
+        const MEMORY_ADDRESS: u64 = 0x12345679;
+        const MEMORY_WORD_ADDRESS: u64 = 0x12345678;
+
+        assert_eq!(
+            0x5E,
+            test_read_word(
+                MEMORY_VALUE,
+                MEMORY_ADDRESS,
+                MEMORY_WORD_ADDRESS,
+                Endian::Big
+            )
+        );
     }
 }

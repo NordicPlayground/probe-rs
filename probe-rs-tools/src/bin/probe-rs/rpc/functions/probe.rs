@@ -129,6 +129,7 @@ pub async fn select_probe(
 pub enum AttachResult {
     Success(Key<Session>),
     ProbeNotFound,
+    FailedToOpenProbe(String),
     ProbeInUse,
 }
 
@@ -227,8 +228,15 @@ pub async fn attach(
     let common_options = ProbeOptions::from(&request).load(&mut registry)?;
     let target = common_options.get_target_selector()?;
 
-    let Ok(probe) = common_options.attach_probe(&ctx.lister()) else {
-        return Ok(AttachResult::ProbeNotFound);
+    let probe = match common_options.attach_probe(&ctx.lister()) {
+        Ok(probe) => probe,
+        Err(OperationError::NoProbesFound) => return Ok(AttachResult::ProbeNotFound),
+        Err(error) => {
+            return Ok(AttachResult::FailedToOpenProbe(format!(
+                "{:?}",
+                anyhow::anyhow!(error)
+            )));
+        }
     };
 
     let mut session = common_options.attach_session(probe, target)?;

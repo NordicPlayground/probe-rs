@@ -170,6 +170,7 @@ pub(crate) static REPL_COMMANDS: &[ReplCommand<ReplHandler>] = &[
                     condition: None,
                     hit_condition: None,
                     offset: None,
+                    mode: None,
                 },
                 target_core,
             );
@@ -353,6 +354,10 @@ pub(crate) static REPL_COMMANDS: &[ReplCommand<ReplHandler>] = &[
                         response_message.push_str("No breakpoints set.");
                     } else {
                         for (idx, bpt) in breakpoint_addrs {
+                            #[expect(
+                                clippy::unwrap_used,
+                                reason = "Writing to a string is infallible"
+                            )]
                             writeln!(&mut response_message, "Breakpoint #{idx} @ {bpt:#010X}\n")
                                 .unwrap();
                         }
@@ -548,8 +553,9 @@ pub(crate) static REPL_COMMANDS: &[ReplCommand<ReplHandler>] = &[
             let mut range_string = String::new();
             for memory_range in &ranges {
                 if !range_string.is_empty() {
-                    write!(&mut range_string, ", ").unwrap();
+                    range_string.push_str(", ");
                 }
+                #[expect(clippy::unwrap_used, reason = "Writing to a string never fails")]
                 write!(&mut range_string, "{memory_range:#X?}").unwrap();
             }
             range_string = if range_string.is_empty() {
@@ -616,12 +622,63 @@ pub(crate) static REPL_COMMANDS: &[ReplCommand<ReplHandler>] = &[
                         offset: None,
                         source: None,
                         verified: false,
+                        reason: None,
                     },
                     reason: "removed".to_string(),
                 })
                 .ok(),
             };
             Ok(response)
+        },
+    },
+    ReplCommand {
+        command: "reset",
+        help_text: "Reset the target",
+        sub_commands: &[],
+        args: &[],
+        handler: |target_core, _, _| {
+            let core_info = target_core
+                .core
+                .reset_and_halt(Duration::from_millis(500))?;
+
+            target_core.recompute_breakpoints()?;
+
+            Ok(Response {
+                command: "pause".to_string(),
+                success: true,
+                message: Some(
+                    CoreStatus::Halted(HaltReason::Request)
+                        .short_long_status(Some(core_info.pc))
+                        .1,
+                ),
+                type_: "response".to_string(),
+                request_seq: 0,
+                seq: 0,
+                body: None,
+            })
+        },
+    },
+    ReplCommand {
+        command: "step",
+        help_text: "Step one instruction",
+        sub_commands: &[],
+        args: &[],
+        handler: |target_core, _, _| {
+            let core_info = target_core.core.step()?;
+
+            Ok(Response {
+                command: "pause".to_string(),
+                success: true,
+                message: Some(
+                    CoreStatus::Halted(HaltReason::Request)
+                        .short_long_status(Some(core_info.pc))
+                        .1,
+                ),
+                type_: "response".to_string(),
+                request_seq: 0,
+                seq: 0,
+                body: None,
+            })
         },
     },
 ];
@@ -673,12 +730,14 @@ fn reg_table(results: &[(String, String)], max_line_length: usize) -> String {
             response_message.push(' ');
         }
 
+        #[expect(
+            clippy::unwrap_used,
+            reason = "This is safe because we are writing to a string"
+        )]
         // Format the line name and value
         write!(
             &mut response_message,
-            "{reg_name:<name_width$} {reg_value:>value_width$}",
-            value_width = max_value_width,
-            name_width = max_reg_name_width
+            "{reg_name:<max_reg_name_width$} {reg_value:>max_value_width$}"
         )
         .unwrap();
 

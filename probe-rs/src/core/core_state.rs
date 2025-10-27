@@ -2,7 +2,7 @@ use crate::{
     Core, CoreType, Error, Target,
     architecture::{
         arm::{
-            ApV2Address, ArmProbeInterface, FullyQualifiedApAddress,
+            ApV2Address, ArmDebugInterface, FullyQualifiedApAddress,
             core::{CortexAState, CortexMState},
             dp::DpAddress,
         },
@@ -34,14 +34,14 @@ impl CombinedCoreState {
         self.specific_state.core_type()
     }
 
-    pub fn interface_idx(&self) -> usize {
-        self.core_state.core_access_options.interface_idx()
+    pub fn jtag_tap_index(&self) -> usize {
+        self.core_state.core_access_options.jtag_tap_index()
     }
 
     pub fn attach_arm<'probe>(
         &'probe mut self,
         target: &'probe Target,
-        arm_interface: &'probe mut Box<dyn ArmProbeInterface>,
+        arm_interface: &'probe mut Box<dyn ArmDebugInterface>,
     ) -> Result<Core<'probe>, Error> {
         let name = &target.cores[self.id].name;
 
@@ -107,7 +107,7 @@ impl CombinedCoreState {
         })
     }
 
-    pub fn enable_arm_debug(&self, interface: &mut dyn ArmProbeInterface) -> Result<(), Error> {
+    pub fn enable_arm_debug(&self, interface: &mut dyn ArmDebugInterface) -> Result<(), Error> {
         let ResolvedCoreOptions::Arm { sequence, options } = &self.core_state.core_access_options
         else {
             unreachable!(
@@ -130,7 +130,10 @@ impl CombinedCoreState {
         Ok(())
     }
 
-    pub fn arm_reset_catch_set(&self, interface: &mut dyn ArmProbeInterface) -> Result<(), Error> {
+    pub(crate) fn arm_reset_catch_set(
+        &self,
+        interface: &mut dyn ArmDebugInterface,
+    ) -> Result<(), Error> {
         let ResolvedCoreOptions::Arm { sequence, options } = &self.core_state.core_access_options
         else {
             unreachable!(

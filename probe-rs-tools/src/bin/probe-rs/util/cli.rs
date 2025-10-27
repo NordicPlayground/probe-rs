@@ -13,7 +13,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::{runtime::Handle, sync::mpsc::UnboundedSender};
 use tokio_util::sync::CancellationToken;
 
+use crate::cmd::run::EmbeddedTestElfInfo;
 use crate::rpc::functions::monitor::MonitorExitReason;
+use crate::rpc::utils::semihosting::SemihostingOptions;
 use crate::{
     FormatOptions,
     rpc::{
@@ -85,6 +87,7 @@ pub async fn attach_probe(
     match result {
         AttachResult::Success(sessid) => Ok(SessionInterface::new(client.clone(), sessid)),
         AttachResult::ProbeNotFound => anyhow::bail!("Probe not found"),
+        AttachResult::FailedToOpenProbe(error) => anyhow::bail!("Failed to open probe: {error}"),
         AttachResult::ProbeInUse => anyhow::bail!("Probe is already in use"),
     }
 }
@@ -198,11 +201,11 @@ impl ChannelIdentifier {
         if map.contains_key(self) {
             return map.get_mut(self);
         };
-        if let Some(fallback) = self.unqualified() {
-            if map.contains_key(&fallback) {
-                return map.get_mut(&fallback);
-            };
-        }
+        if let Some(fallback) = self.unqualified()
+            && map.contains_key(&fallback)
+        {
+            return map.get_mut(&fallback);
+        };
         map.get_mut(&Self::CatchAll)
     }
 }
@@ -243,11 +246,41 @@ pub(crate) async fn connect_target_output_files(
     Ok(map)
 }
 
+pub(crate) fn parse_semihosting_options(arg: Vec<String>) -> anyhow::Result<SemihostingOptions> {
+    let mut options = SemihostingOptions::new();
+    for component in arg {
+        let parts: Vec<&str> = component.splitn(2, "=").collect();
+        match parts[..] {
+            // Tolerating empty entries in particular makes a trailing comma tolerated.
+            [] => continue,
+            [single] => {
+                if single.ends_with('/') {
+                    options.add_file_prefix(single.into(), single.into())?;
+                } else {
+                    options.add_file(single.into(), single.into())?;
+                }
+            }
+            [first, second] => {
+                if first.starts_with('^') && first.ends_with('$') {
+                    options.add_file_regex(first.into(), second.into())?;
+                } else if first.ends_with('/') {
+                    options.add_file_prefix(first.into(), second.into())?;
+                } else {
+                    options.add_file(first.into(), second.into())?;
+                }
+            }
+            _ => unreachable!("splitn produces at most 2 items."),
+        }
+    }
+    Ok(options)
+}
+
 pub async fn rtt_client(
     session: &SessionInterface,
     path: &Path,
     mut scan_regions: ScanRegion,
     log_format: Option<String>,
+    show_timestamps: bool,
     show_location: bool,
     timestamp_offset: Option<UtcOffset>,
 ) -> anyhow::Result<CliRttClient> {
@@ -282,6 +315,7 @@ pub async fn rtt_client(
     Ok(CliRttClient {
         handle: rtt_client.handle,
         timestamp_offset,
+        show_timestamps,
         show_location,
         channel_processors: vec![],
         defmt_data,
@@ -366,16 +400,16 @@ pub async fn flash(
     }
 
     // Visualise flash layout to file if requested.
-    if let Some(visualizer_output) = download_options.flash_layout_output_path {
-        if let Some(phases) = flash_layout {
-            let mut flash_layout = FlashLayout::default();
-            for phase_layout in phases {
-                flash_layout.merge_from(phase_layout);
-            }
-
-            let visualizer = flash_layout.visualize();
-            _ = visualizer.write_svg(visualizer_output);
+    if let Some(visualizer_output) = download_options.flash_layout_output_path
+        && let Some(phases) = flash_layout
+    {
+        let mut flash_layout = FlashLayout::default();
+        for phase_layout in phases {
+            flash_layout.merge_from(phase_layout);
         }
+
+        let visualizer = flash_layout.visualize();
+        _ = visualizer.write_svg(visualizer_output);
     }
 
     logging::eprintln(format!(
@@ -444,18 +478,20 @@ pub async fn monitor(
     })
     .await;
 
-    let print_stack_trace = match &result {
+    let (print_stack_trace, result) = match result {
         Ok(MonitorExitReason::Success | MonitorExitReason::SemihostingExit(Ok(_))) => {
             println!("Firmware exited successfully");
-            print_stack_trace // On success, we only print if the user asked for it.
+            // On success, we only print if the user asked for it.
+            (print_stack_trace, Ok(()))
         }
         Ok(MonitorExitReason::UserExit) => {
             println!("Exited by user request");
-            print_stack_trace // On ctrl-c, we only print if the user asked for it.
+            // On ctrl-c, we only print if the user asked for it.
+            (print_stack_trace, Ok(()))
         }
         Ok(MonitorExitReason::UnexpectedExit(reason)) => {
             println!("Firmware exited unexpectedly: {reason}");
-            true
+            (true, Err(anyhow::anyhow!("{reason}")))
         }
         Ok(MonitorExitReason::SemihostingExit(Err(details))) => {
             let reason = match details.reason {
@@ -491,28 +527,34 @@ pub async fn monitor(
                 _ => String::from(""),
             };
 
-            println!("Firmware exited with: {}{}", reason, subcode);
+            println!("Firmware exited with: {reason}{subcode}");
 
-            true
+            (true, Err(anyhow::anyhow!(reason)))
         }
-        Err(_) => false, // Some irrecoverable error happened, probably can't print the stack trace.
+        Err(e) => {
+            // Some irrecoverable error happened, probably can't print the stack trace.
+            (false, Err(e))
+        }
     };
 
     if print_stack_trace {
         display_stack_trace(session, path).await?;
     }
 
-    result.map(|_| ())
+    result
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn test(
     session: &SessionInterface,
     boot_info: BootInfo,
+    elf_info: EmbeddedTestElfInfo,
     libtest_args: libtest_mimic::Arguments,
     print_stack_trace: bool,
     path: &Path,
     mut rtt_client: Option<CliRttClient>,
     target_output_files: &mut TargetOutputFiles,
+    semihosting_options: SemihostingOptions,
 ) -> anyhow::Result<()> {
     tracing::info!("libtest args {:?}", libtest_args);
     let token = CancellationToken::new();
@@ -521,18 +563,39 @@ pub async fn test(
 
     let rtt_handle = rtt_client.as_ref().map(|rtt| rtt.handle);
     let test = async {
-        let tests = session
-            .list_tests(boot_info, rtt_handle, async |msg| sender.send(msg).unwrap())
-            .await?;
+        let tests = if elf_info.version == 0 {
+            // In embedded test < 0.7, we have to query the tests from the target via semihosting
+            session
+                .list_tests(
+                    boot_info,
+                    rtt_handle,
+                    semihosting_options.clone(),
+                    async |msg| sender.send(msg).unwrap(),
+                )
+                .await?
+                .tests
+        } else {
+            // Recent embedded test versions report the tests directly via the elf file
+            elf_info.tests
+        };
 
         if token.is_cancelled() {
             return Ok(());
         }
 
         let tests = tests
-            .tests
             .into_iter()
-            .map(|test| create_trial(session, path, rtt_handle, sender.clone(), &token, test))
+            .map(|test| {
+                create_trial(
+                    session,
+                    path,
+                    rtt_handle,
+                    semihosting_options.clone(),
+                    sender.clone(),
+                    &token,
+                    test,
+                )
+            })
             .collect::<Vec<_>>();
 
         tokio::task::spawn_blocking(move || {
@@ -576,6 +639,7 @@ fn create_trial(
     session: &SessionInterface,
     path: &Path,
     rtt_client: Option<Key<RttClient>>,
+    semihosting_options: SemihostingOptions,
     sender: UnboundedSender<MonitorEvent>,
     token: &CancellationToken,
     test: Test,
@@ -596,7 +660,9 @@ fn create_trial(
 
             let handle = tokio::spawn(async move {
                 match session
-                    .run_test(test, rtt_client, async move |msg| sender.send(msg).unwrap())
+                    .run_test(test, rtt_client, semihosting_options, async move |msg| {
+                        sender.send(msg).unwrap()
+                    })
                     .await
                 {
                     Ok(TestResult::Success) => Ok(()),
@@ -610,7 +676,7 @@ fn create_trial(
                         Err(Failed::from(message))
                     }
                     Err(e) => {
-                        eprintln!("Error: {:?}", e);
+                        eprintln!("Error: {e:?}");
                         std::process::exit(1);
                     }
                 }
@@ -626,9 +692,9 @@ async fn display_stack_trace(session: &SessionInterface, path: &Path) -> anyhow:
     let stack_trace = session.stack_trace(path.to_path_buf()).await?;
 
     for StackTrace { core, frames } in stack_trace.cores.iter() {
-        println!("Core {}", core);
+        println!("Core {core}");
         for frame in frames {
-            println!("    {}", frame);
+            println!("    {frame}");
         }
     }
 
@@ -644,8 +710,19 @@ where
     I: Future,
 {
     let mut run = std::pin::pin!(f);
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install signal handler")
+            .recv()
+            .await;
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
     tokio::select! {
         _ = tokio::signal::ctrl_c() => eprintln!("Received Ctrl+C, exiting"),
+        _ = terminate => eprintln!("Received SIGTERM, exiting"),
         result = &mut run => return result,
     };
 
@@ -663,6 +740,7 @@ pub struct CliRttClient {
 
     // Data necessary to create the channel processors once we know the channel names.
     log_format: Option<String>,
+    show_timestamps: bool,
     show_location: bool,
     timestamp_offset: Option<UtcOffset>,
     defmt_data: Option<DefmtState>,
@@ -681,27 +759,27 @@ impl CliRttClient {
 
         // Apply our heuristics based on channel names.
         for channel in up_channels.iter() {
-            let decoder =
-                if channel == "defmt" || (self.defmt_data.is_some() && up_channels.len() == 1) {
-                    if let Some(defmt_data) = self.defmt_data.clone() {
-                        RttDecoder::Defmt {
-                            processor: DefmtProcessor::new(
-                                defmt_data,
-                                self.timestamp_offset.is_some(),
-                                self.show_location,
-                                self.log_format.as_deref(),
-                            ),
-                        }
-                    } else {
-                        // Not much we can do. Don't silently eat the data.
-                        RttDecoder::BinaryLE
+            let decoder = if channel == "defmt" {
+                if let Some(defmt_data) = self.defmt_data.clone() {
+                    RttDecoder::Defmt {
+                        processor: DefmtProcessor::new(
+                            defmt_data,
+                            self.show_timestamps,
+                            self.show_location,
+                            self.log_format.as_deref(),
+                        ),
                     }
                 } else {
-                    RttDecoder::String {
-                        timestamp_offset: self.timestamp_offset,
-                        last_line_done: false,
-                    }
-                };
+                    // Not much we can do. Don't silently eat the data.
+                    RttDecoder::BinaryLE
+                }
+            } else {
+                RttDecoder::String {
+                    timestamp_offset: self.timestamp_offset,
+                    last_line_done: false,
+                    show_timestamps: self.show_timestamps,
+                }
+            };
 
             self.channel_processors
                 .push(Channel::new(channel.clone(), decoder));

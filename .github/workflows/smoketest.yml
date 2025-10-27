@@ -24,18 +24,18 @@ jobs:
 
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install target for cross-compilation
         run: rustup target add aarch64-unknown-linux-gnu
 
       - name: Install cross
-        uses: taiki-e/install-action@v2.50.10
+        uses: taiki-e/install-action@v2.62.33
         with:
           tool: cross
 
       - name: Cache Dependencies
-        uses: Swatinem/rust-cache@v2.7.8
+        uses: Swatinem/rust-cache@v2.8.1
 
       - name: Build smoke-tester
         run: cross build --release --target aarch64-unknown-linux-gnu -p smoke_tester
@@ -62,7 +62,7 @@ jobs:
     needs: build
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: smoke_tester
 
@@ -80,7 +80,7 @@ jobs:
     needs: build
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: probe-rs
 

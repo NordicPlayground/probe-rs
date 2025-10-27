@@ -38,7 +38,7 @@ pub struct Cmd {
 
 // Clippy doesn't like `from_str_radix` with radix 10, but I prefer the symmetry`
 // with the hex case.
-#[allow(clippy::from_str_radix_10)]
+#[expect(clippy::from_str_radix_10)]
 fn parse_hex(src: &str) -> Result<u32, std::num::ParseIntError> {
     if src.starts_with("0x") {
         u32::from_str_radix(src.trim_start_matches("0x"), 16)
@@ -95,16 +95,16 @@ impl Cmd {
                 .await;
 
             if let Err(error) = result {
-                println!("Error while probing target: {}", error);
+                println!("Error while probing target: {error}");
             }
 
             if successes.is_empty() {
                 for message in errors {
-                    println!("{}", message);
+                    println!("{message}");
                 }
             } else {
                 for message in successes {
-                    println!("{}", message);
+                    println!("{message}");
                 }
             }
         }
@@ -234,7 +234,7 @@ impl Display for DebugPortInfoNode {
 
             let instance = dlpidr.tinstance();
 
-            write!(f, ", Instance: {:#04x}", instance)?;
+            write!(f, ", Instance: {instance:#04x}")?;
         } else {
             format_jep(f, self.dp_info.designer.into())?;
         }

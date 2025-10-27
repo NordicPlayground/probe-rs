@@ -412,16 +412,16 @@ fn prune_logs(directory: &Path) -> Result<(), anyhow::Error> {
 /// (cli, cargo-flash, cargo-embed, etc.)
 fn multicall_check<'list>(args: &'list [OsString], want: &str) -> Option<&'list [OsString]> {
     let argv0 = Path::new(&args[0]);
-    if let Some(command) = argv0.file_stem().and_then(|f| f.to_str()) {
-        if command == want {
-            return Some(args);
-        }
+    if let Some(command) = argv0.file_stem().and_then(|f| f.to_str())
+        && command == want
+    {
+        return Some(args);
     }
 
-    if let Some(command) = args.get(1).and_then(|f| f.to_str()) {
-        if command == want {
-            return Some(&args[1..]);
-        }
+    if let Some(command) = args.get(1).and_then(|f| f.to_str())
+        && command == want
+    {
+        return Some(&args[1..]);
     }
 
     None
@@ -446,8 +446,6 @@ async fn main() -> Result<()> {
         cmd::cargo_embed::main(args, utc_offset).await;
         return Ok(());
     }
-
-    reject_format_arg(&args)?;
 
     let config = load_config().context("Failed to load configuration.")?;
 
@@ -535,7 +533,7 @@ fn apply_config_preset(
 
     let mut args_modified = false;
     for (arg, value) in preset {
-        let flag = format!("--{}", arg).into();
+        let flag = format!("--{arg}").into();
         if args.contains(&flag) {
             continue;
         }
@@ -553,38 +551,21 @@ fn apply_config_preset(
             Value::String(_, value) => args.push(value.into()),
             Value::Num(_, num) => {
                 if let Some(uint) = num.to_u128() {
-                    args.push(format!("{}", uint).into())
+                    args.push(format!("{uint}").into())
                 } else if let Some(int) = num.to_i128() {
-                    args.push(format!("{}", int).into())
+                    args.push(format!("{int}").into())
                 } else if let Some(float) = num.to_f64() {
-                    args.push(format!("{}", float).into())
+                    args.push(format!("{float}").into())
                 } else {
                     unreachable!()
                 }
             }
             Value::Bool(_, _) => {}
-            _ => anyhow::bail!("Unsupported value: {:?}", value),
+            _ => anyhow::bail!("Unsupported value: {value:?}"),
         }
     }
 
     Ok(args_modified)
-}
-
-fn reject_format_arg(args: &[OsString]) -> anyhow::Result<()> {
-    if let Some(format_arg_pos) = args.iter().position(|arg| arg == "--format") {
-        if let Some(format_arg) = args.get(format_arg_pos + 1) {
-            if let Some(format_arg) = format_arg.to_str() {
-                if FormatKind::from_str(format_arg).is_ok() {
-                    anyhow::bail!(
-                        "--format has been renamed to --binary-format. Please use --binary-format {0} instead of --format {0}",
-                        format_arg
-                    );
-                }
-            }
-        }
-    }
-
-    Ok(())
 }
 
 fn compile_report(

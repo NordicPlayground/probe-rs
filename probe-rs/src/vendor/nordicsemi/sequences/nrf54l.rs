@@ -29,7 +29,7 @@ impl Nrf54L {
 impl ArmDebugSequence for Nrf54L {
     fn debug_device_unlock(
         &self,
-        interface: &mut dyn crate::architecture::arm::ArmProbeInterface,
+        interface: &mut dyn crate::architecture::arm::ArmDebugInterface,
         default_ap: &FullyQualifiedApAddress,
         permissions: &crate::Permissions,
     ) -> Result<(), ArmError> {
@@ -85,8 +85,7 @@ impl ArmDebugSequence for Nrf54L {
             }
             status => {
                 return Err(ArmError::Other(format!(
-                    "Erase all failed with unexpected status codee {}",
-                    status
+                    "Erase all failed with unexpected status codee {status}"
                 )));
             }
         }

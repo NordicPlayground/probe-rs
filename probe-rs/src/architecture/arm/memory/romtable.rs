@@ -2,7 +2,7 @@
 
 use crate::architecture::arm::{
     ArmError, FullyQualifiedApAddress, ap::AccessPortError,
-    communication_interface::ArmProbeInterface, memory::ArmMemoryInterface,
+    communication_interface::ArmDebugInterface, memory::ArmMemoryInterface,
 };
 
 /// The ARCHID associated with all CoreSight ROM tables.
@@ -289,7 +289,6 @@ impl<'probe: 'memory, 'memory> ComponentInformationReader<'probe, 'memory> {
     ///
     /// This function does a direct memory access and is meant for internal use only.
     fn component_class(&mut self) -> Result<RawComponent, RomTableError> {
-        #![allow(clippy::verbose_bit_mask)]
         let mut cidr = [0u32; 4];
 
         self.memory
@@ -529,7 +528,7 @@ impl CoresightComponent {
     /// Reads a register of the component pointed to by this romtable entry.
     pub fn read_reg(
         &self,
-        interface: &mut dyn ArmProbeInterface,
+        interface: &mut dyn ArmDebugInterface,
         offset: u32,
     ) -> Result<u32, ArmError> {
         let mut memory = interface.memory_interface(&self.ap_address)?;
@@ -540,7 +539,7 @@ impl CoresightComponent {
     /// Writes a register of the component pointed to by this romtable entry.
     pub fn write_reg(
         &self,
-        interface: &mut dyn ArmProbeInterface,
+        interface: &mut dyn ArmDebugInterface,
         offset: u32,
         value: u32,
     ) -> Result<(), ArmError> {
@@ -561,7 +560,7 @@ impl CoresightComponent {
     }
 
     /// Turns this component into a component iterator which iterates all its children recursively.
-    pub fn iter(&self) -> CoresightComponentIter {
+    pub fn iter(&self) -> CoresightComponentIter<'_> {
         CoresightComponentIter::new(vec![self])
     }
 }
@@ -640,7 +639,7 @@ enum ComponentModification {
 /// Peripheral ID information for a CoreSight component.
 ///
 /// Described in section D1.2.2 of the ADIv5.2 spec.
-#[allow(non_snake_case)]
+#[expect(non_snake_case)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct PeripheralID {
     /// Indicates minor errata fixes by the component `designer`.
@@ -767,6 +766,7 @@ impl PeripheralID {
             ("ARM Ltd", 0x9A9, 0x11, 0x0000) => Some(PartInfo::new("Cortex-M7 TPIU", PeripheralType::Tpiu)),
             ("ARM Ltd", 0xD20, 0x11, 0x0000) => Some(PartInfo::new("Cortex-M23 TPIU", PeripheralType::Tpiu)),
             ("ARM Ltd", 0xD20, 0x13, 0x0000) => Some(PartInfo::new("Cortex-M23 ETM", PeripheralType::Etm)),
+            ("ARM Ltd", 0xD21, 0x11, 0x0000) => Some(PartInfo::new("Cortex-M33 TPIU", PeripheralType::Tpiu)),
             // From Arm Cortex-M55 Processor Technical Reference Manual
             ("ARM Ltd", 0xD22, 0x11, 0x0000) => Some(PartInfo::new("Cortex-M55 TPIU", PeripheralType::Tpiu)),
             // From IHI0029F: Coresight v3.0 architecture Specification

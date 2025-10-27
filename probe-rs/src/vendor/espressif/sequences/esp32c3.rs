@@ -6,7 +6,10 @@ use super::esp::EspFlashSizeDetector;
 use crate::{
     MemoryInterface, Session,
     architecture::riscv::{
-        Dmcontrol, Dmstatus, Riscv32, communication_interface::RiscvCommunicationInterface,
+        Dmcontrol, Dmstatus, Riscv32,
+        communication_interface::{
+            MemoryAccessMethod, RiscvBusAccess, RiscvCommunicationInterface,
+        },
         sequences::RiscvDebugSequence,
     },
     semihosting::{SemihostingCommand, UnknownCommandDetails},
@@ -39,9 +42,6 @@ impl ESP32C3 {
     ) -> Result<(), crate::Error> {
         tracing::info!("Disabling ESP32-C3 watchdogs...");
 
-        // FIXME: this is a terrible hack because we should not need to halt to read memory.
-        interface.sysbus_requires_halting(true);
-
         // disable super wdt
         interface.write_word_32(0x600080B0, 0x8F1D312A)?; // write protection off
         let current = interface.read_word_32(0x600080AC)?;
@@ -65,11 +65,49 @@ impl ESP32C3 {
 
         Ok(())
     }
+
+    fn configure_memory_access(
+        &self,
+        interface: &mut RiscvCommunicationInterface<'_>,
+    ) -> Result<(), crate::Error> {
+        let memory_access_config = interface.memory_access_config();
+
+        let accesses = [
+            RiscvBusAccess::A8,
+            RiscvBusAccess::A16,
+            RiscvBusAccess::A32,
+            RiscvBusAccess::A64,
+            RiscvBusAccess::A128,
+        ];
+        for access in accesses {
+            let method = memory_access_config.default_method(access);
+
+            // FIXME: this is a terrible hack because we should not need to halt to read memory.
+            memory_access_config
+                .set_default_method(access, method.min(MemoryAccessMethod::HaltedSystemBus));
+
+            if method != MemoryAccessMethod::SystemBus {
+                // External data bus
+                // Loading external memory is slower than the CPU. If we can't access something via the
+                // system bus, select the waiting program buffer method.
+                memory_access_config.set_region_override(
+                    access,
+                    0x3C00_0000..0x3C80_0000,
+                    MemoryAccessMethod::WaitingProgramBuffer,
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl RiscvDebugSequence for ESP32C3 {
     fn on_connect(&self, interface: &mut RiscvCommunicationInterface) -> Result<(), crate::Error> {
-        self.disable_wdts(interface)
+        self.configure_memory_access(interface)?;
+        self.disable_wdts(interface)?;
+
+        Ok(())
     }
 
     fn on_halt(&self, interface: &mut RiscvCommunicationInterface) -> Result<(), crate::Error> {

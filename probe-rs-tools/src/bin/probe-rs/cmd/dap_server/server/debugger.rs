@@ -11,8 +11,9 @@ use crate::{
             dap::{
                 adapter::{DebugAdapter, get_arguments},
                 dap_types::{
-                    Capabilities, Event, ExitedEventBody, InitializeRequestArguments,
-                    MessageSeverity, Request, RttWindowOpenedArguments, TerminatedEventBody,
+                    Capabilities, DisconnectResponse, Event, ExitedEventBody,
+                    InitializeRequestArguments, MessageSeverity, Request, RttWindowOpenedArguments,
+                    TerminatedEventBody,
                 },
                 request_helpers::halt_core,
             },
@@ -32,7 +33,6 @@ use probe_rs::{
     probe::list::Lister,
 };
 use std::{
-    cell::RefCell,
     collections::HashMap,
     fs,
     path::Path,
@@ -165,8 +165,7 @@ impl Debugger {
 
         let Some(target_core_config) = self.config.core_configs.get(core_id) else {
             return Err(DebuggerError::Other(anyhow!(
-                "No core configuration found for core id {}",
-                core_id
+                "No core configuration found for core id {core_id}"
             )));
         };
 
@@ -230,8 +229,7 @@ impl Debugger {
                         .send_response::<()>(&request, Ok(None))
                         .map_err(|error| {
                             DebuggerError::Other(anyhow!(
-                                "Could not deserialize arguments for RttWindowOpened : {:?}.",
-                                error
+                                "Could not deserialize arguments for RttWindowOpened : {error:?}."
                             ))
                         })?;
                 }
@@ -255,7 +253,7 @@ impl Debugger {
                 let result = target_core
                     .core
                     .halt(Duration::from_millis(500))
-                    .map_err(|error| anyhow!("Failed to halt core: {}", error))
+                    .map_err(|error| anyhow!("Failed to halt core: {error:?}"))
                     .and(Ok(()));
 
                 debug_session = DebugSessionStatus::Restart(request);
@@ -277,8 +275,7 @@ impl Debugger {
                 debug_adapter.send_response::<()>(
                     &request,
                     Err(&DebuggerError::Other(anyhow!(
-                        "Received request '{}', which is not supported or not implemented yet",
-                        other_command
+                        "Received request '{other_command}', which is not supported or not implemented yet"
                     ))),
                 )
             }
@@ -286,13 +283,10 @@ impl Debugger {
 
         result.map_err(|e| DebuggerError::Other(e.context("Error executing request.")))?;
 
-        if unhalt_me {
-            if let Err(error) = target_core.core.run() {
-                let error =
-                    DebuggerError::Other(anyhow!(error).context("Failed to resume target."));
-                debug_adapter.show_error_message(&error)?;
-                return Err(error);
-            }
+        if unhalt_me && let Err(error) = target_core.core.run() {
+            let error = DebuggerError::Other(anyhow!(error).context("Failed to resume target."));
+            debug_adapter.show_error_message(&error)?;
+            return Err(error);
         }
 
         Ok(debug_session)
@@ -319,10 +313,31 @@ impl Debugger {
             return Ok(());
         }
 
+        let expected_commands = ["launch", "attach"];
+
         let launch_attach_request = loop {
             if let Some(request) = debug_adapter.listen_for_request()? {
-                self.debug_logger.flush_to_dap(&mut debug_adapter)?;
-                break request;
+                if expected_commands.contains(&request.command.as_str()) {
+                    self.debug_logger.flush_to_dap(&mut debug_adapter)?;
+                    break request;
+                } else if request.command == "disconnect" {
+                    debug_adapter.send_response::<DisconnectResponse>(&request, Ok(None))?;
+
+                    return Ok(());
+                } else {
+                    debug_adapter.log_to_console(format!(
+                        "Ignoring request with command '{}', we can only handle 'launch' and 'attach' commands.", request.command
+                    ));
+
+                    let err = DebuggerError::Other(anyhow!(
+                        "Unable to process request with command {} before an attach or launch request is received",
+                        request.command
+                    ));
+
+                    debug_adapter.send_response::<()>(&request, Err(&err))?;
+
+                    // Continue listening for requests
+                }
             }
         };
 
@@ -595,8 +610,6 @@ impl Debugger {
         download_options.do_chip_erase = config.flashing_config.full_chip_erase;
         download_options.verify = config.flashing_config.verify_after_flashing;
 
-        let ref_debug_adapter = RefCell::new(&mut *debug_adapter);
-
         #[derive(Default)]
         struct ProgressBarState {
             total_size: u64,
@@ -605,66 +618,66 @@ impl Debugger {
 
         type ProgressState = HashMap<Operation, ProgressBarState>;
 
-        let progress_state = RefCell::new(ProgressState::default());
+        download_options.progress = progress_id
+            .map(|id| {
+                let describe_op = |operation| match Operation::from(operation) {
+                    Operation::Fill => "Reading Old Pages",
+                    Operation::Erase => "Erasing Sectors",
+                    Operation::Program => "Programming Pages",
+                    Operation::Verify => "Verifying",
+                };
+                let mut flash_progress = ProgressState::default();
+                let debug_adapter = &mut *debug_adapter;
+                FlashProgress::new(move |event| {
+                    match event {
+                        ProgressEvent::AddProgressBar { operation, total } => {
+                            let pbar_state = flash_progress.entry(operation.into()).or_default();
+                            if let Some(total) = total {
+                                pbar_state.total_size += total; // should this be an assignment instead?
+                                pbar_state.size_done = 0;
+                            };
+                        }
+                        ProgressEvent::Started(operation) => {
+                            debug_adapter
+                                .update_progress(None, Some(describe_op(operation)), id)
+                                .ok();
+                        }
+                        ProgressEvent::Progress {
+                            operation, size, ..
+                        } => {
+                            let pbar_state = flash_progress.entry(operation.into()).or_default();
+                            pbar_state.size_done += size;
+                            let progress =
+                                pbar_state.size_done as f64 / pbar_state.total_size as f64;
 
-        download_options.progress = progress_id.map(|id| {
-            let describe_op = |operation| match Operation::from(operation) {
-                Operation::Fill => "Reading Old Pages",
-                Operation::Erase => "Erasing Sectors",
-                Operation::Program => "Programming Pages",
-                Operation::Verify => "Verifying",
-            };
-
-            FlashProgress::new(move |event| {
-                let mut flash_progress = progress_state.borrow_mut();
-                let mut debug_adapter = ref_debug_adapter.borrow_mut();
-                match event {
-                    ProgressEvent::AddProgressBar { operation, total } => {
-                        let pbar_state = flash_progress.entry(operation.into()).or_default();
-                        if let Some(total) = total {
-                            pbar_state.total_size += total; // should this be an assignment instead?
-                            pbar_state.size_done = 0;
-                        };
+                            debug_adapter
+                                .update_progress(Some(progress), Some(describe_op(operation)), id)
+                                .ok();
+                        }
+                        ProgressEvent::Failed(operation) => {
+                            debug_adapter
+                                .update_progress(
+                                    Some(1.0),
+                                    Some(format!("{} Failed!", describe_op(operation))),
+                                    id,
+                                )
+                                .ok();
+                        }
+                        ProgressEvent::Finished(operation) => {
+                            debug_adapter
+                                .update_progress(
+                                    Some(1.0),
+                                    Some(format!("{} Complete!", describe_op(operation))),
+                                    id,
+                                )
+                                .ok();
+                        }
+                        ProgressEvent::FlashLayoutReady { .. } => {}
+                        ProgressEvent::DiagnosticMessage { .. } => {}
                     }
-                    ProgressEvent::Started(operation) => {
-                        debug_adapter
-                            .update_progress(None, Some(describe_op(operation)), id)
-                            .ok();
-                    }
-                    ProgressEvent::Progress {
-                        operation, size, ..
-                    } => {
-                        let pbar_state = flash_progress.entry(operation.into()).or_default();
-                        pbar_state.size_done += size;
-                        let progress = pbar_state.size_done as f64 / pbar_state.total_size as f64;
-
-                        debug_adapter
-                            .update_progress(Some(progress), Some(describe_op(operation)), id)
-                            .ok();
-                    }
-                    ProgressEvent::Failed(operation) => {
-                        debug_adapter
-                            .update_progress(
-                                Some(1.0),
-                                Some(format!("{} Failed!", describe_op(operation))),
-                                id,
-                            )
-                            .ok();
-                    }
-                    ProgressEvent::Finished(operation) => {
-                        debug_adapter
-                            .update_progress(
-                                Some(1.0),
-                                Some(format!("{} Complete!", describe_op(operation))),
-                                id,
-                            )
-                            .ok();
-                    }
-                    ProgressEvent::FlashLayoutReady { .. } => {}
-                    ProgressEvent::DiagnosticMessage { .. } => {}
-                }
+                })
             })
-        });
+            .unwrap_or_default();
 
         let result = match build_loader(
             &mut session_data.session,
@@ -674,13 +687,7 @@ impl Debugger {
         ) {
             Ok(loader) => {
                 let do_flashing = if config.flashing_config.verify_before_flashing {
-                    match loader.verify(
-                        &mut session_data.session,
-                        download_options
-                            .progress
-                            .clone()
-                            .unwrap_or_else(FlashProgress::empty),
-                    ) {
+                    match loader.verify(&mut session_data.session, &mut download_options.progress) {
                         Ok(_) => false,
                         Err(FlashError::Verify) => true,
                         Err(other) => {
@@ -736,19 +743,32 @@ impl Debugger {
         &mut self,
         debug_adapter: &mut DebugAdapter<P>,
     ) -> Result<(), DebuggerError> {
-        let initialize_request = expect_request(debug_adapter, "initialize")?;
+        let initialize_request = loop {
+            if let Some(current_request) = debug_adapter.listen_for_request()? {
+                if current_request.command == "initialize" {
+                    break current_request;
+                } else {
+                    let error = DebuggerError::Other(anyhow!(
+                        "Received request with command'{}', expected to receive the initialize command",
+                        current_request.command,
+                    ));
+                    debug_adapter.send_response::<()>(&current_request, Err(&error))?;
+                    return Err(error);
+                }
+            }
+        };
 
         let initialize_arguments =
             get_arguments::<InitializeRequestArguments, _>(debug_adapter, &initialize_request)?;
 
         // Enable quirks specific to particular DAP clients...
-        if let Some(client_id) = initialize_arguments.client_id {
-            if client_id == "vscode" {
-                tracing::info!(
-                    "DAP client reports its 'ClientID' is 'vscode', enabling vscode_quirks."
-                );
-                debug_adapter.vscode_quirks = true;
-            }
+        if let Some(client_id) = initialize_arguments.client_id
+            && client_id == "vscode"
+        {
+            tracing::info!(
+                "DAP client reports its 'ClientID' is 'vscode', enabling vscode_quirks."
+            );
+            debug_adapter.vscode_quirks = true;
         }
 
         if !(initialize_arguments.columns_start_at_1.unwrap_or(true)
@@ -803,34 +823,6 @@ impl Debugger {
     }
 }
 
-/// Wait for the next request with the given command.
-///
-/// If the next request does *not* have the given command,
-/// the function returns an error.
-fn expect_request<P: ProtocolAdapter>(
-    debug_adapter: &mut DebugAdapter<P>,
-    expected_command: &str,
-) -> Result<Request, DebuggerError> {
-    let next_request = loop {
-        if let Some(current_request) = debug_adapter.listen_for_request()? {
-            break current_request;
-        }
-    };
-
-    if next_request.command == expected_command {
-        Ok(next_request)
-    } else {
-        let error = DebuggerError::Other(anyhow!(
-            "Initial command was '{}', expected '{}'",
-            next_request.command,
-            expected_command
-        ));
-        debug_adapter.send_response::<()>(&next_request, Err(&error))?;
-
-        Err(error)
-    }
-}
-
 pub(crate) fn is_file_newer(
     saved_binary_timestamp: &mut Option<Duration>,
     path_to_elf: &Path,
@@ -862,8 +854,8 @@ pub(crate) fn is_file_newer(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod test {
-    #![allow(clippy::unwrap_used, clippy::panic)]
 
     use crate::cmd::dap_server::{
         DebuggerError,
@@ -964,6 +956,7 @@ mod test {
             supports_start_debugging_request: None,
             supports_variable_paging: None,
             supports_variable_type: None,
+            supports_ansi_styling: None,
         }
     }
 
@@ -1092,7 +1085,7 @@ mod test {
             RequestBuilder { adapter: self }
         }
 
-        fn expect_response(&mut self, response: Response) -> ResponseBuilder {
+        fn expect_response(&mut self, response: Response) -> ResponseBuilder<'_> {
             assert!(
                 response.success,
                 "success field must be true for succesful response"
@@ -1101,7 +1094,7 @@ mod test {
             ResponseBuilder { adapter: self }
         }
 
-        fn expect_error_response(&mut self, response: Response) -> ResponseBuilder {
+        fn expect_error_response(&mut self, response: Response) -> ResponseBuilder<'_> {
             assert!(
                 !response.success,
                 "success field must be false for error response"
@@ -1148,8 +1141,7 @@ mod test {
 
             if self.event_index >= self.expected_events.len() {
                 panic!(
-                    "No more events expected, but got event_type={:?}, event_body={:?}",
-                    event_type, event_body
+                    "No more events expected, but got event_type={event_type:?}, event_body={event_body:?}"
                 );
             }
 
@@ -1176,7 +1168,7 @@ mod test {
             self.console_log_level
         }
 
-        fn send_raw_response(&mut self, response: &Response) -> anyhow::Result<()> {
+        fn send_raw_response(&mut self, response: Response) -> anyhow::Result<()> {
             if self.response_index >= self.expected_responses.len() {
                 panic!("No more responses expected, but got {response:?}");
             }
@@ -1199,6 +1191,11 @@ mod test {
 
         fn remove_pending_request(&mut self, request_seq: i64) -> Option<String> {
             self.pending_requests.remove(&request_seq)
+        }
+
+        fn get_next_seq(&mut self) -> i64 {
+            self.sequence_number += 1;
+            self.sequence_number
         }
     }
 
@@ -1360,13 +1357,17 @@ mod test {
     async fn wrong_request_after_init() {
         let mut protocol_adapter = initialized_protocol_adapter();
 
-        let expected_error = "Expected request 'launch' or 'attach', but received 'threads'";
-        protocol_adapter.expect_output_event(&format!("{expected_error}\n"));
+        let expected_error = "Unable to process request with command threads before an attach or launch request is received";
+        protocol_adapter.expect_output_event("Ignoring request with command 'threads', we can only handle 'launch' and 'attach' commands.\n");
 
         protocol_adapter
             .add_request("threads")
             .and_error_response()
             .with_body(error_response_body(expected_error));
+
+        protocol_adapter.expect_output_event("Unable to process request with command threads before an attach or launch request is received\n");
+
+        disconnect_protocol_adapter(&mut protocol_adapter);
 
         execute_test(protocol_adapter, true).await.unwrap();
     }
@@ -1514,6 +1515,7 @@ mod test {
             line: None,
             location: None,
             symbol: None,
+            presentation_hint: None,
         };
 
         let default_source_fields = Source {

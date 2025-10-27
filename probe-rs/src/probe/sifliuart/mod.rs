@@ -4,14 +4,16 @@
 mod arm;
 
 use crate::Error;
-use crate::architecture::arm::communication_interface::UninitializedArmProbe;
-use crate::probe::sifliuart::arm::UninitializedSifliUartArmProbe;
+use crate::architecture::arm::sequences::ArmDebugSequence;
+use crate::architecture::arm::{ArmDebugInterface, ArmError};
+use crate::probe::sifliuart::arm::SifliUartArmDebug;
 use crate::probe::{
     DebugProbe, DebugProbeError, DebugProbeInfo, DebugProbeSelector, ProbeCreationError,
     ProbeFactory, WireProtocol,
 };
 use serialport::{SerialPort, SerialPortType, available_ports};
 use std::io::{BufReader, BufWriter, Read, Write};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{env, fmt};
 
@@ -21,7 +23,6 @@ const DEFUALT_RECV_TIMEOUT: Duration = Duration::from_secs(3);
 
 const DEFUALT_UART_BAUD: u32 = 1000000;
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub(crate) enum SifliUartCommand<'a> {
     Enter,
@@ -43,15 +44,15 @@ impl fmt::Display for SifliUartCommand<'_> {
             SifliUartCommand::Enter => write!(f, "Enter"),
             SifliUartCommand::Exit => write!(f, "Exit"),
             SifliUartCommand::MEMRead { addr, len } => {
-                write!(f, "MEMRead {{ addr: {:#X}, len: {:#X} }}", addr, len)
+                write!(f, "MEMRead {{ addr: {addr:#X}, len: {len:#X} }}")
             }
             SifliUartCommand::MEMWrite { addr, data } => {
-                write!(f, "MEMWrite {{ addr: {:#X}, data: [", addr)?;
+                write!(f, "MEMWrite {{ addr: {addr:#X}, data: [")?;
                 for (i, d) in data.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{:#X}", d)?;
+                    write!(f, "{d:#X}")?;
                 }
                 write!(f, "] }}")
             }
@@ -70,7 +71,7 @@ impl fmt::Display for SifliUartResponse {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "{:#04X}", byte)?;
+                    write!(f, "{byte:#04X}")?;
                 }
                 write!(f, "] }}")
             }
@@ -79,7 +80,6 @@ impl fmt::Display for SifliUartResponse {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 enum CommandError {
     ParameterError(std::io::Error),
@@ -92,10 +92,10 @@ enum CommandError {
 impl fmt::Display for CommandError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CommandError::ParameterError(e) => write!(f, "ParameterError({})", e),
+            CommandError::ParameterError(e) => write!(f, "ParameterError({e})"),
             // CommandError::Error(e) => write!(f, "Error({})", e),
             // CommandError::Unsupported(e) => write!(f, "Unsupported({})", e),
-            CommandError::ProbeError(e) => write!(f, "ProbeError({})", e),
+            CommandError::ProbeError(e) => write!(f, "ProbeError({e})"),
             // CommandError::UnsupportedVersion(e) => write!(f, "UnsupportedVersion({})", e),
         }
     }
@@ -290,7 +290,6 @@ impl SifliUart {
     }
 }
 
-#[allow(unused)]
 impl DebugProbe for SifliUart {
     fn get_name(&self) -> &str {
         "Sifli UART Debug Probe"
@@ -353,11 +352,11 @@ impl DebugProbe for SifliUart {
         true
     }
 
-    fn try_get_arm_interface<'probe>(
+    fn try_get_arm_debug_interface<'probe>(
         self: Box<Self>,
-    ) -> Result<Box<dyn UninitializedArmProbe + 'probe>, (Box<dyn DebugProbe>, DebugProbeError)>
-    {
-        Ok(Box::new(UninitializedSifliUartArmProbe { probe: self }))
+        sequence: Arc<dyn ArmDebugSequence>,
+    ) -> Result<Box<dyn ArmDebugInterface + 'probe>, (Box<dyn DebugProbe>, ArmError)> {
+        Ok(Box::new(SifliUartArmDebug::new(self, sequence)))
     }
 
     fn into_probe(self: Box<Self>) -> Box<dyn DebugProbe> {

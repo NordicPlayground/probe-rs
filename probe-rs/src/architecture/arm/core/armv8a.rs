@@ -26,6 +26,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+const OPERATION_TIMEOUT: Duration = Duration::from_millis(250);
+
 /// Errors for the ARMv8-A state machine
 #[derive(thiserror::Error, Debug)]
 pub enum Armv8aError {
@@ -131,7 +133,11 @@ impl<'probe> Armv8a<'probe> {
         let address = Edscr::get_mmio_address_from_base(self.base_address)?;
         let mut edscr = Edscr(self.memory.read_word_32(address)?);
 
+        let start = Instant::now();
         while !edscr.ite() {
+            if start.elapsed() > OPERATION_TIMEOUT {
+                return Err(Error::Arm(ArmError::Timeout));
+            }
             edscr = Edscr(self.memory.read_word_32(address)?);
         }
 
@@ -155,7 +161,11 @@ impl<'probe> Armv8a<'probe> {
         let mut edscr = self.execute_instruction(instruction)?;
 
         // Wait for TXfull
+        let start = Instant::now();
         while !edscr.txfull() {
+            if start.elapsed() > OPERATION_TIMEOUT {
+                return Err(Error::Timeout);
+            }
             let address = Edscr::get_mmio_address_from_base(self.base_address)?;
             edscr = Edscr(self.memory.read_word_32(address)?);
         }
@@ -173,7 +183,11 @@ impl<'probe> Armv8a<'probe> {
         let mut edscr = self.execute_instruction(instruction)?;
 
         // Wait for TXfull
+        let start = Instant::now();
         while !edscr.txfull() {
+            if start.elapsed() > OPERATION_TIMEOUT {
+                return Err(Error::Timeout);
+            }
             let address = Edscr::get_mmio_address_from_base(self.base_address)?;
             edscr = Edscr(self.memory.read_word_32(address)?);
         }
@@ -201,7 +215,11 @@ impl<'probe> Armv8a<'probe> {
         let address = Edscr::get_mmio_address_from_base(self.base_address)?;
         let mut edscr = Edscr(self.memory.read_word_32(address)?);
 
+        let start = Instant::now();
         while !edscr.rxfull() {
+            if start.elapsed() > OPERATION_TIMEOUT {
+                return Err(Error::Timeout);
+            }
             edscr = Edscr(self.memory.read_word_32(address)?);
         }
 
@@ -230,7 +248,11 @@ impl<'probe> Armv8a<'probe> {
         let address = Edscr::get_mmio_address_from_base(self.base_address)?;
         let mut edscr = Edscr(self.memory.read_word_32(address)?);
 
+        let start = Instant::now();
         while !edscr.rxfull() {
+            if start.elapsed() > OPERATION_TIMEOUT {
+                return Err(Error::Timeout);
+            }
             edscr = Edscr(self.memory.read_word_32(address)?);
         }
 
@@ -252,7 +274,7 @@ impl<'probe> Armv8a<'probe> {
     }
 
     fn writeback_registers_aarch32(&mut self) -> Result<(), Error> {
-        // Update SP, PC, CPSR first since they clobber the GP registeres
+        // Update SP, PC, CPSR first since they clobber the GP registers
         let writeback_iter = (15u16..=16).chain(17u16..=48).chain(0u16..=14);
 
         for i in writeback_iter {
@@ -308,7 +330,7 @@ impl<'probe> Armv8a<'probe> {
     }
 
     fn writeback_registers_aarch64(&mut self) -> Result<(), Error> {
-        // Update SP, PC, CPSR, FP first since they clobber the GP registeres
+        // Update SP, PC, CPSR, FP first since they clobber the GP registers
         let writeback_iter = (31u16..=33).chain(34u16..=65).chain(0u16..=30);
 
         for i in writeback_iter {
@@ -377,7 +399,10 @@ impl<'probe> Armv8a<'probe> {
 
     /// Save register if needed before it gets clobbered by instruction execution
     fn prepare_for_clobber(&mut self, reg: u16) -> Result<(), Error> {
-        if self.state.register_cache[reg as usize].is_none() {
+        if let Some(val) = &mut self.state.register_cache[reg as usize] {
+            // Mark reg as needing writeback
+            val.1 = true;
+        } else {
             // cache reg since we're going to clobber it
             let val = self.read_core_reg(RegisterId(reg))?;
 
@@ -410,12 +435,16 @@ impl<'probe> Armv8a<'probe> {
         let address = CtiIntack::get_mmio_address_from_base(self.cti_address)?;
         self.memory.write_word_32(address, ack.into())?;
 
+        let start = Instant::now();
         loop {
             let address = CtiTrigoutstatus::get_mmio_address_from_base(self.cti_address)?;
             let trig_status = CtiTrigoutstatus(self.memory.read_word_32(address)?);
 
             if trig_status.status(0) == 0 {
                 break;
+            }
+            if start.elapsed() > OPERATION_TIMEOUT {
+                return Err(Error::Timeout);
             }
         }
 
@@ -517,22 +546,8 @@ impl<'probe> Armv8a<'probe> {
                 // SP
                 self.prepare_for_clobber(0)?;
 
-                // MRS SP_EL0, X0
+                // MRS X0, SP_EL0
                 let instruction = aarch64::build_mrs(3, 0, 4, 1, 0, 0);
-                self.execute_instruction(instruction)?;
-
-                // Read from x0
-                let instruction = aarch64::build_msr(2, 3, 0, 4, 0, 0);
-                let pc = self.execute_instruction_with_result_64(instruction)?;
-
-                Ok(pc.into())
-            }
-            32 => {
-                // PC, must access via x0
-                self.prepare_for_clobber(0)?;
-
-                // MRS DLR_EL0, X0
-                let instruction = aarch64::build_mrs(3, 3, 4, 5, 1, 0);
                 self.execute_instruction(instruction)?;
 
                 // Read from x0
@@ -541,11 +556,25 @@ impl<'probe> Armv8a<'probe> {
 
                 Ok(sp.into())
             }
+            32 => {
+                // PC, must access via x0
+                self.prepare_for_clobber(0)?;
+
+                // MRS X0, DLR_EL0
+                let instruction = aarch64::build_mrs(3, 3, 4, 5, 1, 0);
+                self.execute_instruction(instruction)?;
+
+                // Read from x0
+                let instruction = aarch64::build_msr(2, 3, 0, 4, 0, 0);
+                let pc = self.execute_instruction_with_result_64(instruction)?;
+
+                Ok(pc.into())
+            }
             33 => {
                 // PSR
                 self.prepare_for_clobber(0)?;
 
-                // MRS DSPSR_EL0, X0
+                // MRS X0, DSPSR_EL0
                 let instruction = aarch64::build_mrs(3, 3, 4, 5, 0, 0);
                 self.execute_instruction(instruction)?;
 
@@ -581,7 +610,7 @@ impl<'probe> Armv8a<'probe> {
                 // FPSR
                 self.prepare_for_clobber(0)?;
 
-                // MRS FPSR, X0
+                // MRS X0, FPSR
                 let instruction = aarch64::build_mrs(3, 3, 4, 4, 1, 0);
                 self.execute_instruction(instruction)?;
 
@@ -595,15 +624,15 @@ impl<'probe> Armv8a<'probe> {
                 // FPCR
                 self.prepare_for_clobber(0)?;
 
-                // MRS FPCR, X0
+                // MRS X0, FPCR
                 let instruction = aarch64::build_mrs(3, 3, 4, 4, 0, 0);
                 self.execute_instruction(instruction)?;
 
                 // Read from x0
                 let instruction = aarch64::build_msr(2, 3, 0, 4, 0, 0);
-                let fpsr: u32 = self.execute_instruction_with_result_64(instruction)? as u32;
+                let fpcr: u32 = self.execute_instruction_with_result_64(instruction)? as u32;
 
-                Ok(fpsr.into())
+                Ok(fpcr.into())
             }
             _ => Err(Error::Arm(
                 Armv8aError::InvalidRegisterNumber(reg_num, 64).into(),
@@ -630,6 +659,8 @@ impl<'probe> Armv8a<'probe> {
         result
     }
 
+    /// This function enables EDSCR.MA=1, which allows direct memory access via debug instructions.
+    /// With EDSCR.MA=1, any write to DBGDTRRX / read to DBGDTRTX break the x0,x1 registers
     fn with_memory_access_mode<F, R>(&mut self, f: F) -> Result<R, Error>
     where
         F: FnOnce(&mut Self) -> Result<R, Error>,
@@ -742,7 +773,7 @@ impl<'probe> Armv8a<'probe> {
             armv8a.prepare_for_clobber(0)?;
             armv8a.prepare_for_clobber(1)?;
 
-            // Load x0 with the address to write to
+            // Load r0 with the address to write to
             armv8a.set_reg_value(0, address.into())?;
             armv8a.set_reg_value(1, data.into())?;
 
@@ -760,7 +791,7 @@ impl<'probe> Armv8a<'probe> {
             armv8a.prepare_for_clobber(0)?;
             armv8a.prepare_for_clobber(1)?;
 
-            // Load r0 with the address to write to
+            // Load x0 with the address to write to
             armv8a.set_reg_value(0, address)?;
             armv8a.set_reg_value(1, data.into())?;
 
@@ -778,7 +809,7 @@ impl<'probe> Armv8a<'probe> {
             armv8a.prepare_for_clobber(0)?;
             armv8a.prepare_for_clobber(1)?;
 
-            // Load r0 with the address to write to
+            // Load x0 with the address to write to
             armv8a.set_reg_value(0, address)?;
             armv8a.set_reg_value(1, data)?;
 
@@ -961,8 +992,10 @@ impl<'probe> Armv8a<'probe> {
             .into());
         }
 
-        // Save x0
+        // ref. ARM DDI 0600B.a shared/debug/dccanditr/DBGDTRRX_EL0 pseudocode
+        // x0/r0 will be used for the address, and x1/r1 is clobbered.
         self.prepare_for_clobber(0)?;
+        self.prepare_for_clobber(1)?;
 
         // Load x0 with the address to read from
         self.set_reg_value(0, address)?;
@@ -974,7 +1007,15 @@ impl<'probe> Armv8a<'probe> {
 
         // wait for TXfull == 1
         let edscr_address = Edscr::get_mmio_address_from_base(self.base_address)?;
-        while !{ Edscr(self.memory.read_word_32(edscr_address)?) }.txfull() {}
+        let start = Instant::now();
+        while !{
+            if start.elapsed() > OPERATION_TIMEOUT {
+                return Err(Error::Timeout);
+            }
+            Edscr(self.memory.read_word_32(edscr_address)?)
+        }
+        .txfull()
+        {}
 
         let dbgdtr_tx_address = Dbgdtrtx::get_mmio_address_from_base(self.base_address)?;
         let (data, last) = data.split_at_mut(data.len() - std::mem::size_of::<u32>());
@@ -1130,10 +1171,14 @@ impl CoreInterface for Armv8a<'_> {
         // Wait for ack
         let address = Edprsr::get_mmio_address_from_base(self.base_address)?;
 
+        let start = Instant::now();
         loop {
             let edprsr = Edprsr(self.memory.read_word_32(address)?);
             if edprsr.sdr() {
                 break;
+            }
+            if start.elapsed() > OPERATION_TIMEOUT {
+                return Err(Error::Timeout);
             }
         }
 

@@ -2914,8 +2914,38 @@ dependencies = [
 ]
 
 [[package]]
-name = "probe-rs"
-version = "0.30.0"
+name = "probe-rs-debug"
+version = "0.30.0+nordic"
+dependencies = [
+ "addr2line",
+ "bitfield",
+ "gimli 0.32.3",
+ "insta",
+ "itertools 0.14.0",
+ "object 0.37.3",
+ "parse_int",
+ "pretty_assertions",
+ "probe-rs-nordic",
+ "probe-rs-target",
+ "serde",
+ "termtree",
+ "test-case",
+ "thiserror 2.0.17",
+ "tracing",
+ "typed-path",
+]
+
+[[package]]
+name = "probe-rs-mi"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde",
+]
+
+[[package]]
+name = "probe-rs-nordic"
+version = "0.30.0+nordic"
 dependencies = [
  "anyhow",
  "async-io",
@@ -2958,38 +2988,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "probe-rs-debug"
-version = "0.30.0"
-dependencies = [
- "addr2line",
- "bitfield",
- "gimli 0.32.3",
- "insta",
- "itertools 0.14.0",
- "object 0.37.3",
- "parse_int",
- "pretty_assertions",
- "probe-rs",
- "probe-rs-target",
- "serde",
- "termtree",
- "test-case",
- "thiserror 2.0.17",
- "tracing",
- "typed-path",
-]
-
-[[package]]
-name = "probe-rs-mi"
-version = "0.1.0"
-dependencies = [
- "semver",
- "serde",
-]
-
-[[package]]
 name = "probe-rs-target"
-version = "0.30.0"
+version = "0.30.0+nordic"
 dependencies = [
  "base64 0.22.1",
  "indexmap",
@@ -3001,7 +3001,7 @@ dependencies = [
 
 [[package]]
 name = "probe-rs-tools"
-version = "0.30.0"
+version = "0.30.0+nordic"
 dependencies = [
  "addr2line",
  "ansi-parser",
@@ -3040,9 +3040,9 @@ dependencies = [
  "postcard-rpc",
  "postcard-schema",
  "pretty_assertions",
- "probe-rs",
  "probe-rs-debug",
  "probe-rs-mi",
+ "probe-rs-nordic",
  "probe-rs-target",
  "ratatui",
  "regex",
@@ -3389,12 +3389,12 @@ checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rtthost"
-version = "0.30.0"
+version = "0.30.0+nordic"
 dependencies = [
  "anyhow",
  "clap",
  "env_logger",
- "probe-rs",
+ "probe-rs-nordic",
 ]
 
 [[package]]
@@ -3905,7 +3905,7 @@ checksum = "7fcf8323ef1faaee30a44a340193b1ac6814fd9b7b4e88e9d4519a3e4abe1cfd"
 
 [[package]]
 name = "smoke_tester"
-version = "0.30.0"
+version = "0.30.0+nordic"
 dependencies = [
  "anyhow",
  "clap",
@@ -3913,7 +3913,7 @@ dependencies = [
  "env_logger",
  "linkme",
  "log",
- "probe-rs",
+ "probe-rs-nordic",
  "serde",
  "thiserror 2.0.17",
  "toml 0.9.8",
@@ -4105,7 +4105,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "target-gen"
-version = "0.30.0"
+version = "0.30.0+nordic"
 dependencies = [
  "anyhow",
  "clap",
@@ -4117,7 +4117,7 @@ dependencies = [
  "jep106",
  "log",
  "parse_int",
- "probe-rs",
+ "probe-rs-nordic",
  "probe-rs-target",
  "reqwest",
  "scroll",
@@ -5372,7 +5372,7 @@ checksum = "32ac00cd3f8ec9c1d33fb3e7958a82df6989c42d747bd326c822b1d625283547"
 
 [[package]]
 name = "xtask"
-version = "0.30.0"
+version = "0.30.0+nordic"
 dependencies = [
  "anyhow",
  "clap",

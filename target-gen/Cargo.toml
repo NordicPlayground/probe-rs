@@ -11,11 +11,12 @@ readme = "README.md"
 categories = ["embedded", "hardware-support", "development-tools::debugging"]
 keywords = ["embedded"]
 license.workspace = true
+publish.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-probe-rs = { path = "../probe-rs", version = "0.30.0" }
+probe-rs = { path = "../probe-rs", version = "0.30.0", package = "probe-rs-nordic" }
 probe-rs-target = { path = "../probe-rs-target", version = "0.30.0", default-features = false }
 cmsis-pack = "0.7.1"
 jep106 = "0.3.0"

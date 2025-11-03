@@ -1,5 +1,5 @@
 [package]
-name = "probe-rs"
+name = "probe-rs-nordic"
 version.workspace = true
 authors = [
     "Noah Hüsser <yatekii@yatekii.ch>",
@@ -15,6 +15,7 @@ readme.workspace = true
 categories = ["embedded", "hardware-support", "development-tools::debugging"]
 keywords = ["embedded"]
 license.workspace = true
+publish.workspace = true
 
 # Don't include test binaries in published crate
 exclude = ["tests/"]

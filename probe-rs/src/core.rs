@@ -8,9 +8,10 @@ use crate::{
     error::{BreakpointError, Error},
     memory::CoreMemoryInterface,
 };
-pub use probe_rs_target::{Architecture, CoreAccessOptions};
+pub use probe_rs_target::{Architecture, CoreAccessOptions, ArmCoreAccessOptions};
+pub use probe_rs_target::ApAddress as TargetApAddress;
 use probe_rs_target::{
-    ArmCoreAccessOptions, MemoryRegion, RiscvCoreAccessOptions, XtensaCoreAccessOptions,
+     MemoryRegion, RiscvCoreAccessOptions, XtensaCoreAccessOptions,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -246,7 +247,7 @@ impl<'probe> Core<'probe> {
     }
 
     /// Creates a new [`CoreState`]
-    pub(crate) fn create_state(
+    pub fn create_state(
         id: usize,
         options: CoreAccessOptions,
         target: &Target,

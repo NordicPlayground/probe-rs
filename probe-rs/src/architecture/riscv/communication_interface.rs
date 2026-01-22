@@ -328,6 +328,8 @@ pub struct RiscvCommunicationInterfaceState {
     current_dmcontrol: Dmcontrol,
 
     memory_access_config: MemoryAccessConfig,
+
+    sw_breakpoint_debug_enabled: bool,
 }
 
 /// Timeout for RISC-V operations.
@@ -377,6 +379,8 @@ impl RiscvCommunicationInterfaceState {
             current_dmcontrol: Dmcontrol(0),
 
             memory_access_config: MemoryAccessConfig::default(),
+
+            sw_breakpoint_debug_enabled: false,
         }
     }
 
@@ -494,7 +498,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
 
     /// Select current hart
     pub fn select_hart(&mut self, hart: u32) -> Result<(), RiscvError> {
-        if self.state.enabled_harts & (1 << hart) == 0 {
+        if !self.hart_enabled(hart) {
             return Err(RiscvError::HartUnavailable);
         }
 
@@ -567,7 +571,9 @@ impl<'state> RiscvCommunicationInterface<'state> {
         Ok(())
     }
 
-    pub(crate) fn enter_debug_mode(&mut self) -> Result<(), RiscvError> {
+    /// Enable the debug module on the target and detect which features
+    /// are supported.
+    pub fn enter_debug_mode(&mut self) -> Result<(), RiscvError> {
         tracing::debug!("Building RISC-V interface");
         self.dtm.init()?;
 
@@ -766,7 +772,8 @@ impl<'state> RiscvCommunicationInterface<'state> {
         Ok(())
     }
 
-    pub(crate) fn disable_debug_module(&mut self) -> Result<(), RiscvError> {
+    /// Disable debugging on the target.
+    pub fn disable_debug_module(&mut self) -> Result<(), RiscvError> {
         self.debug_on_sw_breakpoint(false)?;
 
         let mut control = Dmcontrol(0);
@@ -776,7 +783,8 @@ impl<'state> RiscvCommunicationInterface<'state> {
         Ok(())
     }
 
-    pub(crate) fn halt(&mut self, timeout: Duration) -> Result<(), RiscvError> {
+    /// Halt all harts on the target.
+    pub fn halt(&mut self, timeout: Duration) -> Result<(), RiscvError> {
         // Fast path.
         // Try to do the halt, in a single step.
         let mut dmcontrol = self.state.current_dmcontrol;
@@ -817,6 +825,10 @@ impl<'state> RiscvCommunicationInterface<'state> {
         dmcontrol.set_haltreq(false);
         self.write_dm_register(dmcontrol)?;
 
+        if !self.state.sw_breakpoint_debug_enabled {
+            self.debug_on_sw_breakpoint(true)?;
+        }
+
         Ok(())
     }
 
@@ -846,7 +858,8 @@ impl<'state> RiscvCommunicationInterface<'state> {
         Ok(CoreInformation { pc })
     }
 
-    pub(crate) fn core_halted(&mut self) -> Result<bool, RiscvError> {
+    /// Return whether or not the core is halted.
+    pub fn core_halted(&mut self) -> Result<bool, RiscvError> {
         if !self.state.is_halted {
             let dmstatus: Dmstatus = self.read_dm_register()?;
 
@@ -912,9 +925,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
     }
 
     /// Schedules a DM register read, flushes the queue and returns the result.
-    pub(crate) fn read_dm_register<R: MemoryMappedRegister<u32>>(
-        &mut self,
-    ) -> Result<R, RiscvError> {
+    pub fn read_dm_register<R: MemoryMappedRegister<u32>>(&mut self) -> Result<R, RiscvError> {
         tracing::debug!(
             "Reading DM register '{}' at {:#010x}",
             R::NAME,
@@ -943,7 +954,8 @@ impl<'state> RiscvCommunicationInterface<'state> {
         Ok(register_value)
     }
 
-    pub(crate) fn write_dm_register<R: MemoryMappedRegister<u32>>(
+    /// Schedules a DM register write and flushes the queue.
+    pub fn write_dm_register<R: MemoryMappedRegister<u32>>(
         &mut self,
         register: R,
     ) -> Result<(), RiscvError> {
@@ -1685,9 +1697,6 @@ impl<'state> RiscvCommunicationInterface<'state> {
             MemoryAccessMethod::WaitingProgramBuffer => {
                 self.perform_memory_read_progbuf(address, true)?
             }
-            MemoryAccessMethod::HaltedSystemBus => {
-                self.halted_access(|this| this.perform_memory_read_sysbus(address))?
-            }
             MemoryAccessMethod::SystemBus => self.perform_memory_read_sysbus(address)?,
             MemoryAccessMethod::AbstractCommand => {
                 unimplemented!("Memory access using abstract commands is not implemted")
@@ -1721,9 +1730,6 @@ impl<'state> RiscvCommunicationInterface<'state> {
             MemoryAccessMethod::WaitingProgramBuffer => {
                 self.perform_memory_read_multiple_progbuf(address, data, true)?;
             }
-            MemoryAccessMethod::HaltedSystemBus => {
-                self.halted_access(|this| this.perform_memory_read_multiple_sysbus(address, data))?
-            }
             MemoryAccessMethod::SystemBus => {
                 self.perform_memory_read_multiple_sysbus(address, data)?;
             }
@@ -1742,9 +1748,6 @@ impl<'state> RiscvCommunicationInterface<'state> {
             }
             MemoryAccessMethod::WaitingProgramBuffer => {
                 self.perform_memory_write_progbuf(address, data, true)?
-            }
-            MemoryAccessMethod::HaltedSystemBus => {
-                self.halted_access(|this| this.perform_memory_write_sysbus(address, &[data]))?
             }
             MemoryAccessMethod::SystemBus => self.perform_memory_write_sysbus(address, &[data])?,
             MemoryAccessMethod::AbstractCommand => {
@@ -1766,9 +1769,6 @@ impl<'state> RiscvCommunicationInterface<'state> {
             .state
             .memory_range_access_method(V::WIDTH, address_range);
         match access_method {
-            MemoryAccessMethod::HaltedSystemBus => {
-                self.halted_access(|this| this.perform_memory_write_sysbus(address, data))?
-            }
             MemoryAccessMethod::SystemBus => self.perform_memory_write_sysbus(address, data)?,
             MemoryAccessMethod::ProgramBuffer => {
                 self.perform_memory_write_multiple_progbuf(address, data, false)?
@@ -1874,8 +1874,8 @@ impl<'state> RiscvCommunicationInterface<'state> {
         }
     }
 
-    // Resume the core.
-    pub(crate) fn resume_core(&mut self) -> Result<(), RiscvError> {
+    /// Resume the core.
+    pub fn resume_core(&mut self) -> Result<(), RiscvError> {
         self.state.is_halted = false; // `false` will re-query the DM, so it's safe to write
 
         // set resume request.
@@ -1899,7 +1899,8 @@ impl<'state> RiscvCommunicationInterface<'state> {
         Ok(())
     }
 
-    pub(crate) fn reset_hart_and_halt(&mut self, timeout: Duration) -> Result<(), RiscvError> {
+    /// Perform a reset of all harts on the target and halt them at the first instruction.
+    pub fn reset_hart_and_halt(&mut self, timeout: Duration) -> Result<(), RiscvError> {
         tracing::debug!("Resetting core, setting hartreset bit");
 
         let mut dmcontrol = self.state.current_dmcontrol;
@@ -1917,6 +1918,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
             // Reset is performed by setting the bit high, and then low again
             let mut dmcontrol = readback;
             dmcontrol.set_dmactive(true);
+            dmcontrol.set_haltreq(true);
             dmcontrol.set_hartreset(false);
 
             self.write_dm_register(dmcontrol)?;
@@ -1951,6 +1953,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
             if start.elapsed() > timeout {
                 return Err(RiscvError::RequestNotAcknowledged);
             }
+            self.write_dm_register(dmcontrol)?;
         }
 
         // clear the reset request
@@ -1967,7 +1970,7 @@ impl<'state> RiscvCommunicationInterface<'state> {
         Ok(())
     }
 
-    pub(crate) fn debug_on_sw_breakpoint(&mut self, enabled: bool) -> Result<(), RiscvError> {
+    fn debug_on_sw_breakpoint(&mut self, enabled: bool) -> Result<(), RiscvError> {
         let mut dcsr = Dcsr(self.read_csr(0x7b0)?);
 
         dcsr.set_ebreakm(enabled);
@@ -1975,6 +1978,10 @@ impl<'state> RiscvCommunicationInterface<'state> {
         dcsr.set_ebreaku(enabled);
 
         match self.abstract_cmd_register_write(0x7b0, dcsr.0) {
+            Ok(()) => {
+                self.state.sw_breakpoint_debug_enabled = enabled;
+                Ok(())
+            }
             Err(RiscvError::AbstractCommand(AbstractCommandErrorKind::NotSupported)) => {
                 tracing::debug!(
                     "Could not write core register {:#x} with abstract command, falling back to program buffer",
@@ -2323,13 +2330,6 @@ impl MemoryInterface for RiscvCommunicationInterface<'_> {
         self.read_multiple(address, data)
     }
 
-    fn read(&mut self, address: u64, data: &mut [u8]) -> Result<(), crate::Error> {
-        let address = valid_32bit_address(address)?;
-        tracing::debug!("read from {:#08x}", address);
-
-        self.read_multiple(address, data)
-    }
-
     fn write_word_64(&mut self, address: u64, data: u64) -> Result<(), crate::error::Error> {
         let address = valid_32bit_address(address)?;
         let low_word = data as u32;
@@ -2443,8 +2443,6 @@ pub enum MemoryAccessMethod {
     WaitingProgramBuffer,
     /// Memory access using the program buffer is supported
     ProgramBuffer,
-    /// Memory access using system bus access supported, but only when the core is halted
-    HaltedSystemBus,
     /// Memory access using system bus access supported
     SystemBus,
 }

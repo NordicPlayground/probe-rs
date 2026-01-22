@@ -5,9 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::esp::EspFlashSizeDetector;
 use crate::{
-    MemoryInterface, Session,
+    MemoryInterface,
     architecture::xtensa::{
         Xtensa,
         communication_interface::{
@@ -22,9 +21,7 @@ use crate::{
 
 /// The debug sequence implementation for the ESP32-S2.
 #[derive(Debug)]
-pub struct ESP32S2 {
-    inner: EspFlashSizeDetector,
-}
+pub struct ESP32S2 {}
 
 impl ESP32S2 {
     const RTC_CNTL_BASE: u64 = 0x3f408000;
@@ -53,15 +50,7 @@ impl ESP32S2 {
 
     /// Creates a new debug sequence handle for the ESP32-S2.
     pub fn create() -> Arc<dyn XtensaDebugSequence> {
-        Arc::new(Self {
-            inner: EspFlashSizeDetector {
-                stack_pointer: 0x3ffce000,
-                load_address: 0x4002c400,
-                spiflash_peripheral: 0x3f40_2000,
-                efuse_get_spiconfig_fn: Some(0x4000e4a0),
-                attach_fn: 0x4001_7004,
-            },
-        })
+        Arc::new(Self {})
     }
 
     fn set_peri_reg_mask(
@@ -185,10 +174,6 @@ impl XtensaDebugSequence for ESP32S2 {
         self.disable_wdts(interface)
     }
 
-    fn detect_flash_size(&self, session: &mut Session) -> Result<Option<usize>, crate::Error> {
-        self.inner.detect_flash_size(session)
-    }
-
     fn reset_system_and_halt(
         &self,
         core: &mut XtensaCommunicationInterface,
@@ -198,7 +183,10 @@ impl XtensaDebugSequence for ESP32S2 {
 
         const SYS_RESET: u32 = 1 << 31;
 
-        core.reset_and_halt(timeout)?;
+        {
+            let _span = tracing::debug_span!("Resetting core").entered();
+            core.reset_and_halt(timeout)?;
+        }
 
         // Set some clock-related RTC registers to the default values
         core.write_word_32(Self::STORE4, 0)?;
@@ -248,6 +236,7 @@ impl XtensaDebugSequence for ESP32S2 {
         }
 
         core.reset_and_halt(timeout)?;
+        self.on_connect(core)?;
 
         self.unstall(core)?;
 

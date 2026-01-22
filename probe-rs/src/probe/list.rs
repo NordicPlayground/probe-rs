@@ -82,12 +82,14 @@ impl ProbeLister for AllProbesLister {
                 Err(DebugProbeError::ProbeCouldNotBeCreated(ProbeCreationError::NotFound)) => {}
                 Err(DebugProbeError::ProbeCouldNotBeCreated(ProbeCreationError::CouldNotOpen)) => {
                     fallback_error = ProbeCreationError::CouldNotOpen;
-
-                    #[cfg(target_os = "linux")]
-                    linux::help_linux();
                 }
                 Err(e) => open_error = Some(e),
             };
+        }
+
+        #[cfg(target_os = "linux")]
+        if matches!(fallback_error, ProbeCreationError::CouldNotOpen) {
+            linux::help_linux();
         }
 
         Err(open_error.unwrap_or(DebugProbeError::ProbeCouldNotBeCreated(fallback_error)))
@@ -208,7 +210,14 @@ mod linux {
 
     /// Returns the groups assigned to the current user.
     fn user_groups() -> Vec<String> {
-        let output = match Command::new("id").arg("-Gn").output() {
+        let username = match std::env::var("USER") {
+            Err(error) => {
+                tracing::debug!("Gathering information about user failed: {error}");
+                return Vec::new();
+            }
+            Ok(username) => username,
+        };
+        let output = match Command::new("id").arg("-Gn").arg(&username).output() {
             Err(error) => {
                 tracing::debug!("Gathering information about relevant user groups failed: {error}");
                 return Vec::new();

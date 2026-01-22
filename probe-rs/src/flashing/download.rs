@@ -1,3 +1,4 @@
+use espflash::flasher::{FlashFrequency, FlashMode};
 use object::{
     Endianness, Object, ObjectSection, elf::FileHeader32, elf::FileHeader64, elf::PT_LOAD,
     read::elf::ElfFile, read::elf::FileHeader, read::elf::ProgramHeader,
@@ -32,6 +33,10 @@ pub struct IdfOptions {
     pub partition_table: Option<PathBuf>,
     /// The target app partition
     pub target_app_partition: Option<String>,
+    /// Flash SPI mode
+    pub flash_mode: Option<FlashMode>,
+    /// Flash SPI frequency
+    pub flash_frequency: Option<FlashFrequency>,
 }
 
 /// Extended options for flashing an ELF file.
@@ -160,7 +165,7 @@ pub enum FileDownloadError {
     NoLoadableSegments,
 
     /// Could not determine flash size.
-    FlashSizeDetection(#[from] crate::Error),
+    FlashSizeDetection(#[source] FlashError),
 
     /// The image ({image:?}) is not compatible with the target ({print_instr_sets(target)}).
     IncompatibleImage {
@@ -168,6 +173,14 @@ pub enum FileDownloadError {
         target: Vec<InstructionSet>,
         /// The image's instruction set.
         image: InstructionSet,
+    },
+
+    /// The target chip {target} is not compatible with the image. The image is compatible with: {image_chips.join(", ")}
+    IncompatibleImageChip {
+        /// The target chip.
+        target: String,
+        /// The chips compatible with the image.
+        image_chips: Vec<String>,
     },
 
     /// An error occurred during download.
@@ -221,6 +234,9 @@ pub struct DownloadOptions<'p> {
     pub verify: bool,
     /// Disable double buffering when loading flash.
     pub disable_double_buffering: bool,
+    /// If there are multiple valid flash algorithms for a memory region, this list allows
+    /// overriding the default selection.
+    pub preferred_algos: Vec<String>,
 }
 
 impl DownloadOptions<'_> {

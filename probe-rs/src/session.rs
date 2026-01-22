@@ -304,11 +304,18 @@ impl Session {
                 // means that the core should stop when coming out of reset.
 
                 for core_id in 0..session.cores.len() {
-                    let mut core = session.core(core_id)?;
+                    let mut core = session
+                        .core(core_id)
+                        .inspect_err(|e| tracing::error!("Unable to get core {core_id}: {e}"))?;
 
-                    core.wait_for_core_halted(Duration::from_millis(100))?;
+                    core.wait_for_core_halted(Duration::from_millis(100))
+                        .inspect_err(|e| {
+                            tracing::error!("Unable to wait for {core_id} halted: {e}")
+                        })?;
 
-                    core.reset_catch_clear()?;
+                    core.reset_catch_clear().inspect_err(|e| {
+                        tracing::error!("Unable to clear catch for {core_id} : {e}")
+                    })?;
                 }
             }
 
@@ -346,6 +353,14 @@ impl Session {
         }
 
         probe.attach_to_unspecified()?;
+        if let Some(probe) = probe.try_as_jtag_probe()
+            && let Ok(chain) = probe.scan_chain()
+            && !chain.is_empty()
+        {
+            for core in &cores {
+                probe.select_target(core.jtag_tap_index())?;
+            }
+        }
 
         // We try to guess the TAP number. Normally we trust the scan chain, but some probes are
         // only quasi-JTAG (wch-link), so we'll have to work with at least 1, but if we're guessing
@@ -549,7 +564,11 @@ impl Session {
         self.interfaces
             .attach(&self.target, combined_state)
             .map_err(|e| {
-                if matches!(e, Error::Xtensa(XtensaError::CoreDisabled)) {
+                if matches!(
+                    e,
+                    Error::Xtensa(XtensaError::CoreDisabled)
+                        | Error::Riscv(RiscvError::HartUnavailable),
+                ) {
                     // If the core is disabled, we can't attach to it.
                     // We can't do anything about it, so we just translate
                     // and return the error.

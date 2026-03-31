@@ -5,9 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::esp::EspFlashSizeDetector;
 use crate::{
-    MemoryInterface, Session,
+    MemoryInterface,
     architecture::xtensa::{
         Xtensa,
         communication_interface::{
@@ -22,9 +21,7 @@ use crate::{
 
 /// The debug sequence implementation for the ESP32.
 #[derive(Debug)]
-pub struct ESP32 {
-    inner: EspFlashSizeDetector,
-}
+pub struct ESP32 {}
 
 impl ESP32 {
     /// Creates a new debug sequence handle for the ESP32.
@@ -32,15 +29,7 @@ impl ESP32 {
         tracing::warn!(
             "Be careful not to reset your ESP32 while connected to the debugger! Depending on the specific device, this may render it temporarily inoperable or permanently damage it."
         );
-        Arc::new(Self {
-            inner: EspFlashSizeDetector {
-                stack_pointer: 0x3ffd0000,
-                load_address: 0x4009_0000,
-                spiflash_peripheral: 0x3ff4_2000,
-                efuse_get_spiconfig_fn: Some(0x40008658),
-                attach_fn: 0x4006_2a6c,
-            },
-        })
+        Arc::new(Self {})
     }
 
     fn disable_wdts(
@@ -116,10 +105,6 @@ impl XtensaDebugSequence for ESP32 {
         self.disable_wdts(interface)
     }
 
-    fn detect_flash_size(&self, session: &mut Session) -> Result<Option<usize>, crate::Error> {
-        self.inner.detect_flash_size_esp32(session)
-    }
-
     fn reset_system_and_halt(
         &self,
         core: &mut XtensaCommunicationInterface,
@@ -131,10 +116,8 @@ impl XtensaDebugSequence for ESP32 {
         const RTC_CNTL_RESET_STATE_DEF: u32 = 0x3000;
 
         {
-            let _span = tracing::debug_span!("Halting core").entered();
-            if !core.core_halted()? {
-                core.halt(timeout)?;
-            }
+            let _span = tracing::debug_span!("Resetting core").entered();
+            core.reset_and_halt(timeout)?;
         }
 
         // A program that does the system reset and then loops,
@@ -212,6 +195,7 @@ impl XtensaDebugSequence for ESP32 {
         }
 
         core.reset_and_halt(timeout)?;
+        self.on_connect(core)?;
 
         {
             let _span = tracing::debug_span!("Restore RAM contents").entered();

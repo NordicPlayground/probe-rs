@@ -1,5 +1,5 @@
 [workspace.package]
-version = "0.30.0+nordic"
+version = "0.31.0+nordic"
 edition = "2024"
 
 documentation = "https://docs.rs/probe-rs/"
@@ -17,6 +17,7 @@ members = [
     "probe-rs-target",
     "rtthost",
     "smoke-tester",
+    "smoke-tester-macros",
     "xtask",
     "target-gen",
     "probe-rs-tools",
@@ -26,51 +27,14 @@ members = [
 exclude = ["probe-rs/tests/gpio-hal-blinky"]
 
 [workspace.dependencies]
-probe-rs = { path = "probe-rs", version = "0.30.0", package = "probe-rs-nordic" }
-probe-rs-target = { path = "probe-rs-target", version = "0.30.0" }
+probe-rs = { path = "probe-rs", version = "0.31.0", package = "probe-rs-nordic" }
+probe-rs-target = { path = "probe-rs-target", version = "0.31.0" }
 probe-rs-mi = { path = "probe-rs-mi", version = "0.1.0" }
 
 docsplay = "0.1.1"
 thiserror = "2.0.11"
 anyhow = "1.0.82"
 async-io = "2"
-
-
-# Config for 'cargo dist'
-[workspace.metadata.dist]
-# The preferred cargo-dist version to use in CI (Cargo.toml SemVer syntax)
-cargo-dist-version = "0.13.0"
-# CI backends to support
-ci = ["github"]
-# Target platforms to build apps for (Rust target-triple syntax)
-targets = [
-    "aarch64-apple-darwin",
-    "aarch64-unknown-linux-gnu",
-    "x86_64-apple-darwin",
-    "x86_64-unknown-linux-gnu",
-    "x86_64-pc-windows-msvc",
-]
-# Build only the required packages, and individually
-precise-builds = true
-# The archive format to use for non-windows builds (defaults .tar.xz)
-unix-archive = ".tar.xz"
-# The installers to generate for each app
-installers = ["shell", "powershell", "homebrew"]
-# Publish jobs to run in CI
-pr-run-mode = "plan"
-# A GitHub repo to push Homebrew formulas to
-tap = "probe-rs/homebrew-probe-rs"
-# Publish jobs to run in CI
-publish-jobs = ["homebrew"]
-# Whether to install an updater program
-install-updater = false
-# Select custom runner for ARM Linux
-[workspace.metadata.dist.github-custom-runners]
-aarch64-unknown-linux-gnu = "buildjet-2vcpu-ubuntu-2204-arm"
-
-[workspace.metadata.dist.dependencies.apt]
-libudev-dev = '*'
-libudev1 = { stage = ["run"] }
 
 [workspace.metadata.release]
 shared-version = true

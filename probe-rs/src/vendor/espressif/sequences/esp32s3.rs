@@ -5,9 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::esp::EspFlashSizeDetector;
 use crate::{
-    MemoryInterface, Session,
+    MemoryInterface,
     architecture::xtensa::{
         Xtensa,
         communication_interface::{
@@ -22,9 +21,7 @@ use crate::{
 
 /// The debug sequence implementation for the ESP32-S3.
 #[derive(Debug)]
-pub struct ESP32S3 {
-    inner: EspFlashSizeDetector,
-}
+pub struct ESP32S3 {}
 
 impl ESP32S3 {
     const SWD_BASE: u64 = 0x60008000;
@@ -35,15 +32,7 @@ impl ESP32S3 {
 
     /// Creates a new debug sequence handle for the ESP32-S3.
     pub fn create() -> Arc<dyn XtensaDebugSequence> {
-        Arc::new(Self {
-            inner: EspFlashSizeDetector {
-                stack_pointer: 0x3FCF_0000,
-                load_address: 0x4037_8000,
-                spiflash_peripheral: 0x6000_2000,
-                efuse_get_spiconfig_fn: Some(0x40001f74),
-                attach_fn: 0x4000_0aec,
-            },
-        })
+        Arc::new(Self {})
     }
 
     fn disable_wdts(&self, core: &mut XtensaCommunicationInterface) -> Result<(), crate::Error> {
@@ -140,10 +129,6 @@ impl XtensaDebugSequence for ESP32S3 {
         self.disable_wdts(interface)
     }
 
-    fn detect_flash_size(&self, session: &mut Session) -> Result<Option<usize>, crate::Error> {
-        self.inner.detect_flash_size(session)
-    }
-
     fn reset_system_and_halt(
         &self,
         core: &mut XtensaCommunicationInterface,
@@ -155,10 +140,8 @@ impl XtensaDebugSequence for ESP32S3 {
         const RTC_CNTL_RESET_STATE_DEF: u32 = 0x3000;
 
         {
-            let _span = tracing::debug_span!("Halting core").entered();
-            if !core.core_halted()? {
-                core.halt(timeout)?;
-            }
+            let _span = tracing::debug_span!("Resetting core").entered();
+            core.reset_and_halt(timeout)?;
         }
 
         // A program that does the system reset and then loops,
@@ -236,6 +219,7 @@ impl XtensaDebugSequence for ESP32S3 {
         }
 
         core.reset_and_halt(timeout)?;
+        self.on_connect(core)?;
 
         {
             let _span = tracing::debug_span!("Restore RAM contents").entered();

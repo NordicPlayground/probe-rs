@@ -1,6 +1,7 @@
 use espflash::flasher::{FlashData, FlashSettings, FlashSize};
-use espflash::image_format::idf::IdfBootloaderFormat;
+use espflash::image_format::idf::{IdfBootloaderFormat, check_idf_bootloader};
 use ihex::Record;
+use itertools::Itertools as _;
 use probe_rs_target::{
     InstructionSet, MemoryRange, MemoryRegion, NvmRegion, RawFlashAlgorithm,
     TargetDescriptionSource,
@@ -16,7 +17,6 @@ use super::{
     extract_from_elf,
 };
 use crate::Target;
-use crate::config::DebugSequence;
 use crate::flashing::progress::ProgressOperation;
 use crate::flashing::{FlashLayout, FlashProgress, Format};
 use crate::memory::MemoryInterface;
@@ -91,13 +91,14 @@ impl ImageLoader for ElfLoader {
     fn load(
         &self,
         flash_loader: &mut FlashLoader,
-        _session: &mut Session,
+        session: &mut Session,
         file: &mut dyn ImageReader,
     ) -> Result<(), FileDownloadError> {
         const VECTOR_TABLE_SECTION_NAME: &str = ".vector_table";
         let mut elf_buffer = Vec::new();
         file.read_to_end(&mut elf_buffer)?;
 
+        check_chip_compatibility_from_elf_metadata(session, &elf_buffer)?;
         let extracted_data = extract_from_elf(&elf_buffer, &self.0)?;
 
         if extracted_data.is_empty() {
@@ -229,27 +230,34 @@ impl ImageLoader for IdfLoader {
         let chip = espflash::target::Chip::from_str(target_name)
             .map_err(|_| FileDownloadError::IdfUnsupported(target.name.to_string()))?;
 
-        let flash_size_result = session.halted_access(|session| {
-            // Figure out flash size from the memory map. We need a different bootloader for each size.
-            match session.target().debug_sequence.clone() {
-                DebugSequence::Riscv(sequence) => sequence.detect_flash_size(session),
-                DebugSequence::Xtensa(sequence) => sequence.detect_flash_size(session),
-                DebugSequence::Arm(_) => panic!("There are no ARM ESP targets."),
-            }
-        });
+        let mut algo = Flasher::new(target, 0, &target.flash_algorithms[0])
+            .map_err(FileDownloadError::Flash)?;
 
-        let flash_size = match flash_size_result.map_err(FileDownloadError::FlashSizeDetection)? {
-            Some(0x40000) => Some(FlashSize::_256Kb),
-            Some(0x80000) => Some(FlashSize::_512Kb),
-            Some(0x100000) => Some(FlashSize::_1Mb),
-            Some(0x200000) => Some(FlashSize::_2Mb),
-            Some(0x400000) => Some(FlashSize::_4Mb),
-            Some(0x800000) => Some(FlashSize::_8Mb),
-            Some(0x1000000) => Some(FlashSize::_16Mb),
-            Some(0x2000000) => Some(FlashSize::_32Mb),
-            Some(0x4000000) => Some(FlashSize::_64Mb),
-            Some(0x8000000) => Some(FlashSize::_128Mb),
-            Some(0x10000000) => Some(FlashSize::_256Mb),
+        session
+            .core(0)
+            .unwrap()
+            .reset_and_halt(Duration::from_millis(500))
+            .map_err(FlashError::ResetAndHalt)
+            .map_err(FileDownloadError::FlashSizeDetection)?;
+
+        let flash_size_result = algo
+            .run_verify(session, &mut FlashProgress::empty(), |flasher, _| {
+                flasher.read_flash_size()
+            })
+            .map_err(FileDownloadError::FlashSizeDetection)?;
+
+        let flash_size = match flash_size_result {
+            0x40000 => Some(FlashSize::_256Kb),
+            0x80000 => Some(FlashSize::_512Kb),
+            0x100000 => Some(FlashSize::_1Mb),
+            0x200000 => Some(FlashSize::_2Mb),
+            0x400000 => Some(FlashSize::_4Mb),
+            0x800000 => Some(FlashSize::_8Mb),
+            0x1000000 => Some(FlashSize::_16Mb),
+            0x2000000 => Some(FlashSize::_32Mb),
+            0x4000000 => Some(FlashSize::_64Mb),
+            0x8000000 => Some(FlashSize::_128Mb),
+            0x10000000 => Some(FlashSize::_256Mb),
             _ => None,
         };
 
@@ -258,6 +266,8 @@ impl ImageLoader for IdfLoader {
                 let mut settings = FlashSettings::default();
 
                 settings.size = flash_size;
+                settings.freq = self.0.flash_frequency;
+                settings.mode = self.0.flash_mode;
 
                 settings
             },
@@ -268,10 +278,16 @@ impl ImageLoader for IdfLoader {
             chip.default_xtal_frequency(),
         );
 
-        let mut buf = Vec::new();
-        file.read_to_end(&mut buf)?;
+        let mut elf_buffer = Vec::new();
+        file.read_to_end(&mut elf_buffer)?;
+
+        check_idf_bootloader(&elf_buffer).map_err(|e| {
+            FileDownloadError::Idf(espflash::Error::AppDescriptorNotPresent(e.to_string()))
+        })?;
+        check_chip_compatibility_from_elf_metadata(session, &elf_buffer)?;
+
         let image = IdfBootloaderFormat::new(
-            &buf,
+            &elf_buffer,
             &flash_data,
             self.0.partition_table.as_deref(),
             self.0.bootloader.as_deref(),
@@ -285,6 +301,25 @@ impl ImageLoader for IdfLoader {
 
         Ok(())
     }
+}
+
+fn check_chip_compatibility_from_elf_metadata(
+    session: &Session,
+    elf_data: &[u8],
+) -> Result<(), FileDownloadError> {
+    let esp_metadata = espflash::image_format::Metadata::from_bytes(Some(elf_data));
+
+    if let Some(chip_name) = esp_metadata.chip_name() {
+        let target = session.target();
+        if chip_name != target.name {
+            return Err(FileDownloadError::IncompatibleImageChip {
+                target: target.name.clone(),
+                image_chips: vec![chip_name.to_string()],
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Current boot information
@@ -317,6 +352,8 @@ pub struct FlashLoader {
     source: TargetDescriptionSource,
     /// Relevant for manually configured RAM booted executables, available only if given loader supports it
     vector_table_addr: Option<u64>,
+
+    read_flasher_rtt: bool,
 }
 
 impl FlashLoader {
@@ -327,7 +364,13 @@ impl FlashLoader {
             builder: FlashBuilder::new(),
             source,
             vector_table_addr: None,
+            read_flasher_rtt: false,
         }
+    }
+
+    /// Enable reading RTT output from the flasher.
+    pub fn read_rtt_output(&mut self, read: bool) {
+        self.read_flasher_rtt = read;
     }
 
     fn set_vector_table_addr(&mut self, vector_table_addr: u64) {
@@ -441,7 +484,7 @@ impl FlashLoader {
         session: &mut Session,
         progress: &mut FlashProgress<'_>,
     ) -> Result<(), FlashError> {
-        let mut algos = self.prepare_plan(session, false)?;
+        let mut algos = self.prepare_plan(session, false, &[])?;
 
         for flasher in algos.iter_mut() {
             let mut program_size = 0;
@@ -480,7 +523,11 @@ impl FlashLoader {
         mut options: DownloadOptions,
     ) -> Result<(), FlashError> {
         tracing::debug!("Committing FlashLoader!");
-        let mut algos = self.prepare_plan(session, options.keep_unwritten_bytes)?;
+        let mut algos = self.prepare_plan(
+            session,
+            options.keep_unwritten_bytes,
+            &options.preferred_algos,
+        )?;
 
         if options.dry_run {
             tracing::info!("Skipping programming, dry run!");
@@ -615,6 +662,7 @@ impl FlashLoader {
         &self,
         session: &mut Session,
         restore_unwritten_bytes: bool,
+        opt_preferred_algos: &[String],
     ) -> Result<Vec<Flasher>, FlashError> {
         tracing::debug!("Contents of builder:");
         for (&address, data) in &self.builder.data {
@@ -685,7 +733,12 @@ impl FlashLoader {
 
             let target = session.target();
             let core = target.core_index_by_name(core_name).unwrap();
-            let algo = Self::get_flash_algorithm_for_region(&region, target, core_name)?;
+            let algo = Self::get_flash_algorithm_for_region(
+                &region,
+                target,
+                core_name,
+                opt_preferred_algos,
+            )?;
 
             // We don't usually have more than a handful of regions, linear search should be fine.
             tracing::debug!("     -- using algorithm: {}", algo.name);
@@ -697,6 +750,9 @@ impl FlashLoader {
             } else {
                 let mut flasher = Flasher::new(target, core, algo)?;
                 flasher.add_region(region, &self.builder, restore_unwritten_bytes)?;
+
+                flasher.read_rtt_output(self.read_flasher_rtt);
+
                 algos.push(flasher);
             }
         }
@@ -822,6 +878,7 @@ impl FlashLoader {
         region: &NvmRegion,
         target: &'a Target,
         core_name: &String,
+        preferred_algos: &[String],
     ) -> Result<&'a RawFlashAlgorithm, FlashError> {
         let available = &target.flash_algorithms;
         tracing::debug!("Available algorithms:");
@@ -859,6 +916,27 @@ impl FlashLoader {
                     .iter()
                     .filter(|&fa| fa.default)
                     .collect::<Vec<_>>();
+
+                if !preferred_algos.is_empty() {
+                    tracing::debug!("selecting preferred algorithm from: {:?}", preferred_algos);
+                    let mut preferred_and_valid_algos = Vec::new();
+                    // Check whether there are any preferred algorithms which are valid and which
+                    // override the default algo(s).
+                    for algo in algorithms.iter() {
+                        if preferred_algos.iter().contains(&algo.name) {
+                            preferred_and_valid_algos.push(algo);
+                        }
+                    }
+                    if preferred_and_valid_algos.len() > 1 {
+                        return Err(FlashError::MultiplePreferredAlgos {
+                            region: region.clone(),
+                        });
+                    }
+                    // Preferred algo overrides default.
+                    if preferred_and_valid_algos.len() == 1 {
+                        return Ok(preferred_and_valid_algos[0]);
+                    }
+                }
 
                 match defaults.len() {
                     0 => Err(FlashError::MultipleFlashLoaderAlgorithmsNoDefault {

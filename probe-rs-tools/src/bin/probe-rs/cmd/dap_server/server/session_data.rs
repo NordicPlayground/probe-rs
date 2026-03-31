@@ -4,12 +4,20 @@ use super::{
 };
 use crate::{
     FormatKind,
-    cmd::dap_server::{
-        DebuggerError,
-        debug_adapter::{
-            dap::{adapter::DebugAdapter, dap_types::Source},
-            protocol::ProtocolAdapter,
+    cmd::{
+        dap_server::{
+            DebuggerError,
+            debug_adapter::{
+                dap::{
+                    adapter::DebugAdapter,
+                    dap_types::Source,
+                    repl_commands::{REPL_COMMANDS, embedded_test::EMBEDDED_TEST},
+                },
+                protocol::ProtocolAdapter,
+            },
+            server::startup::TargetSessionType,
         },
+        run::EmbeddedTestElfInfo,
     },
     util::{common_options::OperationError, rtt},
 };
@@ -23,7 +31,7 @@ use probe_rs::{
 use probe_rs_debug::{
     DebugRegisters, SourceLocation, debug_info::DebugInfo, exception_handler_for_core,
 };
-use std::{collections::HashMap, env::set_current_dir, time::Duration};
+use std::{any::Any, collections::HashMap, env::set_current_dir, time::Duration};
 use time::UtcOffset;
 
 /// The supported breakpoint types
@@ -74,6 +82,7 @@ impl SessionData {
         lister: &Lister,
         config: &mut configuration::SessionConfig,
         timestamp_offset: UtcOffset,
+        session_type: TargetSessionType,
     ) -> Result<Self, DebuggerError> {
         let target_selector = TargetSelector::from(config.chip.as_deref());
 
@@ -160,6 +169,27 @@ impl SessionData {
                 }
             }
 
+            // Load debug info first, which also validates the accessibility of the elf.
+            let debug_info = debug_info_from_binary(core_configuration)?;
+
+            let mut repl_commands = REPL_COMMANDS.to_vec();
+            let mut test_data: Box<dyn Any> = Box::new(());
+            if let Some(path_to_elf) = core_configuration.program_binary.as_deref()
+                && let Some(elf_info) = EmbeddedTestElfInfo::from_elf(path_to_elf)?
+            {
+                tracing::debug!("Embedded Test Metadata: {:?}", elf_info);
+                if elf_info.version != 1 {
+                    tracing::info!("Detected unsupported embedded-test version in ELF file.");
+                } else {
+                    tracing::info!(
+                        "Detected embedded-test in ELF file. Adding `test` command to Debug Console."
+                    );
+
+                    repl_commands.push(EMBEDDED_TEST);
+                    test_data = Box::new(elf_info);
+                }
+            }
+
             core_data_vec.push(CoreData {
                 core_index: core_configuration.core_index,
                 last_known_status: CoreStatus::Unknown,
@@ -168,7 +198,7 @@ impl SessionData {
                     core_configuration.core_index,
                     target_session.target().name
                 ),
-                debug_info: debug_info_from_binary(core_configuration)?,
+                debug_info,
                 static_variables: None,
                 core_peripherals: None,
                 stack_frames: vec![],
@@ -176,13 +206,17 @@ impl SessionData {
                 rtt_scan_ranges: ScanRegion::Ranges(vec![]),
                 rtt_connection: None,
                 rtt_client: None,
-                clear_rtt_header: false,
+                // For launch requests, always clear the RTT header, otherwise we may attach before the channel names are set.
+                clear_rtt_header: session_type == TargetSessionType::LaunchRequest,
                 rtt_header_cleared: false,
 
                 // We're abusing the RTT window machinery here for simplicity.
                 // Let's assume there are less than 1024 RTT channels.
                 next_semihosting_handle: 1024,
                 semihosting_handles: HashMap::new(),
+
+                repl_commands,
+                test_data,
             })
         }
 
@@ -262,7 +296,7 @@ impl SessionData {
         }
     }
 
-    /// Do a 'light weight'(just get references to existing data structures) attach to the core and return relevant debug data.
+    /// Do a 'light weight' (just get references to existing data structures) attach to the core and return relevant debug data.
     pub(crate) fn attach_core(
         &mut self,
         core_index: usize,
@@ -274,6 +308,7 @@ impl SessionData {
                 .find(|core_data| core_data.core_index == core_index),
         ) {
             Ok(CoreHandle {
+                core_id: core_index,
                 core: target_core,
                 core_data,
             })
@@ -299,16 +334,16 @@ impl SessionData {
     ///   - While the core is NOT halted, because core processing can generate new data at any time.
     ///   - The first time we have entered halted status, to ensure the buffers are drained. After that, for as long as we remain in halted state, we don't need to check RTT again.
     ///
-    /// Return a Vec of [`CoreStatus`] (one entry per core) after this process has completed, as well as a boolean indicating whether we should consider a short delay before the next poll.
+    /// Return a boolean indicating whether we should consider a short delay before the next poll.
     #[tracing::instrument(level = "trace", skip_all)]
     pub(crate) async fn poll_cores<P: ProtocolAdapter>(
         &mut self,
         session_config: &SessionConfig,
         debug_adapter: &mut DebugAdapter<P>,
-    ) -> Result<(Vec<CoreStatus>, bool), DebuggerError> {
-        // By default, we will have a small delay between polls, and will disable it if we know the last poll returned data, on the assumption that there might be at least one more batch of data.
+    ) -> Result<bool, DebuggerError> {
+        // By default, we will have a small delay between polls, and will disable it if
+        // we know the last poll returned data, on the assumption that there might be at least one more batch of data.
         let mut suggest_delay_required = true;
-        let mut status_of_cores: Vec<CoreStatus> = vec![];
 
         let timestamp_offset = self.timestamp_offset;
 
@@ -345,7 +380,8 @@ impl SessionData {
                     {
                         suggest_delay_required = false;
                     }
-                } else {
+                } else if debug_adapter.configuration_is_done() {
+                    // Make sure we only attempt attaching when we're ready.
                     #[expect(clippy::unwrap_used)]
                     if let Err(error) = target_core.attach_to_rtt(
                         debug_adapter,
@@ -391,26 +427,28 @@ impl SessionData {
                 let _stackframe_span = tracing::debug_span!("Update Stack Frames").entered();
                 tracing::debug!(
                     "Updating the stack frame data for core #{}",
-                    target_core.core.id()
+                    target_core.id()
                 );
 
                 let initial_registers = DebugRegisters::from_core(&mut target_core.core);
                 let exception_interface = exception_handler_for_core(target_core.core.core_type());
                 let instruction_set = target_core.core.instruction_set().ok();
 
-                target_core.core_data.static_variables =
-                    Some(target_core.core_data.debug_info.create_static_scope_cache());
+                if target_core.core_data.static_variables.is_none() {
+                    target_core.core_data.static_variables =
+                        Some(target_core.core_data.debug_info.create_static_scope_cache());
+                }
 
                 target_core.core_data.stack_frames = target_core.core_data.debug_info.unwind(
                     &mut target_core.core,
                     initial_registers,
                     exception_interface.as_ref(),
                     instruction_set,
+                    500, // TODO: we should be able to unwind incrementally as the user requests more frames on the UI
                 )?;
             }
-            status_of_cores.push(current_core_status);
         }
-        Ok((status_of_cores, suggest_delay_required))
+        Ok(suggest_delay_required)
     }
 
     pub(crate) fn clean_up(&mut self, session_config: &SessionConfig) -> Result<(), DebuggerError> {

@@ -38,10 +38,12 @@ pub struct FlashAlgorithm {
     pub pc_erase_all: Option<u64>,
     /// Address of the `Verify()` entry point. Optional.
     pub pc_verify: Option<u64>,
-    /// Address of the (non-standard) `ReadFlash()` entry point. Optional.
-    pub pc_read: Option<u64>,
     /// Address of the `BlankCheck()` entry point. Optional.
     pub pc_blank_check: Option<u64>,
+    /// Address of the (non-standard) `ReadFlash()` entry point. Optional.
+    pub pc_read: Option<u64>,
+    /// Address of the (non-standard) `FlashSize()` entry point. Optional.
+    pub pc_flash_size: Option<u64>,
     /// Initial value of the R9 register for calling flash algo entry points, which
     /// determines where the position-independent data resides.
     pub static_base: u64,
@@ -60,6 +62,9 @@ pub struct FlashAlgorithm {
     ///
     /// If this is present, the flash algorithm supports debug output over RTT.
     pub rtt_control_block: Option<u64>,
+
+    /// Milliseconds between RTT polls.
+    pub rtt_poll_interval: u64,
 
     /// The properties of the flash on the device.
     pub flash_properties: FlashProperties,
@@ -183,8 +188,10 @@ impl FlashAlgorithm {
     // On ARMv8-A and -R, `BKPT` does not enter debug state, but the debug exception,
     // so use `HLT`.
     // For ARMv7 and ARMv8-M, `HLT` does not exist.
-    const ARM_FLASH_BLOB_HEADER_BKPT_LE: [u32; 1] = [arm::assembly::BKPT];
-    const ARM_FLASH_BLOB_HEADER_BKPT_BE: [u32; 1] = [arm::assembly::BKPT.swap_bytes()];
+    const ARM_FLASH_BLOB_HEADER_BKPT_T32_LE: [u32; 1] = [arm::assembly::BKPT_T32];
+    const ARM_FLASH_BLOB_HEADER_BKPT_T32_BE: [u32; 1] = [arm::assembly::BKPT_T32.swap_bytes()];
+    const ARM_FLASH_BLOB_HEADER_BKPT_A32_LE: [u32; 1] = [arm::assembly::BKPT_A32];
+    const ARM_FLASH_BLOB_HEADER_BKPT_A32_BE: [u32; 1] = [arm::assembly::BKPT_A32.swap_bytes()];
     const ARM_FLASH_BLOB_HEADER_HLT_LE: [u32; 1] = [arm::assembly::HLT];
     const ARM_FLASH_BLOB_HEADER_HLT_BE: [u32; 1] = [arm::assembly::HLT.swap_bytes()];
 
@@ -218,13 +225,15 @@ impl FlashAlgorithm {
 
     fn algorithm_header(core_type: CoreType, endian: Endian) -> &'static [u32] {
         match core_type {
-            CoreType::Armv6m
-            | CoreType::Armv7m
-            | CoreType::Armv7em
-            | CoreType::Armv8m
-            | CoreType::Armv7a => match endian {
-                Endian::Little => &Self::ARM_FLASH_BLOB_HEADER_BKPT_LE,
-                Endian::Big => &Self::ARM_FLASH_BLOB_HEADER_BKPT_BE,
+            CoreType::Armv6m | CoreType::Armv7m | CoreType::Armv7em | CoreType::Armv8m => {
+                match endian {
+                    Endian::Little => &Self::ARM_FLASH_BLOB_HEADER_BKPT_T32_LE,
+                    Endian::Big => &Self::ARM_FLASH_BLOB_HEADER_BKPT_T32_BE,
+                }
+            }
+            CoreType::Armv7a => match endian {
+                Endian::Little => &Self::ARM_FLASH_BLOB_HEADER_BKPT_A32_LE,
+                Endian::Big => &Self::ARM_FLASH_BLOB_HEADER_BKPT_A32_BE,
             },
             CoreType::Armv8a => match endian {
                 Endian::Little => &Self::ARM_FLASH_BLOB_HEADER_HLT_LE,
@@ -428,13 +437,15 @@ impl FlashAlgorithm {
             pc_erase_sector: code_start + raw.pc_erase_sector,
             pc_erase_all: raw.pc_erase_all.map(|v| code_start + v),
             pc_verify: raw.pc_verify.map(|v| code_start + v),
-            pc_read: raw.pc_read.map(|v| code_start + v),
             pc_blank_check: raw.pc_blank_check.map(|v| code_start + v),
+            pc_read: raw.pc_read.map(|v| code_start + v),
+            pc_flash_size: raw.pc_flash_size.map(|v| code_start + v),
             static_base: code_start + raw.data_section_offset,
             stack_top,
             stack_size,
             page_buffers,
             rtt_control_block: raw.rtt_location,
+            rtt_poll_interval: raw.rtt_poll_interval,
             flash_properties: raw.flash_properties.clone(),
             transfer_encoding: raw.transfer_encoding.unwrap_or_default(),
             stack_overflow_check: raw.stack_overflow_check(),

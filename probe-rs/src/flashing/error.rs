@@ -13,6 +13,12 @@ pub enum FlashError {
         /// The name of the algorithm that was not found.
         algo_name: String,
     },
+    /// Detected multiple preferred algorithms for the same flash region.
+    #[error("detected multiple preferred algorithms for a flash region {region:?}")]
+    MultiplePreferredAlgos {
+        /// The region which matched multiple preferred flash algorithms.
+        region: NvmRegion,
+    },
     /// No flash memory contains the entire requested memory range.
     #[error("No flash memory contains the entire requested memory range {range:#010X?}.")]
     NoSuitableNvm {
@@ -159,6 +165,13 @@ pub enum FlashError {
     /// Flash content verification failed.
     #[error("Flash content verification failed.")]
     Verify,
+    /// Failed to read flash size.
+    #[error("Failed to read flash size.")]
+    FlashSizeFailed {
+        /// The source error of this error.
+        #[source]
+        source: Box<dyn std::error::Error + 'static + Send + Sync>,
+    },
     // TODO: 1 Add source of target definition
     // TOOD: 2 Do this at target load time.
     /// The given chip has no RAM defined.

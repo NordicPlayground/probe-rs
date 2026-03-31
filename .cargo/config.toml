@@ -1,7 +1,7 @@
 [alias]
 xtask = "run --package xtask --"
 probe-rs = "run --package probe-rs-tools --bin probe-rs --features remote --"
-smoke-tester = "run --package smoke_tester --"
+smoke-tester = "test --package smoke_tester --"
 target-gen = "run --package target-gen --release --"
 
 [registries.nordic-artifactory]

@@ -2,9 +2,8 @@
 
 use std::{sync::Arc, time::Duration};
 
-use super::esp::EspFlashSizeDetector;
 use crate::{
-    MemoryInterface, Session,
+    MemoryInterface,
     architecture::riscv::{
         Dmcontrol, Riscv32,
         communication_interface::{
@@ -19,22 +18,12 @@ use crate::{
 
 /// The debug sequence implementation for the ESP32H2.
 #[derive(Debug)]
-pub struct ESP32H2 {
-    inner: EspFlashSizeDetector,
-}
+pub struct ESP32H2 {}
 
 impl ESP32H2 {
     /// Creates a new debug sequence handle for the ESP32H2.
     pub fn create() -> Arc<dyn RiscvDebugSequence> {
-        Arc::new(Self {
-            inner: EspFlashSizeDetector {
-                stack_pointer: 0x40830000,
-                load_address: 0x40810000,
-                spiflash_peripheral: 0x6000_3000,
-                efuse_get_spiconfig_fn: None,
-                attach_fn: 0x4000_01D4,
-            },
-        })
+        Arc::new(Self {})
     }
 
     fn disable_wdts(
@@ -81,16 +70,14 @@ impl ESP32H2 {
             RiscvBusAccess::A128,
         ];
         for access in accesses {
-            if memory_access_config.default_method(access) != MemoryAccessMethod::SystemBus {
-                // External data/instruction bus
-                // Loading external memory is slower than the CPU. If we can't access something via the
-                // system bus, select the waiting program buffer method.
-                memory_access_config.set_region_override(
-                    access,
-                    0x4200_0000..0x4300_0000,
-                    MemoryAccessMethod::WaitingProgramBuffer,
-                );
-            }
+            // External data/instruction bus
+            // Loading external memory is slower than the CPU. If we can't access something via the
+            // system bus, select the waiting program buffer method.
+            memory_access_config.set_region_override(
+                access,
+                0x4200_0000..0x4300_0000,
+                MemoryAccessMethod::WaitingProgramBuffer,
+            );
         }
 
         Ok(())
@@ -107,10 +94,6 @@ impl RiscvDebugSequence for ESP32H2 {
 
     fn on_halt(&self, interface: &mut RiscvCommunicationInterface) -> Result<(), crate::Error> {
         self.disable_wdts(interface)
-    }
-
-    fn detect_flash_size(&self, session: &mut Session) -> Result<Option<usize>, crate::Error> {
-        self.inner.detect_flash_size(session)
     }
 
     fn reset_system_and_halt(

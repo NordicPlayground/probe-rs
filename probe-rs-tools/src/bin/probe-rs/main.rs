@@ -11,7 +11,7 @@ use std::str::FromStr;
 use std::{ffi::OsString, path::PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{ArgMatches, CommandFactory, FromArgMatches};
+use clap::{ArgMatches, CommandFactory, FromArgMatches, ValueEnum};
 use colored::Colorize;
 use figment::Figment;
 use figment::providers::{Data, Format as _, Json, Toml, Yaml};
@@ -198,7 +198,6 @@ enum Subcommand {
 }
 
 impl Subcommand {
-    #[cfg(feature = "remote")]
     fn is_remote_cmd(&self) -> bool {
         // Commands that are implemented via a series of RPC calls.
         // TODO: refactor other commands
@@ -237,6 +236,96 @@ pub struct BinaryCliOptions {
     skip: u32,
 }
 
+/// Supported flash frequencies
+///
+/// Note that not all frequencies are supported by each target device.
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ValueEnum, Schema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum EspFlashFrequency {
+    /// 12 MHz
+    #[serde(rename = "12MHz")]
+    _12Mhz,
+    /// 15 MHz
+    #[serde(rename = "15MHz")]
+    _15Mhz,
+    /// 16 MHz
+    #[serde(rename = "16MHz")]
+    _16Mhz,
+    /// 20 MHz
+    #[serde(rename = "20MHz")]
+    _20Mhz,
+    /// 24 MHz
+    #[serde(rename = "24MHz")]
+    _24Mhz,
+    /// 26 MHz
+    #[serde(rename = "26MHz")]
+    _26Mhz,
+    /// 30 MHz
+    #[serde(rename = "30MHz")]
+    _30Mhz,
+    /// 40 MHz
+    #[serde(rename = "40MHz")]
+    #[default]
+    _40Mhz,
+    /// 48 MHz
+    #[serde(rename = "48MHz")]
+    _48Mhz,
+    /// 60 MHz
+    #[serde(rename = "60MHz")]
+    _60Mhz,
+    /// 80 MHz
+    #[serde(rename = "80MHz")]
+    _80Mhz,
+}
+
+impl From<EspFlashFrequency> for espflash::flasher::FlashFrequency {
+    fn from(freq: EspFlashFrequency) -> Self {
+        match freq {
+            EspFlashFrequency::_12Mhz => espflash::flasher::FlashFrequency::_12Mhz,
+            EspFlashFrequency::_15Mhz => espflash::flasher::FlashFrequency::_15Mhz,
+            EspFlashFrequency::_16Mhz => espflash::flasher::FlashFrequency::_16Mhz,
+            EspFlashFrequency::_20Mhz => espflash::flasher::FlashFrequency::_20Mhz,
+            EspFlashFrequency::_24Mhz => espflash::flasher::FlashFrequency::_24Mhz,
+            EspFlashFrequency::_26Mhz => espflash::flasher::FlashFrequency::_26Mhz,
+            EspFlashFrequency::_30Mhz => espflash::flasher::FlashFrequency::_30Mhz,
+            EspFlashFrequency::_40Mhz => espflash::flasher::FlashFrequency::_40Mhz,
+            EspFlashFrequency::_48Mhz => espflash::flasher::FlashFrequency::_48Mhz,
+            EspFlashFrequency::_60Mhz => espflash::flasher::FlashFrequency::_60Mhz,
+            EspFlashFrequency::_80Mhz => espflash::flasher::FlashFrequency::_80Mhz,
+        }
+    }
+}
+
+/// Supported flash modes
+#[derive(
+    Debug, Default, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, ValueEnum, Schema,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum EspFlashMode {
+    /// Quad I/O (4 pins used for address & data)
+    Qio,
+    /// Quad Output (4 pins used for data)
+    Qout,
+    /// Dual I/O (2 pins used for address & data)
+    #[default]
+    Dio,
+    /// Dual Output (2 pins used for data)
+    Dout,
+}
+
+impl From<EspFlashMode> for espflash::flasher::FlashMode {
+    fn from(mode: EspFlashMode) -> Self {
+        match mode {
+            EspFlashMode::Qio => espflash::flasher::FlashMode::Qio,
+            EspFlashMode::Qout => espflash::flasher::FlashMode::Qout,
+            EspFlashMode::Dio => espflash::flasher::FlashMode::Dio,
+            EspFlashMode::Dout => espflash::flasher::FlashMode::Dout,
+        }
+    }
+}
+
 #[derive(clap::Parser, Clone, Serialize, Deserialize, Debug, Default, Schema)]
 #[serde(default)]
 pub struct IdfCliOptions {
@@ -249,6 +338,12 @@ pub struct IdfCliOptions {
     /// The idf target app partition
     #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
     idf_target_app_partition: Option<String>,
+    /// Flash SPI mode
+    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
+    idf_flash_mode: Option<EspFlashMode>,
+    /// Flash SPI frequency
+    #[clap(long, help_heading = "DOWNLOAD CONFIGURATION")]
+    idf_flash_freq: Option<EspFlashFrequency>,
 }
 
 #[derive(clap::Parser, Clone, Serialize, Deserialize, Debug, Default, Schema)]
@@ -410,18 +505,18 @@ fn prune_logs(directory: &Path) -> Result<(), anyhow::Error> {
 
 /// Returns the cleaned arguments for the handler of the respective end binary
 /// (cli, cargo-flash, cargo-embed, etc.)
-fn multicall_check<'list>(args: &'list [OsString], want: &str) -> Option<&'list [OsString]> {
+fn multicall_check(args: &[OsString], want: &str) -> Option<Vec<OsString>> {
     let argv0 = Path::new(&args[0]);
     if let Some(command) = argv0.file_stem().and_then(|f| f.to_str())
         && command == want
     {
-        return Some(args);
+        return Some(args.to_vec());
     }
 
     if let Some(command) = args.get(1).and_then(|f| f.to_str())
         && command == want
     {
-        return Some(&args[1..]);
+        return Some(args[1..].to_vec());
     }
 
     None
@@ -435,34 +530,20 @@ async fn main() -> Result<()> {
     //        at this point we don't have a logger yet.
     let utc_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
 
-    let mut args: Vec<_> = std::env::args_os().collect();
-
-    // Special-case `cargo-embed` and `cargo-flash`.
-    if let Some(args) = multicall_check(&args, "cargo-flash") {
-        cmd::cargo_flash::main(args);
-        return Ok(());
-    }
-    if let Some(args) = multicall_check(&args, "cargo-embed") {
-        cmd::cargo_embed::main(args, utc_offset).await;
-        return Ok(());
-    }
+    let args: Vec<_> = std::env::args_os().collect();
 
     let config = load_config().context("Failed to load configuration.")?;
 
-    // Parse the commandline options.
-    let mut matches = Cli::command().get_matches_from(&args);
-
-    // Apply the configuration preset if one is specified.
-    if apply_config_preset(&config, &matches, &mut args)? {
-        // Re-parse the modified CLI input. Ignore errors so that users can specify
-        // options that are only valid for certain subcommands.
-        matches = Cli::command().ignore_errors(true).get_matches_from(args);
+    // Special-case `cargo-embed` and `cargo-flash`.
+    if let Some(args) = multicall_check(&args, "cargo-flash") {
+        return cmd::cargo_flash::main(args, config).await;
+    }
+    if let Some(args) = multicall_check(&args, "cargo-embed") {
+        cmd::cargo_embed::main(args, config, utc_offset).await;
+        return Ok(());
     }
 
-    let mut cli = match Cli::from_arg_matches(&matches) {
-        Ok(matches) => matches,
-        Err(err) => err.exit(),
-    };
+    let mut cli = parse_and_resolve_cli_args::<Cli>(args, &config)?;
 
     // If the user has not specified a log file, we will try to create one in the default location.
     if cli.log_file.is_none() && (cli.log_to_folder || cli.report.is_some()) {
@@ -489,18 +570,44 @@ async fn main() -> Result<()> {
     let report_path = cli.report.clone();
 
     #[cfg(feature = "remote")]
-    if let Some(host) = cli.host.as_deref() {
-        // Run the command remotely.
-        let client = rpc::client::connect(host, cli.token.clone()).await?;
+    let connection_params = cli
+        .host
+        .as_ref()
+        .map(|host| (host.clone(), cli.token.clone()));
 
+    #[cfg(not(feature = "remote"))]
+    let connection_params = None;
+
+    let is_local = connection_params.is_none();
+
+    let result = run_app(connection_params, async |client| {
         anyhow::ensure!(
-            cli.subcommand.is_remote_cmd(),
+            client.is_local_session() || cli.subcommand.is_remote_cmd(),
             "The subcommand is not supported in remote mode."
         );
 
-        cli.run(client, config, utc_offset).await?;
-        // TODO: handle the report
-        return Ok(());
+        cli.run(client, config, utc_offset).await
+    })
+    .await;
+
+    if is_local {
+        // TODO: do something with remote crashes
+        compile_report(result, report_path, elf, log_path.as_deref())?;
+    }
+    Ok(())
+}
+
+/// Runs the callback using either a local or remote RPC client.
+async fn run_app<R>(
+    _connection_params: Option<(String, Option<String>)>,
+    cb: impl AsyncFnOnce(RpcClient) -> Result<R>,
+) -> Result<R> {
+    #[cfg(feature = "remote")]
+    if let Some((host, token)) = _connection_params {
+        // Run the command remotely.
+        let client = rpc::client::connect(&host, token).await?;
+
+        return cb(client).await;
     }
 
     // Create a local server to run commands against.
@@ -509,12 +616,29 @@ async fn main() -> Result<()> {
 
     // Run the command locally.
     let client = RpcClient::new_local_from_wire(tx, rx);
-    let result = cli.run(client, config, utc_offset).await;
+    let result = cb(client).await;
 
     // Wait for the server to shut down
     _ = handle.await.unwrap();
 
-    compile_report(result, report_path, elf, log_path.as_deref())
+    result
+}
+
+fn parse_and_resolve_cli_args<T: FromArgMatches + CommandFactory>(
+    mut args: Vec<OsString>,
+    config: &Config,
+) -> Result<T> {
+    // Parse the commandline options.
+    let mut matches = T::command().get_matches_from(&args);
+
+    // Apply the configuration preset if one is specified.
+    if apply_config_preset(config, &matches, &mut args)? {
+        // Re-parse the modified CLI input. Ignore errors so that users can specify
+        // options that are only valid for certain subcommands.
+        matches = T::command().ignore_errors(true).get_matches_from(args);
+    }
+
+    Ok(T::from_arg_matches(&matches)?)
 }
 
 fn apply_config_preset(
@@ -522,13 +646,19 @@ fn apply_config_preset(
     matches: &ArgMatches,
     args: &mut Vec<OsString>,
 ) -> anyhow::Result<bool> {
-    let Some(preset) = matches.get_one::<String>("preset") else {
-        // No --preset in the CLI arguments or environment variables.
+    const DEFAULT_PRESET_NAME: &str = "default";
+
+    let preset_name = if let Some(preset) = matches.get_one::<String>("preset") {
+        preset.as_str()
+    } else if config.presets.contains_key(DEFAULT_PRESET_NAME) {
+        DEFAULT_PRESET_NAME
+    } else {
+        // No --preset in the CLI arguments or environment variables, and no default preset configured.
         return Ok(false);
     };
 
-    let Some(preset) = config.presets.get(preset) else {
-        anyhow::bail!("Config preset '{preset}' not found.");
+    let Some(preset) = config.presets.get(preset_name) else {
+        anyhow::bail!("Config preset '{preset_name}' not found.");
     };
 
     let mut args_modified = false;

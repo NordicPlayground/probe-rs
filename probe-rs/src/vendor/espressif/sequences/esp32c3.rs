@@ -2,9 +2,8 @@
 
 use std::{sync::Arc, time::Duration};
 
-use super::esp::EspFlashSizeDetector;
 use crate::{
-    MemoryInterface, Session,
+    MemoryInterface,
     architecture::riscv::{
         Dmcontrol, Dmstatus, Riscv32,
         communication_interface::{
@@ -18,22 +17,12 @@ use crate::{
 
 /// The debug sequence implementation for the ESP32C3.
 #[derive(Debug)]
-pub struct ESP32C3 {
-    inner: EspFlashSizeDetector,
-}
+pub struct ESP32C3 {}
 
 impl ESP32C3 {
     /// Creates a new debug sequence handle for the ESP32C3.
     pub fn create() -> Arc<dyn RiscvDebugSequence> {
-        Arc::new(Self {
-            inner: EspFlashSizeDetector {
-                stack_pointer: 0x403c0000,
-                load_address: 0x40390000,
-                spiflash_peripheral: 0x6000_2000,
-                efuse_get_spiconfig_fn: Some(0x4000071c),
-                attach_fn: 0x4000_0164,
-            },
-        })
+        Arc::new(Self {})
     }
 
     fn disable_wdts(
@@ -80,22 +69,19 @@ impl ESP32C3 {
             RiscvBusAccess::A128,
         ];
         for access in accesses {
-            let method = memory_access_config.default_method(access);
-
-            // FIXME: this is a terrible hack because we should not need to halt to read memory.
-            memory_access_config
-                .set_default_method(access, method.min(MemoryAccessMethod::HaltedSystemBus));
-
-            if method != MemoryAccessMethod::SystemBus {
-                // External data bus
-                // Loading external memory is slower than the CPU. If we can't access something via the
-                // system bus, select the waiting program buffer method.
-                memory_access_config.set_region_override(
-                    access,
-                    0x3C00_0000..0x3C80_0000,
-                    MemoryAccessMethod::WaitingProgramBuffer,
-                );
-            }
+            // External data/instruction bus
+            // Loading external memory is slower than the CPU. If we can't access something via the
+            // system bus, select the waiting program buffer method.
+            memory_access_config.set_region_override(
+                access,
+                0x3C00_0000..0x3C80_0000,
+                MemoryAccessMethod::WaitingProgramBuffer,
+            );
+            memory_access_config.set_region_override(
+                access,
+                0x4200_0000..0x4280_0000,
+                MemoryAccessMethod::WaitingProgramBuffer,
+            );
         }
 
         Ok(())
@@ -112,10 +98,6 @@ impl RiscvDebugSequence for ESP32C3 {
 
     fn on_halt(&self, interface: &mut RiscvCommunicationInterface) -> Result<(), crate::Error> {
         self.disable_wdts(interface)
-    }
-
-    fn detect_flash_size(&self, session: &mut Session) -> Result<Option<usize>, crate::Error> {
-        self.inner.detect_flash_size(session)
     }
 
     fn reset_system_and_halt(

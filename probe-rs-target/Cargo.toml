@@ -11,6 +11,7 @@ categories = ["embedded", "hardware-support", "development-tools::debugging"]
 keywords = ["embedded"]
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 [dependencies]
 jep106 = "0.3.0"

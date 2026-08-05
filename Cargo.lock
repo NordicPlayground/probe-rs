@@ -3061,8 +3061,69 @@ dependencies = [
 ]
 
 [[package]]
-name = "probe-rs"
-version = "0.32.0"
+name = "probe-rs-debug"
+version = "0.32.0+nordic"
+dependencies = [
+ "addr2line",
+ "bitfield",
+ "gimli 0.34.0",
+ "insta",
+ "itertools 0.15.0",
+ "object 0.39.1",
+ "parse_int",
+ "pretty_assertions",
+ "probe-rs-nordic",
+ "probe-rs-target",
+ "serde",
+ "termtree",
+ "test-case",
+ "thiserror 2.0.19",
+ "tracing",
+ "typed-path",
+]
+
+[[package]]
+name = "probe-rs-espressif"
+version = "0.32.0+nordic"
+dependencies = [
+ "bincode",
+ "bitvec",
+ "docsplay",
+ "espflash",
+ "nusb",
+ "probe-rs-nordic",
+ "probe-rs-target",
+ "serde",
+ "thiserror 2.0.19",
+ "tracing",
+ "yaml_serde",
+]
+
+[[package]]
+name = "probe-rs-linux"
+version = "0.32.0+nordic"
+dependencies = [
+ "bitfield",
+ "bitvec",
+ "docsplay",
+ "gpiocdev",
+ "probe-rs-nordic",
+ "spidev",
+ "thiserror 2.0.19",
+ "tracing",
+]
+
+[[package]]
+name = "probe-rs-mi"
+version = "0.2.0"
+dependencies = [
+ "semver",
+ "serde",
+]
+
+[[package]]
+name = "probe-rs-nordic"
+version = "0.32.0+nordic"
 dependencies = [
  "anyhow",
  "bincode",
@@ -3100,67 +3161,6 @@ dependencies = [
  "uf2-decode",
  "yaml_serde",
  "zerocopy",
-]
-
-[[package]]
-name = "probe-rs-debug"
-version = "0.32.0"
-dependencies = [
- "addr2line",
- "bitfield",
- "gimli 0.34.0",
- "insta",
- "itertools 0.15.0",
- "object 0.39.1",
- "parse_int",
- "pretty_assertions",
- "probe-rs",
- "probe-rs-target",
- "serde",
- "termtree",
- "test-case",
- "thiserror 2.0.19",
- "tracing",
- "typed-path",
-]
-
-[[package]]
-name = "probe-rs-espressif"
-version = "0.32.0"
-dependencies = [
- "bincode",
- "bitvec",
- "docsplay",
- "espflash",
- "nusb",
- "probe-rs",
- "probe-rs-target",
- "serde",
- "thiserror 2.0.19",
- "tracing",
- "yaml_serde",
-]
-
-[[package]]
-name = "probe-rs-linux"
-version = "0.32.0"
-dependencies = [
- "bitfield",
- "bitvec",
- "docsplay",
- "gpiocdev",
- "probe-rs",
- "spidev",
- "thiserror 2.0.19",
- "tracing",
-]
-
-[[package]]
-name = "probe-rs-mi"
-version = "0.2.0"
-dependencies = [
- "semver",
- "serde",
 ]
 
 [[package]]
@@ -3205,7 +3205,7 @@ dependencies = [
 
 [[package]]
 name = "probe-rs-target"
-version = "0.32.0"
+version = "0.32.0+nordic"
 dependencies = [
  "base64 0.23.0",
  "bincode",
@@ -3218,7 +3218,7 @@ dependencies = [
 
 [[package]]
 name = "probe-rs-tools"
-version = "0.32.0"
+version = "0.32.0+nordic"
 dependencies = [
  "addr2line",
  "ansi-parser",
@@ -3260,11 +3260,11 @@ dependencies = [
  "postcard-rpc",
  "postcard-schema",
  "pretty_assertions",
- "probe-rs",
  "probe-rs-debug",
  "probe-rs-espressif",
  "probe-rs-linux",
  "probe-rs-mi",
+ "probe-rs-nordic",
  "probe-rs-rpc",
  "probe-rs-rpc-client",
  "probe-rs-target",
@@ -4237,15 +4237,15 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "smoke_tester"
-version = "0.32.0"
+version = "0.32.0+nordic"
 dependencies = [
  "anyhow",
  "clap",
  "libtest-mimic",
  "linkme",
  "log",
- "probe-rs",
  "probe-rs-espressif",
+ "probe-rs-nordic",
  "serde",
  "smoke_tester_macros",
  "toml 1.1.3+spec-1.1.0",
@@ -4255,7 +4255,7 @@ dependencies = [
 
 [[package]]
 name = "smoke_tester_macros"
-version = "0.32.0"
+version = "0.32.0+nordic"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4465,7 +4465,7 @@ checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
 
 [[package]]
 name = "target-gen"
-version = "0.32.0"
+version = "0.32.0+nordic"
 dependencies = [
  "anyhow",
  "clap",
@@ -4477,8 +4477,8 @@ dependencies = [
  "jep106",
  "log",
  "parse_int",
- "probe-rs",
  "probe-rs-espressif",
+ "probe-rs-nordic",
  "probe-rs-target",
  "reqwest 0.13.4",
  "scroll",
@@ -5655,7 +5655,7 @@ checksum = "32ac00cd3f8ec9c1d33fb3e7958a82df6989c42d747bd326c822b1d625283547"
 
 [[package]]
 name = "xtask"
-version = "0.32.0"
+version = "0.32.0+nordic"
 dependencies = [
  "anyhow",
  "clap",

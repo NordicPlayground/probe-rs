@@ -12,6 +12,7 @@ categories = ["embedded", "hardware-support", "development-tools::debugging"]
 keywords = ["embedded"]
 license.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

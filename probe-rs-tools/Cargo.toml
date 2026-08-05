@@ -100,7 +100,7 @@ zip = { version = "8.0.0", default-features = false, features = [
 urlencoding = "2"
 svg = "0.18"
 
-probe-rs = { version = "0.32.0", path = "../probe-rs" }
+probe-rs.workspace = true 
 probe-rs-debug = { version = "0.32.0", path = "../probe-rs-debug" }
 probe-rs-mi.workspace = true
 probe-rs-target.workspace = true
@@ -137,7 +137,7 @@ git-version = "0.3"
 [dev-dependencies]
 pretty_assertions = "1.4.0"
 test-case = "3"
-probe-rs = { version = "0.32.0", path = "../probe-rs", features = ["test"] }
+probe-rs = { version = "0.32.0", path = "../probe-rs", features = ["test"], package = "probe-rs-nordic" }
 
 # Set the proper name for the homebrew formula
 [package.metadata.dist]

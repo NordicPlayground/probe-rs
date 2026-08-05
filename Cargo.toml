@@ -1,12 +1,13 @@
 [workspace.package]
-version = "0.32.0"
+version = "0.32.0+nordic"
 edition = "2024"
 
 documentation = "https://docs.rs/probe-rs/"
-homepage = "https://github.com/probe-rs/probe-rs"
-repository = "https://github.com/probe-rs/probe-rs"
+homepage = "https://github.com/NordicPlayground/probe-rs"
+repository = "https://github.com/NordicPlayground/probe-rs"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
+publish = ["nordic-artifactory"]
 
 # If this is increased, also update the checked minimum Rust version in the justfile
 rust-version = "1.89"
@@ -32,7 +33,7 @@ members = [
 exclude = ["probe-rs/tests/gpio-hal-blinky"]
 
 [workspace.dependencies]
-probe-rs = { path = "probe-rs", version = "0.32.0" }
+probe-rs = { path = "probe-rs", version = "0.32.0", package = "probe-rs-nordic" }
 probe-rs-target = { path = "probe-rs-target", version = "0.32.0" }
 probe-rs-mi = { path = "probe-rs-mi", version = "0.2.0" }
 probe-rs-espressif = { path = "probe-rs-espressif", version = "0.32.0" }

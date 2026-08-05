@@ -1,5 +1,8 @@
-# probe-rs
+# probe-rs-nordic
 
+Fork of <https://github.com/probe-rs/probe-rs>, with temporary changes necessary for integration into Nordic tools.
+
+# probe-rs
 a modern, embedded debugging toolkit,
 written in Rust
 

@@ -73,7 +73,7 @@ pub mod architecture;
 pub mod config;
 pub mod vendor;
 
-mod core;
+pub mod core;
 mod error;
 pub mod flashing;
 pub mod integration;

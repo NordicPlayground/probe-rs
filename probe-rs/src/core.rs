@@ -1,8 +1,9 @@
 use crate::{
     CoreType, Endian, InstructionSet, MemoryInterface, Target,
     architecture::{
-        arm::sequences::ArmDebugSequence, riscv::sequences::RiscvDebugSequence,
-        xtensa::sequences::XtensaDebugSequence,
+        arm::sequences::{ArmDebugSequence, DefaultArmSequence},
+        riscv::sequences::{DefaultRiscvSequence, RiscvDebugSequence},
+        xtensa::sequences::{DefaultXtensaSequence, XtensaDebugSequence},
     },
     config::DebugSequence,
     error::{BreakpointError, Error},
@@ -17,6 +18,7 @@ use std::{sync::Arc, time::Duration};
 
 pub mod core_state;
 pub mod core_status;
+#[cfg(feature = "coredump")]
 pub mod dump;
 pub mod memory_mapped_registers;
 pub mod registers;
@@ -97,10 +99,10 @@ pub trait CoreInterface: MemoryInterface {
     /// Returns the program counter register.
     fn program_counter(&self) -> &'static CoreRegister;
 
-    /// Returns the stack pointer register.
+    /// Returns the frame pointer register.
     fn frame_pointer(&self) -> &'static CoreRegister;
 
-    /// Returns the frame pointer register.
+    /// Returns the stack pointer register.
     fn stack_pointer(&self) -> &'static CoreRegister;
 
     /// Returns the return address register, a.k.a. link register.
@@ -378,12 +380,12 @@ impl<'probe> Core<'probe> {
         self.inner.program_counter()
     }
 
-    /// Returns the stack pointer register.
+    /// Returns the frame pointer register.
     pub fn frame_pointer(&self) -> &'static CoreRegister {
         self.inner.frame_pointer()
     }
 
-    /// Returns the frame pointer register.
+    /// Returns the stack pointer register.
     pub fn stack_pointer(&self) -> &'static CoreRegister {
         self.inner.stack_pointer()
     }
@@ -702,19 +704,31 @@ pub enum ResolvedCoreOptions {
 
 impl ResolvedCoreOptions {
     fn new(target: &Target, options: CoreAccessOptions) -> Self {
-        match (options, target.debug_sequence.clone()) {
-            (CoreAccessOptions::Arm(options), DebugSequence::Arm(sequence)) => {
+        // When the target's debug_sequence doesn't match this core's architecture (e.g.
+        // RP235x_riscv where the vendor returns Arm(Rp235x) for the family), use the default
+        // sequence for this core's architecture so attach still works.
+        match options {
+            CoreAccessOptions::Arm(options) => {
+                let sequence = match &target.debug_sequence {
+                    DebugSequence::Arm(s) => s.clone(),
+                    _ => DefaultArmSequence::create(),
+                };
                 Self::Arm { sequence, options }
             }
-            (CoreAccessOptions::Riscv(options), DebugSequence::Riscv(sequence)) => {
+            CoreAccessOptions::Riscv(options) => {
+                let sequence = match &target.debug_sequence {
+                    DebugSequence::Riscv(s) => s.clone(),
+                    _ => DefaultRiscvSequence::create(),
+                };
                 Self::Riscv { sequence, options }
             }
-            (CoreAccessOptions::Xtensa(options), DebugSequence::Xtensa(sequence)) => {
+            CoreAccessOptions::Xtensa(options) => {
+                let sequence = match &target.debug_sequence {
+                    DebugSequence::Xtensa(s) => s.clone(),
+                    _ => DefaultXtensaSequence::create(),
+                };
                 Self::Xtensa { sequence, options }
             }
-            _ => unreachable!(
-                "Mismatch between core kind and access options. This is a bug, please report it."
-            ),
         }
     }
 

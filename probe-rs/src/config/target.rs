@@ -1,5 +1,4 @@
 use super::{Core, MemoryRegion, RawFlashAlgorithm, TargetDescriptionSource};
-use crate::flashing::FlashLoader;
 use crate::{
     architecture::{
         arm::{
@@ -172,10 +171,10 @@ impl Target {
         &self.source
     }
 
-    /// Create a [FlashLoader] for this target, which can be used
+    /// Create a [FlashLoader](crate::flashing::FlashLoader) for this target, which can be used
     /// to program its non-volatile memory.
-    pub fn flash_loader(&self) -> FlashLoader {
-        FlashLoader::new(self.memory_map.clone(), self.source.clone())
+    pub fn flash_loader(&self) -> crate::flashing::FlashLoader {
+        crate::flashing::FlashLoader::new(self.memory_map.clone(), self.source.clone())
     }
 
     /// Returns a [RawFlashAlgorithm] by name.
@@ -258,7 +257,7 @@ impl From<Target> for TargetSelector {
 }
 
 /// This is the type to denote a general debug sequence.
-/// It can differentiate between ARM and RISC-V for now.
+/// It can differentiate between ARM, RISC-V and Xtensa for now.
 #[derive(Clone, Debug)]
 pub enum DebugSequence {
     /// An ARM debug sequence.
@@ -292,7 +291,19 @@ impl CoreExt for Core {
                     }
                 })
             }
-            probe_rs_target::CoreAccessOptions::Riscv(_) => None,
+            probe_rs_target::CoreAccessOptions::Riscv(options) => {
+                options.mem_ap.as_ref().map(|ap| {
+                    let dp = DpAddress::Default;
+                    match ap {
+                        probe_rs_target::ApAddress::V1(ap_num) => {
+                            FullyQualifiedApAddress::v1_with_dp(dp, *ap_num)
+                        }
+                        probe_rs_target::ApAddress::V2(ap_num) => {
+                            FullyQualifiedApAddress::v2_with_dp(dp, ApV2Address::new(*ap_num))
+                        }
+                    }
+                })
+            }
             probe_rs_target::CoreAccessOptions::Xtensa(_) => None,
         }
     }

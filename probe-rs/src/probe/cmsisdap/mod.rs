@@ -22,8 +22,8 @@ use crate::{
         },
     },
     probe::{
-        AutoImplementJtagAccess, BatchCommand, DebugProbe, DebugProbeError, DebugProbeInfo,
-        DebugProbeSelector, JtagAccess, JtagDriverState, ProbeFactory, WireProtocol,
+        AutoImplementJtagAccess, BatchCommand, DebugProbe, DebugProbeError, DebugProbeSelector,
+        JtagAccess, JtagDriverState, ProbeFactory, WireProtocol,
         cmsisdap::commands::{
             CmsisDapError, RequestError,
             general::info::{CapabilitiesCommand, PacketCountCommand, SWOTraceBufferSizeCommand},
@@ -85,7 +85,7 @@ impl ProbeFactory for CmsisDapFactory {
             .map(DebugProbe::into_probe)
     }
 
-    fn list_probes(&self) -> Vec<DebugProbeInfo> {
+    fn list_probes(&self) -> Vec<crate::probe::list::ProbeListItem> {
         tools::list_cmsisdap_devices()
     }
 }
@@ -504,6 +504,26 @@ impl CmsisDap {
         }
     }
 
+    // Reads the CTRL/STAT register, and clears the sticky error flag if is set (or if the read
+    // faults, which shouldn't happen, but is observed to happen on some PSOC devices).
+    fn handle_sticky_err(&mut self) -> Result<(), ArmError> {
+        let ctrl = self.read_ctrl_register();
+        tracing::trace!("Ctrl/Stat register value is: {:?}", ctrl);
+
+        match ctrl {
+            Ok(ctrl) if !ctrl.sticky_err() => Ok(()),
+            Ok(_) | Err(ArmError::Dap(DapError::FaultResponse)) => {
+                // Clear sticky error flags.
+                self.write_abort({
+                    let mut abort = Abort(0);
+                    abort.set_stkerrclr(true);
+                    abort
+                })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Immediately send whatever is in our batch if it is not empty.
     ///
     /// If the last transfer was a read, result is Some with the read value.
@@ -559,7 +579,7 @@ impl CmsisDap {
                 // is not the response to the latest command from the batch.
                 //
                 // According to the CMSIS-DAP specification, this shouldn't happen,
-                // the only time when not all transfers were executed is when an error occured.
+                // the only time when not all transfers were executed is when an error occurred.
                 // Still, this seems to happen in practice.
 
                 if count < batch.len() {
@@ -568,11 +588,11 @@ impl CmsisDap {
                         count,
                         batch.len()
                     );
-                    return Err(ArmError::Other(format!(
+                    return Err(DebugProbeError::Other(format!(
                         "Possible error in CMSIS-DAP probe: Only {}/{} transfers were executed, but no error was reported.",
                         count,
                         batch.len()
-                    )));
+                    )).into());
                 }
 
                 tracing::trace!("Last transfer status: ACK");
@@ -597,18 +617,7 @@ impl CmsisDap {
                 // To avoid a potential endless recursion,
                 // call a separate function to read the ctrl register,
                 // which doesn't use the batch API.
-                let ctrl = self.read_ctrl_register()?;
-
-                tracing::trace!("Ctrl/Stat register value is: {:?}", ctrl);
-
-                if ctrl.sticky_err() {
-                    // Clear sticky error flags.
-                    self.write_abort({
-                        let mut abort = Abort(0);
-                        abort.set_stkerrclr(ctrl.sticky_err());
-                        abort
-                    })?;
-                }
+                self.handle_sticky_err()?;
 
                 Err(DapError::FaultResponse.into())
             }
@@ -806,6 +815,83 @@ impl CmsisDap {
         self.connected = true;
 
         Ok(())
+    }
+
+    fn handle_transfer_block_response(
+        &mut self,
+        address: RegisterAddress,
+        resp: &TransferBlockResponse,
+        executed_transfers: usize,
+        total_transfers: usize,
+    ) -> Result<(), ArmError> {
+        if resp.transfer_response.protocol_error {
+            tracing::warn!(
+                "Protocol error in block read from register {:?}, read {}/{}",
+                address,
+                executed_transfers,
+                total_transfers,
+            );
+
+            // TODO: Indicate which transfer failed
+            return Err(
+                DapError::Protocol(self.protocol.expect("Protocol has been selected")).into(),
+            );
+        }
+
+        match resp.transfer_response.ack {
+            // TODO: Handle this the same way as process_batch
+            Ack::Ok => Ok(()),
+            Ack::Fault => {
+                // TODO: Perform error handling -> clear fault, etc.
+                //
+                // TODO: Properly track what exactly failed
+                tracing::debug!(
+                    "FAULT response in block read from register {:?}, read {}/{}",
+                    address,
+                    executed_transfers,
+                    total_transfers,
+                );
+
+                // To avoid a potential endless recursion,
+                // call a separate function to read the ctrl register,
+                // which doesn't use the batch API.
+                self.handle_sticky_err()?;
+
+                Err(DapError::FaultResponse.into())
+            }
+            Ack::NoAck => {
+                // TODO: Perform error handling -> clear fault, etc.
+                //
+                // TODO: Properly track what exactly failed
+                tracing::debug!(
+                    "NACK response in block read from register {:?}, read {}/{}",
+                    address,
+                    executed_transfers,
+                    total_transfers
+                );
+                // TODO: Try a reset?
+                Err(DapError::NoAcknowledge.into())
+            }
+            Ack::Wait => {
+                // TODO: Perform error handling -> clear fault, etc.
+                //
+                // TODO: Properly track what exactly failed
+                tracing::debug!(
+                    "WAIT response in block read from register {:?}, read {}/{}",
+                    address,
+                    executed_transfers,
+                    total_transfers
+                );
+
+                self.write_abort({
+                    let mut abort = Abort(0);
+                    abort.set_dapabort(true);
+                    abort
+                })?;
+
+                Err(DapError::WaitResponse.into())
+            }
+        }
     }
 }
 
@@ -1012,9 +1098,12 @@ impl RawDapAccess for CmsisDap {
     fn raw_read_register(&mut self, address: RegisterAddress) -> Result<u32, ArmError> {
         let res = self.batch_add(BatchCommand::Read(address))?;
 
-        // NOTE(unwrap): batch_add will always return Some if the last command is a read
-        // and running the batch was successful.
-        Ok(res.unwrap())
+        // batch_add processes the batch immediately for a read, so a successful call
+        // returns the read value. A None here means the probe returned a response that
+        // didn't contain the read data - report it instead of panicking.
+        res.ok_or_else(|| {
+            DebugProbeError::Other("CMSIS-DAP read did not return any data".to_string()).into()
+        })
     }
 
     /// Writes a value to the DAP register on the specified port and address.
@@ -1044,6 +1133,8 @@ impl RawDapAccess for CmsisDap {
 
         let data_chunk_len = max_packet_size_words as usize;
 
+        let total_writes = values.len();
+
         for (i, chunk) in values.chunks(data_chunk_len).enumerate() {
             let mut request = TransferBlockRequest::write_request(address, Vec::from(chunk));
             request.dap_index = self.jtag_state.chain_params.index as u8;
@@ -1053,16 +1144,9 @@ impl RawDapAccess for CmsisDap {
             let resp: TransferBlockResponse = commands::send_command(&mut self.device, &request)
                 .map_err(DebugProbeError::from)?;
 
-            if resp.transfer_response != 1 {
-                return Err(DebugProbeError::from(CmsisDapError::ErrorResponse(
-                    RequestError::BlockTransfer {
-                        dap_index: request.dap_index,
-                        transfer_count: request.transfer_count,
-                        transfer_request: request.transfer_request,
-                    },
-                ))
-                .into());
-            }
+            let executed_writes = i * data_chunk_len + usize::from(resp.transfer_count);
+
+            self.handle_transfer_block_response(address, &resp, executed_writes, total_writes)?;
         }
 
         Ok(())
@@ -1089,6 +1173,8 @@ impl RawDapAccess for CmsisDap {
 
         let data_chunk_len = max_packet_size_words as usize;
 
+        let total_num_reads = values.len();
+
         for (i, chunk) in values.chunks_mut(data_chunk_len).enumerate() {
             let mut request = TransferBlockRequest::read_request(address, chunk.len() as u16);
             request.dap_index = self.jtag_state.chain_params.index as u8;
@@ -1098,16 +1184,9 @@ impl RawDapAccess for CmsisDap {
             let resp: TransferBlockResponse = commands::send_command(&mut self.device, &request)
                 .map_err(DebugProbeError::from)?;
 
-            if resp.transfer_response != 1 {
-                return Err(DebugProbeError::from(CmsisDapError::ErrorResponse(
-                    RequestError::BlockTransfer {
-                        dap_index: request.dap_index,
-                        transfer_count: request.transfer_count,
-                        transfer_request: request.transfer_request,
-                    },
-                ))
-                .into());
-            }
+            let executed_reads = i * data_chunk_len + usize::from(resp.transfer_count);
+
+            self.handle_transfer_block_response(address, &resp, executed_reads, total_num_reads)?;
 
             chunk.clone_from_slice(&resp.transfer_data[..]);
         }

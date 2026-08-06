@@ -7,10 +7,8 @@ use probe_rs::probe::WireProtocol;
 use serde::{Deserialize, Serialize};
 use std::{net::SocketAddr, path::PathBuf, time::Duration};
 
-use crate::util::{
-    logging::LevelFilter,
-    rtt::{ChannelMode, DataFormat},
-};
+use crate::util::logging::LevelFilter;
+use probe_rs_rpc::rtt_config::{ChannelMode, DataFormat};
 
 use super::rttui::tab::TabConfig;
 
@@ -40,7 +38,10 @@ pub struct Probe {
     pub usb_pid: Option<String>,
     pub interface: Option<u8>,
     pub serial: Option<String>,
-    pub protocol: WireProtocol,
+    /// Wire protocol to talk to the target with.
+    ///
+    /// Falls back to the probe default.
+    pub protocol: Option<WireProtocol>,
     pub speed: Option<u32>,
 }
 
@@ -252,7 +253,7 @@ impl Configs {
             Ok(config) => {
                 // Gross errors (e.g. config file syntax problems) have already been caught by the
                 // other match arm.  Guard against Figment coercing previously undefined profiles
-                // into existance.
+                // into existence.
                 if !requested_profile_defined {
                     bail!(
                         "the requested configuration profile \"{}\" hasn't been defined (defined profiles: {})",
@@ -282,6 +283,9 @@ impl Configs {
 
 #[cfg(test)]
 mod test {
+    use figment::providers::{Format, Toml};
+    use probe_rs::probe::WireProtocol;
+
     use super::Configs;
 
     #[test]
@@ -290,11 +294,28 @@ mod test {
         let configs = Configs::new(std::env::current_dir().unwrap());
         let _config = configs.select_defined("default").unwrap();
     }
+    /// An explicitly configured protocol still reaches the config.
     #[test]
-    fn non_existant_profile_is_error() {
-        // Selecting a non-existant profile.
+    fn explicit_protocol_is_preserved() {
+        let mut configs = Configs::new(std::env::current_dir().unwrap());
+        configs.figment = configs.figment.merge(
+            Toml::string(
+                r#"
+                [default.probe]
+                protocol = "Jtag"
+                "#,
+            )
+            .nested(),
+        );
+        let config = configs.select_defined("default").unwrap();
+
+        assert_eq!(config.probe.protocol, Some(WireProtocol::Jtag));
+    }
+    #[test]
+    fn non_existent_profile_is_error() {
+        // Selecting a non-existent profile.
         let configs = Configs::new(std::env::current_dir().unwrap());
-        let _noprofile = configs.select_defined("nonexxistantprofle").unwrap_err();
+        let _noprofile = configs.select_defined("nonexistentprofile").unwrap_err();
     }
     #[test]
     fn unknown_config_items_in_config_fail() {

@@ -1,0 +1,145 @@
+name: esp32s2
+manufacturer:
+  id: 0x12
+  cc: 0xc
+chip_detection:
+- !Espressif
+  idcode: 0x120034e5
+  variants:
+    0x7c6: esp32s2
+variants:
+- name: esp32s2
+  cores:
+  - name: main
+    type: xtensa
+    core_access_options: !Xtensa
+  memory_map:
+  - !Nvm
+    range:
+      start: 0x0
+      end: 0x4000000
+    cores:
+    - main
+    access:
+      execute: false
+      boot: true
+  - !Nvm
+    name: External data bus 1
+    range:
+      start: 0x3f000000
+      end: 0x3f400000
+    cores:
+    - main
+    is_alias: true
+    access:
+      execute: false
+  - !Nvm
+    name: External data bus 2
+    range:
+      start: 0x3f500000
+      end: 0x3ff80000
+    cores:
+    - main
+    is_alias: true
+    access:
+      execute: false
+  - !Generic
+    name: ROM1, Data bus
+    range:
+      start: 0x3ffa0000
+      end: 0x3ffb0000
+    cores:
+    - main
+  - !Ram
+    name: SRAM0, Data bus
+    range:
+      start: 0x3ffb0000
+      end: 0x3ffb8000
+    cores:
+    - main
+  - !Ram
+    name: SRAM1, Data bus
+    range:
+      start: 0x3ffb8000
+      end: 0x40000000
+    cores:
+    - main
+  - !Generic
+    name: ROM0
+    range:
+      start: 0x40000000
+      end: 0x40010000
+    cores:
+    - main
+  - !Generic
+    name: ROM1
+    range:
+      start: 0x40010000
+      end: 0x40020000
+    cores:
+    - main
+  - !Ram
+    name: SRAM0, Instruction bus
+    range:
+      start: 0x40020000
+      end: 0x40028000
+    cores:
+    - main
+  - !Ram
+    name: SRAM1, Instruction bus
+    range:
+      start: 0x40028000
+      end: 0x40070000
+    cores:
+    - main
+  - !Nvm
+    name: External instruction bus
+    range:
+      start: 0x40080000
+      end: 0x40800000
+    cores:
+    - main
+    is_alias: true
+  flash_algorithms:
+  - esp32s2-flashloader
+  jtag:
+    scan_chain:
+    - name: main
+      ir_len: 5
+  default_binary_format: idf
+flash_algorithms:
+- name: esp32s2-flashloader
+  description: A flash loader for the esp32s2.
+  default: true
+  instructions: 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
+  load_address: 0x4002c400
+  data_load_address: 0x3ffcc400
+  pc_init: 0x474
+  pc_uninit: 0x4b0
+  pc_program_page: 0x488
+  pc_erase_sector: 0x464
+  pc_erase_all: 0x458
+  pc_verify: 0x4d8
+  pc_blank_check: 0x444
+  pc_read: 0x49c
+  vendor_functions:
+    ChipRevision: 0x4c0
+    FlashSize: 0x4cc
+  data_section_offset: 0xf08
+  rtt_location: 0x3ffdf110
+  rtt_poll_interval: 500
+  flash_properties:
+    address_range:
+      start: 0x0
+      end: 0x40000000
+    page_size: 0x4000
+    erased_byte_value: 0xff
+    program_page_timeout: 2000
+    erase_sector_timeout: 2000
+    sectors:
+    - size: 0x10000
+      address: 0x0
+  cores:
+  - main
+  stack_overflow_check: false
+  transfer_encoding: miniz

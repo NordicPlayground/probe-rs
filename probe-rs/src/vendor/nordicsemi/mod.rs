@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, hash_map::Entry};
 
+use jep106::JEP106Code;
 use probe_rs_target::{
     Chip,
     chip_detection::{NordicConfigIdDetection, NordicFicrDetection},
@@ -26,10 +27,12 @@ pub mod sequences;
 #[derive(docsplay::Display)]
 pub struct NordicSemi;
 
+const JEP_NORDICSEMI: JEP106Code = JEP106Code::new(0x2, 0x44);
+
 impl Vendor for NordicSemi {
     fn try_create_debug_sequence(&self, chip: &Chip) -> Option<DebugSequence> {
         let sequence = if chip.name.starts_with("nRF5340") {
-            DebugSequence::Arm(Nrf5340::create())
+            DebugSequence::Arm(Nrf5340::create_for_chip(chip))
         } else if chip.name.starts_with("nRF52") {
             DebugSequence::Arm(Nrf52::create())
         } else if chip.name.starts_with("nRF9160") {
@@ -51,7 +54,7 @@ impl Vendor for NordicSemi {
         probe: &mut dyn ArmDebugInterface,
         chip_info: ArmChipInfo,
     ) -> Result<Option<String>, Error> {
-        if chip_info.manufacturer.get() != Some("Nordic VLSI ASA") {
+        if chip_info.manufacturer != JEP_NORDICSEMI {
             return Ok(None);
         }
 

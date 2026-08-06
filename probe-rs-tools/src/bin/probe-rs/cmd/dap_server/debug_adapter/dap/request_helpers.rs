@@ -1,8 +1,6 @@
 use crate::cmd::dap_server::{
     DebuggerError,
-    debug_adapter::dap::dap_types::{DisassembledInstruction, Source},
-    peripherals::svd_cache::{SvdVariableCache, Variable},
-    server::{core_data::CoreHandle, session_data::BreakpointType},
+    debug_adapter::dap::dap_types::{Breakpoint, DisassembledInstruction, Source},
 };
 use addr2line::gimli::RunTimeEndian;
 use anyhow::{Result, anyhow};
@@ -11,91 +9,20 @@ use capstone::{
     arch::riscv::ArchMode as riscvArchMode, prelude::*,
 };
 use itertools::Itertools;
-use probe_rs::{CoreType, Error, InstructionSet, MemoryInterface};
-use probe_rs_debug::{ColumnType, ObjectRef, SourceLocation};
-use std::{sync::LazyLock, time::Duration};
-use typed_path::TypedPathBuf;
-
-use super::dap_types::{Breakpoint, InstructionBreakpoint, MemoryAddress};
-
-// Source file mapping for rustlib, e.g. Some(("/rustc/<hash>", "<sysroot>/lib/rustlib/src/rust"))
-// This can be None if rustc is not found or gives bad output
-static RUSTLIB_SOURCE_MAP: LazyLock<Option<(TypedPathBuf, TypedPathBuf)>> = LazyLock::new(|| {
-    let rustc = rustc_binary();
-
-    // Call rustc --version --verbose to get hash
-    let cmd = std::process::Command::new(&rustc)
-        .args(["--version", "--verbose"])
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8(cmd.stdout).ok()?;
-    let hash = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("commit-hash:"))?
-        .trim();
-
-    // Call rustc --print sysroot to get the sysroot
-    let cmd = std::process::Command::new(&rustc)
-        .args(["--print", "sysroot"])
-        .output()
-        .ok()?;
-    let stdout = String::from_utf8(cmd.stdout).ok()?;
-    let sysroot = TypedPathBuf::from(stdout.trim());
-
-    // from is always a Unix path, to is a native path
-    let from_path = TypedPathBuf::from_unix(format!("/rustc/{hash}/"));
-    let to_path = sysroot.join("lib").join("rustlib").join("src").join("rust");
-
-    Some((from_path, to_path))
-});
-
-// Find the rustc binary using the same procedure as rust-analyzer
-// https://github.com/rust-lang/rust-analyzer/blob/1b283db47f8de1412c851c92bb4ce4ef039ff8ff/editors/code/src/toolchain.ts#L158
-fn rustc_binary() -> std::ffi::OsString {
-    let rustc = std::ffi::OsStr::new("rustc");
-    let extension = std::ffi::OsStr::new(if cfg!(windows) { "exe" } else { "" });
-    let rustc_exe = std::path::Path::new(rustc).with_extension(extension);
-
-    // Find rustc using RUSTC environment variable
-    if let Some(path) = std::env::var_os("RUSTC") {
-        return path;
-    }
-
-    // Find rustc on PATH
-    if std::env::var_os("PATH")
-        .and_then(|paths| {
-            std::env::split_paths(&paths).find(|path| path.join(&rustc_exe).is_file())
-        })
-        .is_some()
-    {
-        return std::ffi::OsString::from(rustc);
-    }
-
-    // Find rustc in CARGO_HOME or ~/.cargo
-    let cargo_home = if let Some(cargo_home) = std::env::var_os("CARGO_HOME") {
-        Some(std::path::PathBuf::from(cargo_home))
-    } else {
-        directories::UserDirs::new().map(|dir| dir.home_dir().join(".cargo"))
-    };
-    if let Some(cargo_home) = cargo_home {
-        let path = cargo_home.join("bin").join(&rustc_exe);
-        if path.is_file() {
-            return path.into_os_string();
-        }
-    }
-
-    // Just return "rustc" as a last resort
-    rustc.to_os_string()
-}
+use probe_rs::{Core, CoreInterface, CoreType, Error, InstructionSet, MemoryInterface};
+use probe_rs_debug::{ColumnType, DebugInfo, SourceLocation};
 
 pub(crate) fn disassemble_target_memory(
-    target_core: &mut CoreHandle<'_>,
+    core: &mut Core<'_>,
+    debug_info: Option<&DebugInfo>,
     instruction_offset: i64,
     byte_offset: i64,
     memory_reference: u64,
     instruction_count: i64,
 ) -> Result<Vec<DisassembledInstruction>, DebuggerError> {
-    let instruction_set = target_core.core.instruction_set()?;
+    let instruction_set = core.instruction_set()?;
+    let core_type = core.core_type();
+    let endianness = core.endianness()?;
     match instruction_set {
         InstructionSet::Thumb2
         | InstructionSet::RV32C
@@ -124,8 +51,6 @@ pub(crate) fn disassemble_target_memory(
     // 1. We ensure that we always have the requested memory address in range,
     //    so that we can identify exact instruction counts relative to this reference.
     let start_instruction_offset: u64 = i64::min(instruction_offset, 0).unsigned_abs();
-    let end_instruction_offset: u64 =
-        i64::max(0, instruction_offset + instruction_count).unsigned_abs();
 
     // 2. We calculate worst-case byte offsets to allow for the requested
     //    instruction offset and count, i.e. we read so far backwards and
@@ -133,6 +58,7 @@ pub(crate) fn disassemble_target_memory(
     //    offset and count of instructions even if all instructions happen
     //    to be max length instructions.
     let start_memory_offset = start_instruction_offset * max_instruction_size;
+    let end_instruction_offset = i64::max(0, instruction_offset + instruction_count).unsigned_abs();
     let end_memory_offset = (end_instruction_offset + 1) * max_instruction_size;
     let mut start_from_address = adjusted_memory_reference.saturating_sub(start_memory_offset);
     let mut read_until_address = adjusted_memory_reference.saturating_add(end_memory_offset);
@@ -145,10 +71,8 @@ pub(crate) fn disassemble_target_memory(
         // length instructions are not necessarily word-aligned, i.e.
         // in the case of ARM Thumbv2, instructions are embedded into
         // a 16-bit halfword stream.
-        if let Some(source_location) = target_core
-            .core_data
-            .debug_info
-            .get_source_location(start_from_address)
+        if let Some(di) = debug_info
+            && let Some(source_location) = di.get_source_location(start_from_address)
             && let Some(source_address) = source_location.address
         {
             start_from_address = source_address;
@@ -159,12 +83,15 @@ pub(crate) fn disassemble_target_memory(
     start_from_address &= !(min_instruction_size - 1);
     read_until_address &= !(min_instruction_size - 1);
 
-    let cs_le = get_capstone_le(target_core)?;
+    let cs_le = get_capstone_le(instruction_set, core_type)?;
     let mut code_buffer_le: Vec<u8> = vec![];
     let mut disassembled_instructions: Vec<DisassembledInstruction> = vec![];
     let mut maybe_previous_source_location = None;
     let mut maybe_reference_instruction_index = None;
-    let convert_endianness = target_core.core_data.debug_info.endianness() == RunTimeEndian::Big;
+    let convert_endianness = match debug_info {
+        Some(di) => di.endianness() == RunTimeEndian::Big,
+        None => endianness == probe_rs::Endian::Big,
+    };
 
     let mut instruction_pointer = start_from_address;
     'instruction_loop: while instruction_pointer < read_until_address {
@@ -213,13 +140,13 @@ pub(crate) fn disassemble_target_memory(
                 // order or garble partial 32 bit instructions.
                 HALFWORD => read_instruction::<HALFWORD, _>(
                     &mut read_pointer,
-                    &mut target_core.core,
+                    core,
                     &mut code_buffer_le,
                     convert_endianness,
                 ),
                 WORD => read_instruction::<WORD, _>(
                     &mut read_pointer,
-                    &mut target_core.core,
+                    core,
                     &mut code_buffer_le,
                     convert_endianness,
                 ),
@@ -292,10 +219,9 @@ pub(crate) fn disassemble_target_memory(
                 let mut location = None;
                 let mut line = None;
                 let mut column = None;
-                if let Some(current_source_location) = target_core
-                    .core_data
-                    .debug_info
-                    .get_source_location(instruction.address())
+                if let Some(di) = debug_info
+                    && let Some(current_source_location) =
+                        di.get_source_location(instruction.address())
                 {
                     if maybe_previous_source_location.is_none()
                         || maybe_previous_source_location.is_some_and(|previous_source_location| {
@@ -375,20 +301,91 @@ pub(crate) fn disassemble_target_memory(
             "<`Disassemble` request: invalid memory reference.>",
         )));
     };
-    // ... and at the end of the list.
     disassembled_instructions.truncate(instruction_count as usize);
 
     Ok(disassembled_instructions)
 }
 
-fn get_capstone_le(target_core: &mut CoreHandle<'_>) -> Result<Capstone, DebuggerError> {
-    let mut cs = match target_core.core.instruction_set()? {
+pub(crate) fn instruction_breakpoint_response(
+    address: u64,
+    set_succeeded: bool,
+    set_error: Option<&str>,
+    source_location: Option<&SourceLocation>,
+) -> Breakpoint {
+    if set_succeeded {
+        let (source, line, column, message) = match source_location {
+            Some(loc) => {
+                let line = loc.line.map(|l| l as i64);
+                let column = loc.column.map(|c| match c {
+                    ColumnType::LeftEdge => 0_i64,
+                    ColumnType::Column(c) => c as i64,
+                });
+                let message = Some(format!(
+                    "Instruction breakpoint set @:{address:#010x}. File: {}: Line: {}, Column: {}",
+                    loc.file_name()
+                        .unwrap_or_else(|| "<unknown source file>".to_string()),
+                    line.unwrap_or(0),
+                    column.unwrap_or(0),
+                ));
+                (get_dap_source(loc), line, column, message)
+            }
+            None => (
+                None,
+                None,
+                None,
+                Some(format!(
+                    "Instruction breakpoint set @:{address:#010x}, but could not resolve a source location."
+                )),
+            ),
+        };
+        Breakpoint {
+            column,
+            end_column: None,
+            end_line: None,
+            id: Some(address as i64),
+            instruction_reference: Some(format!("{address:#010x}")),
+            line,
+            message,
+            offset: None,
+            source,
+            verified: true,
+            reason: None,
+        }
+    } else {
+        Breakpoint {
+            column: None,
+            end_column: None,
+            end_line: None,
+            id: None,
+            instruction_reference: Some(format!("{address:#010x}")),
+            line: None,
+            message: Some(match set_error {
+                Some(error) => format!(
+                    "Warning: Could not set breakpoint at memory address: {address:#010x}: {error}"
+                ),
+                None => {
+                    format!("Warning: Could not set breakpoint at memory address: {address:#010x}")
+                }
+            }),
+            offset: None,
+            source: None,
+            verified: false,
+            reason: None,
+        }
+    }
+}
+
+fn get_capstone_le(
+    instruction_set: InstructionSet,
+    core_type: CoreType,
+) -> Result<Capstone, DebuggerError> {
+    let mut cs = match instruction_set {
         InstructionSet::Thumb2 => {
             let mut capstone_builder = Capstone::new()
                 .arm()
                 .mode(armArchMode::Thumb)
                 .endian(Endian::Little);
-            if matches!(target_core.core.core_type(), CoreType::Armv8m) {
+            if matches!(core_type, CoreType::Armv8m) {
                 capstone_builder = capstone_builder
                     .extra_mode(std::iter::once(capstone::arch::arm::ArchExtraMode::V8));
             }
@@ -417,6 +414,19 @@ fn get_capstone_le(target_core: &mut CoreHandle<'_>) -> Result<Capstone, Debugge
                 capstone::arch::riscv::ArchExtraMode::RiscVC,
             ))
             .build(),
+        InstructionSet::RV64 => Capstone::new()
+            .riscv()
+            .mode(riscvArchMode::RiscV64)
+            .endian(Endian::Little)
+            .build(),
+        InstructionSet::RV64C => Capstone::new()
+            .riscv()
+            .mode(riscvArchMode::RiscV64)
+            .endian(Endian::Little)
+            .extra_mode(std::iter::once(
+                capstone::arch::riscv::ArchExtraMode::RiscVC,
+            ))
+            .build(),
         InstructionSet::Xtensa => return Err(DebuggerError::Unimplemented),
     }
     .map_err(|err| anyhow!("Error creating capstone: {err:?}"))?;
@@ -424,219 +434,27 @@ fn get_capstone_le(target_core: &mut CoreHandle<'_>) -> Result<Capstone, Debugge
     Ok(cs)
 }
 
-/// A helper function to create a [`Source`] struct from a [`SourceLocation`]
+/// A helper function to create a [`Source`] struct from a [`SourceLocation`].
+///
+/// The path is the build-time path recorded by the compiler in DWARF debug info
+/// and refers to a file on the *client's* filesystem. The server emits it
+/// verbatim; resolution to an editor buffer is the client's responsibility
+/// (correct in both local and `remote_server_mode` deployments). Path rewrites
+/// that need knowledge of the user's local toolchain (e.g. mapping the
+/// synthetic `/rustc/<hash>/...` prefix on precompiled rustlib paths to the
+/// active sysroot) are performed by the VSCode extension, not here.
 pub(crate) fn get_dap_source(source_location: &SourceLocation) -> Option<Source> {
     let file_path = source_location.path.to_path();
-
     let file_name = source_location.file_name();
 
-    // Try to convert the path to the native Path of the current OS
-    #[cfg(unix)]
-    let native_path = file_path.with_unix_encoding_checked().ok()?;
-    #[cfg(windows)]
-    let native_path = file_path.with_windows_encoding();
-    let native_path = std::path::PathBuf::try_from(native_path)
-        .map(|mut path| {
-            if path.is_relative()
-                && let Ok(current_dir) = std::env::current_dir()
-            {
-                path = current_dir.join(path);
-            }
-            path
-        })
-        .ok()?;
-
-    // Check if the source file exists
-    if native_path.exists() {
-        return Some(Source {
-            name: file_name,
-            path: Some(native_path.to_string_lossy().to_string()),
-            source_reference: None,
-            presentation_hint: None,
-            origin: None,
-            sources: None,
-            adapter_data: None,
-            checksums: None,
-        });
-    }
-
-    // Precompiled rustlib paths start with /rustc/<hash>/ which needs to be
-    // mapped to <sysroot>/lib/rustlib/src/rust/
-    if let Some((old_prefix, new_prefix)) = RUSTLIB_SOURCE_MAP.as_ref()
-        && let Ok(path) = file_path.strip_prefix(old_prefix)
-        && let Ok(rustlib_path) = std::path::PathBuf::try_from(new_prefix.join(path))
-        && rustlib_path.exists()
-    {
-        return Some(Source {
-            name: file_name,
-            path: Some(rustlib_path.to_string_lossy().to_string()),
-            source_reference: None,
-            presentation_hint: None,
-            origin: None,
-            sources: None,
-            adapter_data: None,
-            checksums: None,
-        });
-    }
-
-    // If no matching file was found
     Some(Source {
-        name: native_path
-            .file_name()
-            .map(|file_name| file_name.to_string_lossy().to_string())
-            .map(|file_name| format!("<unavailable>: {file_name}")),
+        name: file_name,
         path: Some(file_path.to_string_lossy().to_string()),
         source_reference: None,
-        presentation_hint: Some("deemphasize".to_string()),
+        presentation_hint: None,
         origin: None,
         sources: None,
         adapter_data: None,
         checksums: None,
     })
-}
-
-/// Provides halt functionality that is re-used elsewhere, in context of multiple DAP Requests
-pub(crate) fn halt_core(
-    target_core: &mut probe_rs::Core,
-) -> Result<probe_rs::CoreInformation, DebuggerError> {
-    target_core
-        .halt(Duration::from_millis(100))
-        .map_err(DebuggerError::from)
-}
-
-/// The DAP protocol uses three related values to determine how to invoke the `Variables` request.
-/// This function retrieves that information from the `DebugInfo::VariableCache` and returns it as
-/// (`variable_reference`, `named_child_variables_cnt`, `indexed_child_variables_cnt`)
-pub(crate) fn get_variable_reference(
-    parent_variable: &probe_rs_debug::Variable,
-    cache: &probe_rs_debug::VariableCache,
-) -> (ObjectRef, i64, i64) {
-    if !parent_variable.is_valid() {
-        return (ObjectRef::Invalid, 0, 0);
-    }
-
-    let mut named_child_variables_cnt = 0;
-    let mut indexed_child_variables_cnt = 0;
-    for child_variable in cache.get_children(parent_variable.variable_key()) {
-        if child_variable.is_indexed() {
-            indexed_child_variables_cnt += 1;
-        } else {
-            named_child_variables_cnt += 1;
-        }
-    }
-
-    if named_child_variables_cnt > 0 || indexed_child_variables_cnt > 0 {
-        (
-            parent_variable.variable_key(),
-            named_child_variables_cnt,
-            indexed_child_variables_cnt,
-        )
-    } else if parent_variable.variable_node_type.is_deferred()
-        && parent_variable.to_string(cache) != "()"
-    {
-        // We have not yet cached the children for this reference.
-        // Provide DAP Client with a reference so that it will explicitly ask for children when the user expands it.
-        (parent_variable.variable_key(), 0, 0)
-    } else {
-        // Returning 0's allows VSCode DAP Client to behave correctly for frames that have no variables, and variables that have no children.
-        (ObjectRef::Invalid, 0, 0)
-    }
-}
-
-/// The DAP protocol uses three related values to determine how to invoke the `Variables` request.
-/// This function retrieves that information from the `DebugInfo::VariableCache` and returns it as
-/// (`variable_reference`, `named_child_variables_cnt`, `indexed_child_variables_cnt`)
-pub(crate) fn get_svd_variable_reference(
-    parent_variable: &Variable,
-    cache: &SvdVariableCache,
-) -> (ObjectRef, i64) {
-    let named_child_variables_cnt = cache.get_children(parent_variable.variable_key()).len();
-
-    if named_child_variables_cnt > 0 {
-        (
-            parent_variable.variable_key(),
-            named_child_variables_cnt as i64,
-        )
-    } else {
-        // Returning 0's allows VSCode DAP Client to behave correctly for frames that have no variables, and variables that have no children.
-        (ObjectRef::Invalid, 0)
-    }
-}
-
-/// A helper function to set and return a [`Breakpoint`] struct from a [`InstructionBreakpoint`]
-pub(crate) fn set_instruction_breakpoint(
-    requested_breakpoint: InstructionBreakpoint,
-    target_core: &mut CoreHandle<'_>,
-) -> Breakpoint {
-    let mut breakpoint_response = Breakpoint {
-        column: None,
-        end_column: None,
-        end_line: None,
-        id: None,
-        instruction_reference: None,
-        line: None,
-        message: None,
-        offset: None,
-        source: None,
-        verified: false,
-        reason: None,
-    };
-
-    if let Ok(MemoryAddress(memory_reference)) = requested_breakpoint
-        .instruction_reference
-        .as_str()
-        .try_into()
-    {
-        match target_core.set_breakpoint(memory_reference, BreakpointType::InstructionBreakpoint) {
-            Ok(_) => {
-                breakpoint_response.verified = true;
-                breakpoint_response.instruction_reference =
-                    Some(format!("{memory_reference:#010x}"));
-                // Try to resolve the source location for this breakpoint.
-                match target_core
-                    .core_data
-                    .debug_info
-                    .get_source_location(memory_reference)
-                {
-                    Some(source_location) => {
-                        breakpoint_response.id = Some(memory_reference as i64);
-                        breakpoint_response.source = get_dap_source(&source_location);
-                        breakpoint_response.line = source_location.line.map(|line| line as i64);
-                        breakpoint_response.column = source_location.column.map(|col| match col {
-                            ColumnType::LeftEdge => 0_i64,
-                            ColumnType::Column(c) => c as i64,
-                        });
-                        breakpoint_response.message = Some(format!(
-                            "Instruction breakpoint set @:{memory_reference:#010x}. File: {}: Line: {}, Column: {}",
-                            &source_location
-                                .file_name()
-                                .unwrap_or_else(|| "<unknown source file>".to_string()),
-                            breakpoint_response.line.unwrap_or(0),
-                            breakpoint_response.column.unwrap_or(0)
-                        ));
-                    }
-                    None => {
-                        breakpoint_response.message = Some(format!(
-                            "Instruction breakpoint set @:{memory_reference:#010x}, but could not resolve a source location."
-                        ));
-                    }
-                }
-            }
-            Err(error) => {
-                breakpoint_response.instruction_reference =
-                    Some(requested_breakpoint.instruction_reference);
-                breakpoint_response.message = Some(format!(
-                    "Warning: Could not set breakpoint at memory address: {memory_reference:#010x}: {error}"
-                ));
-            }
-        }
-    } else {
-        breakpoint_response.instruction_reference =
-            Some(requested_breakpoint.instruction_reference.clone());
-        breakpoint_response.message = Some(format!(
-            "Invalid memory reference specified: {:?}",
-            requested_breakpoint.instruction_reference
-        ));
-    };
-    breakpoint_response
 }

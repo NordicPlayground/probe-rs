@@ -27,9 +27,15 @@ pub mod variable_cache;
 pub(crate) mod exception_handling;
 
 pub use self::{
-    debug_info::*, debug_step::SteppingMode, exception_handling::exception_handler_for_core,
-    registers::*, source_instructions::SourceLocation, source_instructions::VerifiedBreakpoint,
-    stack_frame::StackFrame, variable::*, variable_cache::VariableCache,
+    debug_info::*,
+    debug_step::SteppingMode,
+    exception_handling::exception_handler_for_core,
+    registers::*,
+    source_instructions::SourceLocation,
+    source_instructions::VerifiedBreakpoint,
+    stack_frame::{StackFrame, StackFrameInfo},
+    variable::*,
+    variable_cache::VariableCache,
 };
 
 use probe_rs::{Core, MemoryInterface};
@@ -38,7 +44,7 @@ use gimli::DebuggingInformationEntry;
 use gimli::EvaluationResult;
 use gimli::{AttributeValue, RunTimeEndian};
 use serde::Serialize;
-use typed_path::TypedPathBuf;
+pub use typed_path::{TypedPath, TypedPathBuf};
 
 use std::num::ParseIntError;
 use std::{
@@ -50,7 +56,16 @@ use std::{
 };
 
 /// A simplified type alias of the [`gimli::EndianReader`] type.
-pub type EndianReader = gimli::EndianReader<RunTimeEndian, std::rc::Rc<[u8]>>;
+pub type EndianReader = gimli::EndianReader<RunTimeEndian, std::sync::Arc<[u8]>>;
+
+// `DebugInfo` must be `Send + Sync` so a probe-rs RPC server can share it
+// across requests (e.g. behind `Arc`).
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<crate::DebugInfo>();
+    assert_send_sync::<crate::VariableCache>();
+    assert_send_sync::<crate::StackFrame>();
+};
 
 /// An error occurred while debugging the target.
 #[derive(Debug, thiserror::Error)]
@@ -206,7 +221,7 @@ fn extract_file(
 /// If a DW_AT_byte_size attribute exists, return the u64 value, otherwise (including errors) return None
 fn extract_byte_size(node_die: &DebuggingInformationEntry<GimliReader>) -> Option<u64> {
     match node_die.attr(gimli::DW_AT_byte_size) {
-        Ok(Some(byte_size_attr)) => match byte_size_attr.value() {
+        Some(byte_size_attr) => match byte_size_attr.value() {
             AttributeValue::Udata(byte_size) => Some(byte_size),
             AttributeValue::Data1(byte_size) => Some(byte_size as u64),
             AttributeValue::Data2(byte_size) => Some(byte_size as u64),
@@ -217,14 +232,7 @@ fn extract_byte_size(node_die: &DebuggingInformationEntry<GimliReader>) -> Optio
                 None
             }
         },
-        Ok(None) => None,
-        Err(error) => {
-            tracing::warn!(
-                "Failed to extract byte_size: {error:?} for debug_entry {:?}",
-                node_die.tag().static_string()
-            );
-            None
-        }
+        None => None,
     }
 }
 
@@ -244,9 +252,7 @@ pub(crate) fn _print_all_attributes(
     tag: &gimli::DebuggingInformationEntry<DwarfReader>,
     print_depth: usize,
 ) {
-    let mut attrs = tag.attrs();
-
-    while let Some(attr) = attrs.next().unwrap() {
+    for attr in tag.attrs() {
         for _ in 0..print_depth {
             print!("\t");
         }
@@ -270,7 +276,7 @@ pub(crate) fn _print_all_attributes(
 
                 let result = evaluation.result();
 
-                println!("Expression: {:x?}", &result[0]);
+                println!("Expression: {:x?}", result[0]);
             }
             AttributeValue::LocationListsRef(_) => println!("LocationList"),
             AttributeValue::DebugLocListsBase(_) => println!(" LocationList"),

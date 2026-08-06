@@ -9,6 +9,7 @@ homepage = "https://probe.rs"
 repository.workspace = true
 readme.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 description = "A collection of on chip debugging tools to communicate with microchips."
 
@@ -17,35 +18,35 @@ default-run = "probe-rs"
 [features]
 default = []
 # Include server/client functionality
-remote = [
-    "dep:tokio-tungstenite",
-    "dep:axum",
-    "dep:axum-extra",
-    "dep:rustls",
-    "dep:tempfile",
-]
+remote = ["dep:axum", "probe-rs-rpc/remote", "probe-rs-rpc-client/remote"]
 
 [dependencies]
 anyhow = { workspace = true }
-base64 = "0.22"
-docsplay = { workspace = true }
+base64 = "0.23"
 jep106 = "0.3"
 num-traits = "0.2"
 scroll = "0.13"
 serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
 thiserror = { workspace = true }
 tracing = "0.1"
 typed-path = "0.12"
-probe-rs-mi = { workspace = true }
-espflash = { version = "4", default-features = false }
+espflash = { version = "4.5", default-features = false }
 
-itertools = "0.14"
+itertools = "0.15"
+indexmap = "2.14"
 
 # CLI-only
-addr2line = "0.25"
+addr2line = "0.27"
 bytesize = "2"
-capstone = "0.14"
+# Only the architectures probe-rs can disassemble; the default feature set
+# compiles every Capstone backend, which dominates the build script time.
+capstone = { version = "0.14", default-features = false, features = [
+    "full",
+    "std",
+    "arch_arm",
+    "arch_arm64",
+    "arch_riscv",
+] }
 cargo_metadata = "0.23"
 clap = { version = "4", features = ["derive", "env"] }
 colored = "3"
@@ -53,12 +54,6 @@ defmt-decoder = "1.0"
 directories = "6"
 dunce = "1"
 figment = { version = "0.10", features = ["toml", "json", "yaml", "env"] }
-goblin = { version = "0.10", default-features = false, features = [
-    "std",
-    "elf32",
-    "elf64",
-    "endian_fd",
-] }
 ihex = "3.0"
 indicatif = "0.18"
 insta = { version = "1.38", default-features = false, features = ["yaml"] }
@@ -66,14 +61,17 @@ itm = { version = "0.9.0-rc.1", default-features = false }
 parse_int = "0.9"
 libtest-mimic = "0.8.0"
 fastrand = "2.1"
+object = { version = "0.39", default-features = false, features = [
+    "elf",
+    "read_core",
+    "std",
+] }
 rustyline-async = "0.4.7"
 sanitize-filename = "0.6"
-schemafy = "0.6"
 serde_json = "1.0.116"
-signal-hook = { version = "0.3", default-features = false }
 # Version 0.14.6 fails to compile
 svd-parser = { version = "=0.14.9", features = ["expand"] }
-termtree = "0.5"
+termtree = "1.0"
 textwrap = { version = "0.16", default-features = false, features = [
     "unicode-linebreak",
     "unicode-width",
@@ -91,41 +89,47 @@ ratatui = { version = "0.30.0", default-features = false, features = [
 ansi-parser = "0.9.0"
 linkme = "0.3.25"
 
-probe-rs = { version = "0.31.0", path = "../probe-rs", package = "probe-rs-nordic" }
 parking_lot = "0.12.2"
-cargo-config2 = "0.1.26"
+toml = "1.0"
 clap_complete = "4.5.2"
 regex = "1.10.4"
-zip = { version = "6.0.0", default-features = false, features = [
+zip = { version = "8.0.0", default-features = false, features = [
     "deflate",
     "time",
 ] }
 urlencoding = "2"
-probe-rs-debug = { version = "0.31.0", path = "../probe-rs-debug" }
-probe-rs-target = { workspace = true }
 svg = "0.18"
+
+probe-rs.workspace = true 
+probe-rs-debug = { version = "0.32.0", path = "../probe-rs-debug" }
+probe-rs-mi.workspace = true
+probe-rs-target.workspace = true
+probe-rs-espressif.workspace = true
+probe-rs-rpc = { workspace = true, features = ["clap"] }
+probe-rs-rpc-client = { workspace = true }
 
 # Server-only
 tokio = { version = "1.0", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = { version = "0.3" }
-rustls = { version = "0.23", default-features = false, features = [
-    "std",
-    "ring",
-], optional = true }
-tokio-tungstenite = { version = "0.28", features = [
-    "rustls-tls-webpki-roots",
-], optional = true }
 axum = { version = "0.8", features = ["ws"], optional = true }
-axum-extra = { version = "0.12", features = ["typed-header"], optional = true }
-tempfile = { version = "3.0", optional = true }
-postcard = { version = "1.0", features = ["use-std"] }
+tempfile = "3.0"
 postcard-rpc = { version = "0.12.0", features = ["use-std"] }
 postcard-schema = { version = "0.2.0", features = ["use-std", "derive"] }
-sha2 = "0.10"
+sha2 = "0.11"
+nusb = { workspace = true, features = ["tokio"] }
 
 # gdb server
-gdbstub = "0.7.6"
+# 0.7.9 causes this regression:
+# https://github.com/probe-rs/probe-rs/issues/3805
+gdbstub = "=0.7.8"
+
+# profiling
+fxprof-processed-profile = { version = "0.8.1", default-features = false }
+flate2 = { version = "1.1.2", default-features = false, features = ["zlib-rs"] }
+# samply-object dependencies for profiling, to replace with samply-object when released
+debugid = { version = "0.8.0", default-features = false }
+uuid = { version = "1.0", default-features = false }
 
 [build-dependencies]
 git-version = "0.3"
@@ -133,6 +137,7 @@ git-version = "0.3"
 [dev-dependencies]
 pretty_assertions = "1.4.0"
 test-case = "3"
+probe-rs = { version = "0.32.0", path = "../probe-rs", features = ["test"], package = "probe-rs-nordic" }
 
 # Set the proper name for the homebrew formula
 [package.metadata.dist]
@@ -140,3 +145,7 @@ formula = "probe-rs"
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "1.1.4", features = ["fs"] }
+probe-rs-linux.workspace = true

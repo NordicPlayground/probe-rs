@@ -6,7 +6,8 @@
 # Serial number
 # serial = "12345678"
 # The protocol to be used for communicating with the target.
-protocol = "Swd"
+# If unset, the probe decides.
+# protocol = "Swd"
 # The speed in kHz of the data link to the target.
 # speed = 1337
 
@@ -103,5 +104,5 @@ tabs = [
 [default.gdb]
 # Whether or not a GDB server should be opened after flashing.
 enabled = false
-# The connection string in host:port format wher the GDB server will open a socket.
+# The connection string in host:port format where the GDB server will open a socket.
 gdb_connection_string = "127.0.0.1:1337"

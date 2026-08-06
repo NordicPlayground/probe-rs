@@ -9,7 +9,7 @@ use crate::architecture::arm::{ArmDebugInterface, ArmError};
 use crate::probe::sifliuart::arm::SifliUartArmDebug;
 use crate::probe::{
     DebugProbe, DebugProbeError, DebugProbeInfo, DebugProbeSelector, ProbeCreationError,
-    ProbeFactory, WireProtocol,
+    ProbeFactory, WireProtocol, list::ProbeListItem,
 };
 use serialport::{SerialPort, SerialPortType, available_ports};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -19,9 +19,9 @@ use std::{env, fmt};
 
 const START_WORD: [u8; 2] = [0x7E, 0x79];
 
-const DEFUALT_RECV_TIMEOUT: Duration = Duration::from_secs(3);
+const DEFAULT_RECV_TIMEOUT: Duration = Duration::from_secs(3);
 
-const DEFUALT_UART_BAUD: u32 = 1000000;
+const DEFAULT_UART_BAUD: u32 = 1000000;
 
 #[derive(Debug)]
 pub(crate) enum SifliUartCommand<'a> {
@@ -136,7 +136,7 @@ impl SifliUart {
         let probe = SifliUart {
             reader,
             writer,
-            baud: DEFUALT_UART_BAUD,
+            baud: DEFAULT_UART_BAUD,
             _serial_port: port,
         };
         Ok(probe)
@@ -202,7 +202,7 @@ impl SifliUart {
         let mut recv_data = vec![];
 
         loop {
-            if start_time.elapsed() >= DEFUALT_RECV_TIMEOUT {
+            if start_time.elapsed() >= DEFAULT_RECV_TIMEOUT {
                 return Err(CommandError::ParameterError(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "Timeout",
@@ -411,7 +411,7 @@ impl SifliUartFactory {
     }
 
     fn open_port(&self, port_name: &str) -> Result<Box<dyn DebugProbe>, DebugProbeError> {
-        let mut port = serialport::new(port_name, DEFUALT_UART_BAUD)
+        let mut port = serialport::new(port_name, DEFAULT_UART_BAUD)
             .dtr_on_open(false)
             .timeout(Duration::from_secs(3))
             .open()
@@ -451,8 +451,8 @@ impl ProbeFactory for SifliUartFactory {
             ));
         };
 
-        if selector.serial_number.is_some() {
-            return self.open_port(selector.serial_number.as_ref().unwrap());
+        if let Some(serial_number) = &selector.serial_number {
+            return self.open_port(serial_number);
         }
 
         for port in ports {
@@ -469,7 +469,7 @@ impl ProbeFactory for SifliUartFactory {
         ))
     }
 
-    fn list_probes(&self) -> Vec<DebugProbeInfo> {
+    fn list_probes(&self) -> Vec<ProbeListItem> {
         let mut probes = vec![];
         let Ok(ports) = available_ports() else {
             return probes;
@@ -479,7 +479,12 @@ impl ProbeFactory for SifliUartFactory {
             else {
                 continue;
             };
-            probes.push(info);
+            // The SiFli probe is accessed over a serial port; check that node, not usbfs.
+            let accessibility = crate::probe::list::device_node_accessibility(&port.port_name);
+            probes.push(ProbeListItem {
+                info,
+                accessibility,
+            });
         }
         probes
     }

@@ -1,5 +1,5 @@
 [package]
-version = "0.1.0"
+version = "0.2.0"
 name = "probe-rs-mi"
 edition.workspace = true
 documentation.workspace = true
@@ -7,6 +7,7 @@ homepage.workspace = true
 repository.workspace = true
 readme.workspace = true
 license.workspace = true
+rust-version.workspace = true
 
 description = "The probe-rs machine interface for computers interfacing probe-rs"
 

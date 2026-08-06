@@ -1,5 +1,5 @@
 use super::{
-    ColumnType, DebugError, DebugInfo, GimliReader, canonical_path_eq,
+    ColumnType, DebugError, DebugInfo, GimliReader, path_matches,
     unit_info::{self, UnitInfo},
 };
 use gimli::LineSequence;
@@ -50,7 +50,7 @@ impl VerifiedBreakpoint {
         Err(DebugError::WarnAndContinue { message })
     }
 
-    /// Identifying the breakpoint location for a specific location (path, line, colunmn) is a bit more complex,
+    /// Identifying the breakpoint location for a specific location (path, line, column) is a bit more complex,
     /// compared to the `for_address()` method, due to a few factors:
     /// - The correct program instructions, may be in any of the compilation units of the current program.
     /// - The debug information may not contain data for the "specific source" location requested:
@@ -58,6 +58,13 @@ impl VerifiedBreakpoint {
     ///     we need to find the closest "relevant" source location that has valid debug information.
     ///   - The requested location may not be a valid source location, e.g. when the
     ///     debug information has been optimized away. In this case we will return an appropriate error.
+    ///
+    /// #### Path matching
+    /// `path` may be an absolute path or a **partial (relative) path**.  A relative path such as
+    /// `src/main.rs` or simply `main.rs` is matched against the tail of each DWARF-embedded
+    /// absolute path at a component boundary, so the caller does not need to know the full path
+    /// that was recorded at compile time.  When `path` is absolute, only normalized exact equality
+    /// is accepted (the previous behaviour).
     ///
     /// #### The logic used to find the "most relevant" source location is as follows:
     /// 1. Filter  [`UnitInfo`], by using [`gimli::LineProgramHeader`] to match units that include
@@ -104,7 +111,7 @@ impl VerifiedBreakpoint {
                     debug_info
                         .get_path(&program_unit.unit, file_index)
                         .and_then(|combined_path: TypedPathBuf| {
-                            if canonical_path_eq(path, combined_path.to_path()) {
+                            if path_matches(combined_path.to_path(), path) {
                                 tracing::debug!(
                                     "Found matching file index: {file_index} for path: {path}",
                                     file_index = file_index,

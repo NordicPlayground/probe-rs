@@ -15,7 +15,7 @@ Additionally the project offers a variety of tools to be used directly for flash
 
 ## Functionality
 
-As of version 0.27.0 this library can:
+This library can:
 
 - Connect to a DAPLink, STLink, JLink, FTDI probes, ESP32 devices with USB JTAG, WLink and the Blackmagic probe.
 - Talk to ARM, Risc-V and Xtensa cores via SWD or JTAG.
@@ -24,7 +24,7 @@ As of version 0.27.0 this library can:
 - Download ELF, BIN and IHEX binaries using standard CMSIS-Pack flash algorithms.
 - Debug a target via the CLI, VSCode (MS-DAP) and GDB.
 
-To see what new functionality gets added every release, have a look at the [CHANGELOG](CHANGELOG.md)
+To see what new functionality gets added every release, have a look at the [CHANGELOG](https://github.com/probe-rs/probe-rs/blob/master/CHANGELOG.md). Changes that haven't been released yet live as individual fragments in the [`changelog/`](https://github.com/probe-rs/probe-rs/tree/master/changelog) directory.
 
 ## Support
 
@@ -33,6 +33,23 @@ If you think probe-rs makes your embedded journey more enjoyable or even earns y
 ## Tools
 
 In addition to being a library, probe-rs also includes a suite of tools which can be used for flashing and debugging.
+
+### Which tool should I use?
+
+For most projects, **`probe-rs run`** is what you want. It flashes your firmware, resets the target and streams RTT/`defmt` output and panics back to your console, so it works as a Cargo runner. Point Cargo at it once:
+
+```toml
+# .cargo/config.toml
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+runner = "probe-rs run --chip nRF52840_xxAA"
+```
+
+and then `cargo run` flashes and runs your firmware.
+
+The other two tools cover narrower needs:
+
+- **`cargo-embed`** offers similar functionality with an interactive RTT terminal on top. It is expected to be phased out in the future, so prefer `probe-rs run` for new setups.
+- **`cargo-flash`** just flashes a binary onto the target without any further faff, for when you only need to program the chip.
 
 ### Installation
 
@@ -56,6 +73,34 @@ We have implemented the [Microsoft Debug Adapter Protocol (DAP)](https://microso
 The probe-rs website includes [VSCode configuration instructions](https://probe.rs/docs/tools/debugger).
 
 ## Usage Examples
+
+### Using a Linux host as an SWD probe
+
+On Linux, probe-rs can drive SWD directly from the host through the
+[`probe-rs-linux`](probe-rs-linux/) plugin crate, which provides two
+backends:
+
+- `linuxgpiod` — bit-bangs SWD over the GPIO character-device interface
+  (`/dev/gpiochipN`).
+- `linuxspidevswd` — emulates SWD over a `spidev` bus by tying MOSI and
+  MISO together through a series resistor.
+
+Select the probe with a synthetic selector. The VID:PID portion is ignored;
+the serial portion carries the chip-and-pin map (gpiod) or the spidev path:
+
+```bash
+# bit-banged GPIO
+probe-rs run --probe 0:0:gpiochip1,swclk=26,swdio=25,srst=38 ...
+
+# spidev
+probe-rs info --probe 0:0:/dev/spidev0.0
+```
+
+For safety, `probe-rs list` only exposes explicit `/dev/spidev_swd*` udev
+links, so probe-rs does not implicitly try every SPI device on the system.
+
+See the [crate README](probe-rs-linux/README.md) for wiring diagrams,
+cross-compilation, and remote-server usage.
 
 ### Halting the attached chip
 

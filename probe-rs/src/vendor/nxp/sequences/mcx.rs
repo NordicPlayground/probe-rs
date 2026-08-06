@@ -23,57 +23,36 @@ use crate::{
 };
 
 mod debugmailbox {
+    #![allow(non_snake_case)]
     use crate::architecture::arm::ap::define_ap_register;
 
     define_ap_register!(
         name: DMCSW,
         address: 0x00,
         fields: [
-            ResynchReq: bool,
-            ReqPending: bool,
-            DbgOrErr: bool,
-            AhbOrErr: bool,
-            SoftReset: bool,
-            ChipResetReq: bool,
-        ],
-        from: value => Ok(DMCSW {
-            ResynchReq: ((value >> 31) & 0x01) != 0,
-            ReqPending: ((value >> 30) & 0x01) != 0,
-            DbgOrErr: ((value >> 29) & 0x01) != 0,
-            AhbOrErr: ((value >> 28) & 0x01) != 0,
-            SoftReset: ((value >> 27) & 0x01) != 0,
-            ChipResetReq: ((value >> 26) & 0x01) != 0,
-        }),
-        to: value => (u32::from(value.ResynchReq) << 31)
-        | (u32::from(value.ReqPending) << 30)
-        | (u32::from(value.DbgOrErr) << 29)
-        | (u32::from(value.AhbOrErr) << 28)
-        | (u32::from(value.SoftReset) << 27)
-        | (u32::from(value.ChipResetReq) << 26)
+            pub ResynchReq, set_ResynchReq: 31;
+            pub ReqPending, set_ReqPending: 30;
+            pub DbgOrErr, set_DbgOrErr: 29;
+            pub AhbOrErr, set_AhbOrErr: 28;
+            pub SoftReset, set_SoftReset: 27;
+            pub ChipResetReq, set_ChipResetReq: 26;
+        ]
     );
 
     define_ap_register!(
         name: DMREQUEST,
         address: 0x04,
         fields: [
-            Request: u32
-        ],
-        from: value => Ok(DMREQUEST {
-            Request: value
-        }),
-        to: value => value.Request
+            pub u32, Request, set_Request: 31, 0;
+        ]
     );
 
     define_ap_register!(
         name: DMRETURN,
         address: 0x08,
         fields: [
-            Return: u32
-        ],
-        from: value => Ok(DMRETURN {
-            Return: value
-        }),
-        to: value => value.Return
+            pub u32, Return, set_Return: 31, 0;
+        ]
     );
 }
 
@@ -94,9 +73,10 @@ impl MCX {
     const VARIANT_A1: [&str; 6] = [
         "MCXA156", "MCXA155", "MCXA154", "MCXA146", "MCXA145", "MCXA144",
     ];
-    // const VARIANT_A2: [&str; 3] = ["MCXA16", "MCXA17", "MCXA27"];
+    const VARIANT_A2: [&str; 6] = ["MCXA16", "MCXA17", "MCXA18", "MCXA25", "MCXA26", "MCXA27"];
+    const VARIANT_A5: [&str; 6] = ["MCXA28", "MCXA45", "MCXA53", "MCXA55", "MCXA56", "MCXA57"];
     const VARIANT_N: [&str; 1] = ["MCXN"];
-    const VARIANT_N0: [&str; 1] = ["MCXN947"];
+    const VARIANT_N0: [&str; 2] = ["MCXN947", "MCXN526"];
 
     fn is_variant<'a, V>(&self, v: V) -> bool
     where
@@ -119,7 +99,7 @@ impl MCX {
         let csw: CSW = interface
             .read_raw_ap_register(mem_ap, CSW::ADDRESS)?
             .try_into()?;
-        Ok(csw.DeviceEn)
+        Ok(csw.DeviceEn())
     }
 
     fn debug_mailbox_ap(&self, dp: DpAddress) -> Result<FullyQualifiedApAddress, ArmError> {
@@ -261,6 +241,11 @@ impl MCX {
         let ap = interface.fully_qualified_address();
         let dp = ap.dp();
 
+        // Try to enable debug mailbox if AP is still not enabled
+        if !self.is_ap_enabled(interface.get_arm_debug_interface()?, &ap)? {
+            self.enable_debug_mailbox(interface.get_arm_debug_interface()?, dp)?;
+        }
+
         let start = Instant::now();
         let timeout = if self.is_variant(Self::VARIANT_N0) {
             Duration::from_millis(500)
@@ -272,11 +257,6 @@ impl MCX {
             && start.elapsed() < timeout
         {
             thread::sleep(Duration::from_millis(10));
-        }
-
-        // Try to enable debug mailbox if AP is still not enabled
-        if !self.is_ap_enabled(interface.get_arm_debug_interface()?, &ap)? {
-            self.enable_debug_mailbox(interface.get_arm_debug_interface()?, dp)?;
         }
 
         // Halt the core in case it didn't stop at a breakpoint
@@ -423,7 +403,11 @@ impl ArmDebugSequence for MCX {
         interface.flush()?;
 
         // Set watch points based on variant
-        if self.is_variant(Self::VARIANT_A0) || self.is_variant(Self::VARIANT_A1) {
+        if self.is_variant(Self::VARIANT_A0)
+            || self.is_variant(Self::VARIANT_A1)
+            || self.is_variant(Self::VARIANT_A2)
+            || self.is_variant(Self::VARIANT_A5)
+        {
             interface.write_word_32(0xE000_1020, 0x4009_1036)?;
             interface.write_word_32(0xE000_1028, 0xF000_0412)?;
             interface.write_word_32(0xE000_1030, 0x4009_1040)?;
@@ -589,9 +573,9 @@ impl ArmDebugSequence for MCX {
         let mut assert_n_reset = || probe.swj_pins(n_reset, n_reset, 0);
         if can_read_pins {
             let start = Instant::now();
-            let timeout_occured = || start.elapsed() > Duration::from_millis(1000);
+            let timeout_occurred = || start.elapsed() > Duration::from_millis(1000);
 
-            while assert_n_reset()? & n_reset == 0 && !timeout_occured() {}
+            while assert_n_reset()? & n_reset == 0 && !timeout_occurred() {}
         } else {
             assert_n_reset()?;
             let recovery_time = if self.is_variant(Self::VARIANT_N0) {

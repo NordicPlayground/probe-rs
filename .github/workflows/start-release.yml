@@ -28,11 +28,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-release,cargo-semver-checks
-      # TODO: Libudev is required for semver checks for 0.31.0 and can be removed after.
-      - name: Install libudev (linux)
-        run: |
-          sudo apt update
-          sudo apt install -y libudev-dev
       - name: Install SSH
         run: |
           apt-get update -y && apt-get install openssh-client -y
@@ -66,7 +61,8 @@ jobs:
 
       - name: Bump versions
         run: |
-          cargo release version ${{ inputs.version }} --exclude probe-rs-mi --execute --verbose --no-confirm --allow-branch ${BRANCH_NAME}
+          # mi and rpc follow a separate versioning scheme
+          cargo release version ${{ inputs.version }} --exclude probe-rs-mi --exclude probe-rs-rpc --exclude probe-rs-rpc-client --execute --verbose --no-confirm --allow-branch ${BRANCH_NAME}
           cargo release replace --execute --verbose --no-confirm
           cargo release hook --execute --verbose --no-confirm
           cargo release commit --execute --verbose --no-confirm --sign-commit
@@ -100,10 +96,11 @@ jobs:
 
           - probe-rs
           - probe-rs-target
-          - rtthost
           - target-gen
           - probe-rs-tools
           - probe-rs-mi
+          - probe-rs-rpc
+          - probe-rs-rpc-client
           - probe-rs-debug"
         env:
           GH_TOKEN: ${{ secrets.GH_PAT }}

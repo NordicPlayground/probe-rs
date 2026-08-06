@@ -4,7 +4,7 @@
 
 use std::{num::NonZeroU32, time::SystemTime};
 
-use crate::{CoreInterface, Error, MemoryInterface, RegisterValue};
+use crate::{Core, CoreInterface, Error, MemoryInterface, RegisterValue};
 
 /// Indicates the operation the target would like the debugger to perform.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -130,6 +130,15 @@ impl UnknownCommandDetails {
 pub struct GetCommandLineRequest(Buffer);
 
 impl GetCommandLineRequest {
+    /// Address of the `block` argument the target passed to
+    /// `SYS_GET_CMDLINE`.
+    ///
+    /// Useful when transporting semihosting halt metadata out of band
+    /// (for example over RPC) without serializing the full request.
+    pub fn block_address(&self) -> u32 {
+        self.0.buffer_location
+    }
+
     /// Writes the command line to the target. You have to continue the core manually afterwards.
     pub fn write_command_line_to_target(
         &self,
@@ -199,10 +208,15 @@ impl CloseRequest {
 
 /// A request to write to the console
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
-pub struct WriteConsoleRequest(pub(crate) ZeroTerminatedString);
+pub struct WriteConsoleRequest(ZeroTerminatedString);
 impl WriteConsoleRequest {
+    /// Creates a new request to write to the console
+    pub fn new(address: u32, length: Option<u32>) -> Self {
+        Self(ZeroTerminatedString { address, length })
+    }
+
     /// Reads the string from the target
-    pub fn read(&self, core: &mut crate::Core<'_>) -> Result<String, Error> {
+    pub fn read(&self, core: &mut Core<'_>) -> Result<String, Error> {
         self.0.read(core)
     }
 }
@@ -222,7 +236,7 @@ impl WriteRequest {
     }
 
     /// Reads the buffer from the target
-    pub fn read(&self, core: &mut crate::Core<'_>) -> Result<Vec<u8>, Error> {
+    pub fn read(&self, core: &mut Core<'_>) -> Result<Vec<u8>, Error> {
         let mut buf = vec![0u8; self.len as usize];
         core.read(self.bytes as u64, &mut buf)?;
         Ok(buf)
@@ -254,11 +268,7 @@ impl ReadRequest {
     }
 
     /// Writes the buffer to the target
-    pub fn write_buffer_to_target(
-        &self,
-        core: &mut crate::Core<'_>,
-        buf: &[u8],
-    ) -> Result<(), Error> {
+    pub fn write_buffer_to_target(&self, core: &mut Core<'_>, buf: &[u8]) -> Result<(), Error> {
         assert!(buf.len() <= self.len as usize);
 
         if !buf.is_empty() {

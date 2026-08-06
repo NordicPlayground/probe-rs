@@ -1,13 +1,10 @@
 use super::FlashError;
-use crate::{
-    Target,
-    architecture::{arm, riscv},
-    core::Architecture,
-};
+use crate::{Target, architecture::riscv, core::Architecture};
 use probe_rs_target::{
     CoreType, Endian, FlashProperties, MemoryRegion, PageInfo, RamRegion, RawFlashAlgorithm,
     RegionMergeIterator, SectorInfo, TransferEncoding,
 };
+use std::collections::BTreeMap;
 use std::mem::size_of_val;
 
 /// A flash algorithm, which has been assembled for a specific
@@ -42,8 +39,8 @@ pub struct FlashAlgorithm {
     pub pc_blank_check: Option<u64>,
     /// Address of the (non-standard) `ReadFlash()` entry point. Optional.
     pub pc_read: Option<u64>,
-    /// Address of the (non-standard) `FlashSize()` entry point. Optional.
-    pub pc_flash_size: Option<u64>,
+    /// Names and absolute addresses of optional, vendor-specific entry points.
+    pub vendor_functions: BTreeMap<String, u64>,
     /// Initial value of the R9 register for calling flash algo entry points, which
     /// determines where the position-independent data resides.
     pub static_base: u64,
@@ -185,15 +182,21 @@ impl FlashAlgorithm {
     // Header for RISC-V Flash Algorithms
     const RISCV_FLASH_BLOB_HEADER: [u32; 2] = [riscv::assembly::EBREAK, riscv::assembly::EBREAK];
 
+    /// ARM breakpoint instruction (x2)
+    const ARM_ASSEMBLY_BKPT_T32: u32 = 0xBE00_BE00;
+    const ARM_ASSEMBLY_BKPT_A32: u32 = 0xE1200070;
+    /// ARM hlt instruction, Thumb2 (x2)
+    const ARM_ASSEMBLY_HLT: u32 = 0xBA80_BA80;
+
     // On ARMv8-A and -R, `BKPT` does not enter debug state, but the debug exception,
     // so use `HLT`.
     // For ARMv7 and ARMv8-M, `HLT` does not exist.
-    const ARM_FLASH_BLOB_HEADER_BKPT_T32_LE: [u32; 1] = [arm::assembly::BKPT_T32];
-    const ARM_FLASH_BLOB_HEADER_BKPT_T32_BE: [u32; 1] = [arm::assembly::BKPT_T32.swap_bytes()];
-    const ARM_FLASH_BLOB_HEADER_BKPT_A32_LE: [u32; 1] = [arm::assembly::BKPT_A32];
-    const ARM_FLASH_BLOB_HEADER_BKPT_A32_BE: [u32; 1] = [arm::assembly::BKPT_A32.swap_bytes()];
-    const ARM_FLASH_BLOB_HEADER_HLT_LE: [u32; 1] = [arm::assembly::HLT];
-    const ARM_FLASH_BLOB_HEADER_HLT_BE: [u32; 1] = [arm::assembly::HLT.swap_bytes()];
+    const ARM_FLASH_BLOB_HEADER_BKPT_T32_LE: [u32; 1] = [Self::ARM_ASSEMBLY_BKPT_T32];
+    const ARM_FLASH_BLOB_HEADER_BKPT_T32_BE: [u32; 1] = [Self::ARM_ASSEMBLY_BKPT_T32.swap_bytes()];
+    const ARM_FLASH_BLOB_HEADER_BKPT_A32_LE: [u32; 1] = [Self::ARM_ASSEMBLY_BKPT_A32];
+    const ARM_FLASH_BLOB_HEADER_BKPT_A32_BE: [u32; 1] = [Self::ARM_ASSEMBLY_BKPT_A32.swap_bytes()];
+    const ARM_FLASH_BLOB_HEADER_HLT_LE: [u32; 1] = [Self::ARM_ASSEMBLY_HLT];
+    const ARM_FLASH_BLOB_HEADER_HLT_BE: [u32; 1] = [Self::ARM_ASSEMBLY_HLT.swap_bytes()];
 
     const XTENSA_FLASH_BLOB_HEADER: [u32; 0] = [];
 
@@ -216,6 +219,7 @@ impl FlashAlgorithm {
             Self::algorithm_header(CoreType::Armv8m, Endian::Big),
             Self::algorithm_header(CoreType::Armv8m, Endian::Little),
             Self::algorithm_header(CoreType::Riscv, Endian::Little),
+            Self::algorithm_header(CoreType::Riscv64, Endian::Little),
             Self::algorithm_header(CoreType::Xtensa, Endian::Big),
             Self::algorithm_header(CoreType::Xtensa, Endian::Little),
         ];
@@ -231,7 +235,7 @@ impl FlashAlgorithm {
                     Endian::Big => &Self::ARM_FLASH_BLOB_HEADER_BKPT_T32_BE,
                 }
             }
-            CoreType::Armv7a => match endian {
+            CoreType::Armv7a | CoreType::Armv7r => match endian {
                 Endian::Little => &Self::ARM_FLASH_BLOB_HEADER_BKPT_A32_LE,
                 Endian::Big => &Self::ARM_FLASH_BLOB_HEADER_BKPT_A32_BE,
             },
@@ -239,7 +243,7 @@ impl FlashAlgorithm {
                 Endian::Little => &Self::ARM_FLASH_BLOB_HEADER_HLT_LE,
                 Endian::Big => &Self::ARM_FLASH_BLOB_HEADER_HLT_BE,
             },
-            CoreType::Riscv => &Self::RISCV_FLASH_BLOB_HEADER,
+            CoreType::Riscv | CoreType::Riscv64 => &Self::RISCV_FLASH_BLOB_HEADER,
             CoreType::Xtensa => &Self::XTENSA_FLASH_BLOB_HEADER,
         }
     }
@@ -439,7 +443,11 @@ impl FlashAlgorithm {
             pc_verify: raw.pc_verify.map(|v| code_start + v),
             pc_blank_check: raw.pc_blank_check.map(|v| code_start + v),
             pc_read: raw.pc_read.map(|v| code_start + v),
-            pc_flash_size: raw.pc_flash_size.map(|v| code_start + v),
+            vendor_functions: raw
+                .vendor_functions
+                .iter()
+                .map(|(name, addr)| (name.clone(), code_start + addr))
+                .collect(),
             static_base: code_start + raw.data_section_offset,
             stack_top,
             stack_size,
@@ -453,7 +461,7 @@ impl FlashAlgorithm {
     }
 
     /// Constructs a complete flash algorithm, choosing a suitable RAM region to run the algorithm.
-    pub(crate) fn assemble_from_raw_with_core(
+    pub fn assemble_from_raw_with_core(
         algo: &RawFlashAlgorithm,
         core_name: &str,
         target: &Target,

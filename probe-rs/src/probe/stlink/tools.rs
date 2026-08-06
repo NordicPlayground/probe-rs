@@ -1,10 +1,11 @@
 use crate::probe::DebugProbeInfo;
+use crate::probe::list::{ProbeListItem, usb_probe_accessibility};
 use crate::probe::stlink::StLinkFactory;
+use crate::probe::usb_util::to_hex;
 use nusb::MaybeFuture;
 
 use super::usb_interface::USB_PID_EP_MAP;
 use super::usb_interface::USB_VID;
-use std::fmt::Write;
 
 pub(super) fn is_stlink_device(device: &nusb::DeviceInfo) -> bool {
     // Check the VID/PID.
@@ -12,7 +13,7 @@ pub(super) fn is_stlink_device(device: &nusb::DeviceInfo) -> bool {
 }
 
 #[tracing::instrument(skip_all)]
-pub(super) fn list_stlink_devices() -> Vec<DebugProbeInfo> {
+pub(super) fn list_stlink_devices() -> Vec<ProbeListItem> {
     let devices = match nusb::list_devices().wait() {
         Ok(d) => d,
         Err(e) => {
@@ -24,10 +25,10 @@ pub(super) fn list_stlink_devices() -> Vec<DebugProbeInfo> {
     devices
         .filter(is_stlink_device)
         .map(|device| {
-            DebugProbeInfo::new(
+            let info = DebugProbeInfo::new(
                 format!(
                     "STLink {}",
-                    &USB_PID_EP_MAP[&device.product_id()].version_name
+                    USB_PID_EP_MAP[&device.product_id()].version_name
                 ),
                 device.vendor_id(),
                 device.product_id(),
@@ -35,7 +36,11 @@ pub(super) fn list_stlink_devices() -> Vec<DebugProbeInfo> {
                 &StLinkFactory,
                 None,
                 false,
-            )
+            );
+            ProbeListItem {
+                info,
+                accessibility: usb_probe_accessibility(&device),
+            }
         })
         .collect()
 }
@@ -46,10 +51,7 @@ pub(super) fn read_serial_number(device: &nusb::DeviceInfo) -> Option<String> {
         if s.len() < 24 {
             // Some STLink (especially V2) have their serial number stored as a 12 bytes binary string
             // containing non printable characters, so convert to a hex string to make them printable.
-            s.as_bytes().iter().fold(String::new(), |mut s, b| {
-                let _ = write!(s, "{b:02X}"); // Writing a String never fails
-                s
-            })
+            to_hex(s)
         } else {
             // Other STlink (especially V2-1) have their serial number already stored as a 24 characters
             // hex string so they don't need to be converted

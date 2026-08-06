@@ -1,5 +1,5 @@
-use crate::rpc::functions::flash::{FlashLayout, Operation, ProgressEvent};
-use crate::{FormatKind, FormatOptions};
+use probe_rs_rpc::flash::{FlashLayout, Operation, ProgressEvent};
+use probe_rs_rpc::format::{EspFlashFrequency, EspFlashMode, FormatKind, FormatOptions};
 
 use super::common_options::{BinaryDownloadOptions, LoadedProbeOptions, OperationError};
 use super::logging;
@@ -13,17 +13,37 @@ use colored::Colorize;
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use parking_lot::Mutex;
 use probe_rs::InstructionSet;
-use probe_rs::flashing::{BinOptions, ElfOptions, FlashError, FlashProgress, Format, IdfOptions};
+use probe_rs::flashing::{
+    BinLoader, BinOptions, ElfLoader, ElfOptions, FlashError, FlashProgress, HexLoader,
+    ImageLoader, Uf2Loader,
+};
 use probe_rs::{
-    Session,
+    Session, Target,
     flashing::{DownloadOptions, FileDownloadError, FlashLoader},
 };
+use probe_rs_espressif::image_format::IdfLoader;
 
 /// Performs the flash download with the given loader. Ensure that the loader has the data to load already stored.
 /// This function also manages the update and display of progress bars.
 pub fn run_flash_download(
     session: &mut Session,
     path: impl AsRef<Path>,
+    download_options: &BinaryDownloadOptions,
+    probe_options: &LoadedProbeOptions,
+    loader: FlashLoader,
+) -> Result<(), OperationError> {
+    run_flash_download_inner(
+        session,
+        path.as_ref(),
+        download_options,
+        probe_options,
+        loader,
+    )
+}
+
+fn run_flash_download_inner(
+    session: &mut Session,
+    path: &Path,
     download_options: &BinaryDownloadOptions,
     probe_options: &LoadedProbeOptions,
     loader: FlashLoader,
@@ -50,16 +70,20 @@ pub fn run_flash_download(
         {
             let mut flash_layout = FlashLayout::default();
             for phase_layout in phases {
-                flash_layout.merge_from(phase_layout.into());
+                flash_layout.merge_from(
+                    crate::rpc::functions::flash::convert::to_wire_flash_layout(phase_layout),
+                );
             }
 
             // Visualise flash layout to file if requested.
-            let visualizer = flash_layout.visualize();
+            let visualizer = crate::util::visualizer::visualize_flash_layout(&flash_layout);
             _ = visualizer.write_svg(path);
         }
 
         if let Some(ref pb) = pb {
-            ProgressEvent::from_library_event(event, |event| pb.handle(event));
+            crate::rpc::functions::flash::from_library_progress_event(event, |event| {
+                pb.handle(event)
+            });
         }
     });
 
@@ -75,7 +99,7 @@ pub fn run_flash_download(
                     source: Box::new(error),
                     target: Box::new(session.target().clone()),
                     target_spec: probe_options.chip(),
-                    path: path.as_ref().to_path_buf(),
+                    path: path.to_path_buf(),
                 });
             }
         }
@@ -90,7 +114,7 @@ pub fn run_flash_download(
                 source: Box::new(error),
                 target: Box::new(session.target().clone()),
                 target_spec: probe_options.chip(),
-                path: path.as_ref().to_path_buf(),
+                path: path.to_path_buf(),
             })?;
     }
 
@@ -106,6 +130,70 @@ pub fn run_flash_download(
     Ok(())
 }
 
+fn espflash_flash_frequency(freq: EspFlashFrequency) -> espflash::flasher::FlashFrequency {
+    match freq {
+        EspFlashFrequency::_12Mhz => espflash::flasher::FlashFrequency::_12Mhz,
+        EspFlashFrequency::_15Mhz => espflash::flasher::FlashFrequency::_15Mhz,
+        EspFlashFrequency::_16Mhz => espflash::flasher::FlashFrequency::_16Mhz,
+        EspFlashFrequency::_20Mhz => espflash::flasher::FlashFrequency::_20Mhz,
+        EspFlashFrequency::_24Mhz => espflash::flasher::FlashFrequency::_24Mhz,
+        EspFlashFrequency::_26Mhz => espflash::flasher::FlashFrequency::_26Mhz,
+        EspFlashFrequency::_30Mhz => espflash::flasher::FlashFrequency::_30Mhz,
+        EspFlashFrequency::_40Mhz => espflash::flasher::FlashFrequency::_40Mhz,
+        EspFlashFrequency::_48Mhz => espflash::flasher::FlashFrequency::_48Mhz,
+        EspFlashFrequency::_60Mhz => espflash::flasher::FlashFrequency::_60Mhz,
+        EspFlashFrequency::_80Mhz => espflash::flasher::FlashFrequency::_80Mhz,
+    }
+}
+
+fn espflash_flash_mode(mode: EspFlashMode) -> espflash::flasher::FlashMode {
+    match mode {
+        EspFlashMode::Qio => espflash::flasher::FlashMode::Qio,
+        EspFlashMode::Qout => espflash::flasher::FlashMode::Qout,
+        EspFlashMode::Dio => espflash::flasher::FlashMode::Dio,
+        EspFlashMode::Dout => espflash::flasher::FlashMode::Dout,
+    }
+}
+
+pub fn resolve_format_kind(kind: FormatKind, target: &Target) -> FormatKind {
+    kind.resolve_default_format(target.default_format.as_deref())
+}
+
+fn format_options_image_loader(options: &FormatOptions, target: &Target) -> Box<dyn ImageLoader> {
+    match resolve_format_kind(options.binary_format, target) {
+        FormatKind::Target => unreachable!(),
+        FormatKind::Bin => Box::new(BinLoader(BinOptions {
+            base_address: options.bin_options.base_address,
+            skip: options.bin_options.skip,
+        })),
+
+        FormatKind::Hex => Box::new(HexLoader),
+        FormatKind::Elf => Box::new(ElfLoader(ElfOptions {
+            skip_sections: options.elf_options.skip_section.clone(),
+        })),
+        FormatKind::Uf2 => Box::new(Uf2Loader),
+
+        FormatKind::Idf => Box::new(IdfLoader {
+            bootloader: options
+                .idf_options
+                .idf_bootloader
+                .as_ref()
+                .map(PathBuf::from),
+            partition_table: options
+                .idf_options
+                .idf_partition_table
+                .as_ref()
+                .map(PathBuf::from),
+            target_app_partition: options.idf_options.idf_target_app_partition.clone(),
+            flash_frequency: options
+                .idf_options
+                .idf_flash_freq
+                .map(espflash_flash_frequency),
+            flash_mode: options.idf_options.idf_flash_mode.map(espflash_flash_mode),
+        }),
+    }
+}
+
 /// Builds a new flash loader for the given target and path. This
 /// will check the path for validity and check what pages have to be
 /// flashed etc.
@@ -115,29 +203,8 @@ pub fn build_loader(
     format_options: FormatOptions,
     image_instruction_set: Option<InstructionSet>,
 ) -> Result<FlashLoader, FileDownloadError> {
-    let format = match format_options.to_format_kind(session.target()) {
-        FormatKind::Bin => Format::Bin(BinOptions {
-            base_address: format_options.bin_options.base_address,
-            skip: format_options.bin_options.skip,
-        }),
-        FormatKind::Hex => Format::Hex,
-        FormatKind::Elf => Format::Elf(ElfOptions {
-            skip_sections: format_options.elf_options.skip_section,
-        }),
-        FormatKind::Uf2 => Format::Uf2,
-        FormatKind::Idf => Format::Idf(IdfOptions {
-            bootloader: format_options.idf_options.idf_bootloader.map(PathBuf::from),
-            partition_table: format_options
-                .idf_options
-                .idf_partition_table
-                .map(PathBuf::from),
-            target_app_partition: format_options.idf_options.idf_target_app_partition,
-            flash_frequency: format_options.idf_options.idf_flash_freq.map(From::from),
-            flash_mode: format_options.idf_options.idf_flash_mode.map(From::from),
-        }),
-    };
-
-    probe_rs::flashing::build_loader(session, path, format, image_instruction_set)
+    let loader = format_options_image_loader(&format_options, session.target());
+    probe_rs::flashing::build_loader(session, path, loader, image_instruction_set)
 }
 
 #[derive(Default)]

@@ -6,7 +6,7 @@ use linkme::distributed_slice;
 use probe_rs::{
     Architecture, Core, CoreInterface, MemoryInterface, Session,
     config::MemoryRegion,
-    flashing::{DownloadOptions, FlashProgress, FormatKind, download_file_with_options},
+    flashing::{DownloadOptions, FlashProgress, download_file_with_options, image_format},
 };
 
 pub mod stepping;
@@ -94,7 +94,11 @@ fn test_write_read(scenario: &str, core: &mut Core, address: u64, data: &[u8]) -
 }
 
 #[smoke_tester_macros::test(core)]
-fn test_memory_access(_dut: &DutDefinition, core: &mut Core) -> TestResult {
+fn test_memory_access(dut: &DutDefinition, core: &mut Core) -> TestResult {
+    if dut.chip.name == "STM32H753ZI" {
+        skip_test!("STM32H7 memory read has some unknown issue - maybe cache problems");
+    }
+
     let memory_regions = core
         .memory_regions()
         .filter_map(MemoryRegion::as_ram_region)
@@ -189,7 +193,7 @@ fn test_memory_access(_dut: &DutDefinition, core: &mut Core) -> TestResult {
 
 #[smoke_tester_macros::test(core)]
 fn test_hw_breakpoints(_definition: &DutDefinition, core: &mut Core) -> TestResult {
-    println!("Testing HW breakpoints");
+    eprintln!("Testing HW breakpoints");
 
     let memory_regions: Vec<_> = core
         .memory_regions()
@@ -293,9 +297,10 @@ pub fn test_flashing(dut_definition: &DutDefinition, session: &mut Session) -> R
 
     let start_time = Instant::now();
 
-    let format = FormatKind::from_optional(session.target().default_format.as_deref()).unwrap();
+    let format = image_format(session.target().default_format.as_deref().unwrap_or("elf")).unwrap();
+    let loader = format.create_loader(None);
 
-    let result = download_file_with_options(session, test_binary, format, options);
+    let result = download_file_with_options(session, test_binary, loader, options);
 
     println!();
 

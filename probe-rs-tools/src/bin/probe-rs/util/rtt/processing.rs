@@ -7,11 +7,11 @@ use probe_rs::rtt::Error;
 use time::{OffsetDateTime, UtcOffset, macros::format_description};
 
 use std::{
-    fmt::{self, Write},
+    fmt::{self, Display, Write},
     sync::Arc,
 };
 
-use crate::util::rtt::DataFormat;
+use probe_rs_rpc::rtt_config::DataFormat;
 
 pub enum RttDecoder {
     String {
@@ -65,18 +65,14 @@ impl RttDecoder {
         matches!(self, RttDecoder::BinaryLE)
     }
 
-    pub async fn process(
-        &mut self,
-        buffer: &[u8],
-        collector: &mut impl RttDataHandler,
-    ) -> Result<(), Error> {
+    pub fn process<'d>(&mut self, buffer: &'d [u8]) -> Result<Option<ProcessedRttData<'d>>, Error> {
         // Prevent the format processors generating empty strings.
         if buffer.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
 
-        match self {
-            RttDecoder::BinaryLE => collector.on_binary_data(buffer).await,
+        let data = match self {
+            RttDecoder::BinaryLE => ProcessedRttData::Binary(buffer),
             RttDecoder::String {
                 timestamp_offset,
                 last_line_done,
@@ -88,13 +84,16 @@ impl RttDecoder {
                     last_line_done,
                     *show_timestamps,
                 )?;
-                collector.on_string_data(string).await
+                ProcessedRttData::String(string)
             }
             RttDecoder::Defmt { processor } => {
                 let string = processor.process(buffer)?;
-                collector.on_string_data(string).await
+
+                ProcessedRttData::String(string)
             }
-        }
+        };
+
+        Ok(Some(data))
     }
 
     fn process_string(
@@ -132,6 +131,26 @@ impl RttDecoder {
     }
 }
 
+pub enum ProcessedRttData<'a> {
+    String(String),
+    Binary(&'a [u8]),
+}
+
+impl Display for ProcessedRttData<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ProcessedRttData::String(s) => f.write_str(s),
+            ProcessedRttData::Binary(data) => {
+                for element in *data {
+                    // Width of 4 allows 0xFF to be printed.
+                    write!(f, "{element:#04x}").expect("Writing to String cannot fail");
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 pub trait RttDataHandler {
     async fn on_binary_data(&mut self, data: &[u8]) -> Result<(), Error> {
         let mut formatted_data = String::with_capacity(data.len() * 4);
@@ -152,10 +171,14 @@ pub struct DefmtStateInner {
 
 impl DefmtStateInner {
     pub fn try_from_bytes(buffer: &[u8]) -> Result<Option<Self>, Error> {
-        let Some(table) =
-            defmt_decoder::Table::parse(buffer).with_context(|| "Failed to parse defmt data")?
-        else {
-            return Ok(None);
+        let table = match defmt_decoder::Table::parse(buffer) {
+            // Parsing ok, still no table found.
+            Ok(None) => return Ok(None),
+            Ok(Some(table)) => table,
+            Err(e) => {
+                tracing::warn!("failed to parse defmt data: {}", e);
+                return Ok(None);
+            }
         };
 
         let locs = table

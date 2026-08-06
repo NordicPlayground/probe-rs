@@ -6,9 +6,9 @@ use anyhow::{Context, Result, anyhow};
 use colored::Colorize;
 use parking_lot::FairMutex;
 use probe_rs::config::Registry;
-use probe_rs::flashing::{BootInfo, FormatKind};
+use probe_rs::flashing::BootInfo;
 use probe_rs::probe::list::Lister;
-use probe_rs::rtt::ScanRegion;
+use probe_rs::rtt::{ScanRegion, find_rtt_control_block_in_raw_file};
 use probe_rs::{Session, probe::DebugProbeSelector};
 use std::ffi::OsString;
 use std::time::Instant;
@@ -27,10 +27,11 @@ use crate::util::cargo::target_instruction_set;
 use crate::util::common_options::{BinaryDownloadOptions, OperationError, ProbeOptions};
 use crate::util::flash::{build_loader, run_flash_download};
 use crate::util::logging::setup_logging;
-use crate::util::rtt::client::RttClient;
-use crate::util::rtt::{self, RttChannelConfig, RttConfig};
+use crate::util::rtt::{RttConfig, client::RttClient};
 use crate::util::{cargo::build_artifact, common_options::CargoOptions, logging};
-use crate::{Config, FormatOptions, parse_and_resolve_cli_args};
+use crate::{Config, parse_and_resolve_cli_args};
+use probe_rs_rpc::format::{FormatKind, FormatOptions};
+use probe_rs_rpc::rtt_config::RttChannelConfig;
 
 #[derive(Debug, clap::Parser)]
 #[clap(
@@ -48,7 +49,7 @@ struct CliOptions {
     ///
     /// When this is set, the default path is still considered, but the given file is considered
     /// with the highest priority.
-    #[arg(long)]
+    #[arg(long, env = "PROBE_RS_EMBED_CONFIG_FILE")]
     config_file: Option<String>,
     #[arg(long)]
     chip: Option<String>,
@@ -84,7 +85,7 @@ pub async fn main(args: Vec<OsString>, config: Config, offset: UtcOffset) {
     match main_try(args, config, offset).await {
         Ok(_) => (),
         Err(e) => {
-            // Ensure stderr is flushed before calling proces::exit,
+            // Ensure stderr is flushed before calling process::exit,
             // otherwise the process might panic, because it tries
             // to access stderr during shutdown.
             //
@@ -219,9 +220,10 @@ async fn main_try(args: Vec<OsString>, config: Config, offset: UtcOffset) -> Res
     let probe_options = ProbeOptions {
         chip,
         chip_description_path: None,
-        protocol: Some(config.probe.protocol),
+        protocol: config.probe.protocol,
         non_interactive: false,
         probe: selector,
+        cycle_power: false,
         speed: config.probe.speed,
         connect_under_reset: config.general.connect_under_reset,
         dry_run: false,
@@ -271,7 +273,8 @@ async fn main_try(args: Vec<OsString>, config: Config, offset: UtcOffset) -> Res
     };
 
     let format_options = FormatOptions::default();
-    let format = FormatKind::from(format_options.to_format_kind(session.target()));
+    let format =
+        crate::util::flash::resolve_format_kind(format_options.binary_format, session.target());
     let elf = if matches!(format, FormatKind::Elf | FormatKind::Idf) {
         Some(fs::read(&path)?)
     } else {
@@ -279,10 +282,11 @@ async fn main_try(args: Vec<OsString>, config: Config, offset: UtcOffset) -> Res
     };
 
     let scan = if let Some(ref elf) = elf {
-        match rtt::get_rtt_symbol_from_bytes(elf) {
-            Ok(address) => ScanRegion::Exact(address),
+        if let Ok(Some(addr)) = find_rtt_control_block_in_raw_file(elf) {
+            ScanRegion::Exact(addr)
+        } else {
             // Do not scan the memory for the control block.
-            _ => ScanRegion::Ranges(vec![]),
+            ScanRegion::Ranges(vec![])
         }
     } else {
         ScanRegion::Ram
@@ -325,7 +329,7 @@ async fn main_try(args: Vec<OsString>, config: Config, offset: UtcOffset) -> Res
                 vector_table_addr, ..
             } => {
                 // core should be already reset and halt by this point.
-                session.prepare_running_on_ram(vector_table_addr)?;
+                session.prepare_running_on_ram(vector_table_addr, core_id)?;
             }
             BootInfo::Other => {
                 // reset the core to leave it in a consistent state after flashing
@@ -510,6 +514,7 @@ fn create_rtt_config(config: &config::Config) -> RttConfig {
     let mut rtt_config = RttConfig {
         enabled: true,
         channels: vec![],
+        default_config: Default::default(),
     };
 
     // Make sure our defaults are the same as the ones intended in the config struct.
@@ -552,4 +557,19 @@ fn create_rtt_config(config: &config::Config) -> RttConfig {
     }
 
     rtt_config
+}
+
+#[cfg(test)]
+mod test {
+    use super::CliOptions;
+
+    /// clap finds duplicate argument names only in a debug build, and only when it
+    /// builds the command. Release builds accept a duplicate and give one of the
+    /// two arguments to both fields.
+    #[test]
+    fn cli_is_valid() {
+        use clap::CommandFactory;
+
+        CliOptions::command().debug_assert();
+    }
 }

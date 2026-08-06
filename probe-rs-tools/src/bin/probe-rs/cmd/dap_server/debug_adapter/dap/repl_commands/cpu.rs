@@ -1,19 +1,16 @@
 use crate::cmd::dap_server::{
-    DebuggerError,
-    debug_adapter::{
-        dap::{
-            adapter::DebugAdapter,
-            core_status::DapStatus,
-            dap_types::{EvaluateArguments, Response},
-            repl_commands::{REPL_COMMANDS, ReplCommand},
-        },
-        protocol::ProtocolAdapter,
+    backend::rpc::RpcBackend,
+    debug_adapter::dap::{
+        adapter::DebugAdapter,
+        core_status::DapStatus,
+        dap_types::EvaluateArguments,
+        repl_commands::{EvalResponse, EvalResult, REPL_COMMANDS, ReplCommand, async_fn},
     },
-    server::core_data::CoreHandle,
+    server::core_data::CoreData,
 };
-
 use linkme::distributed_slice;
 use probe_rs::{CoreStatus, HaltReason};
+use probe_rs_debug::SteppingMode;
 
 #[distributed_slice(REPL_COMMANDS)]
 static CONTINUE: ReplCommand = ReplCommand {
@@ -22,7 +19,7 @@ static CONTINUE: ReplCommand = ReplCommand {
     requires_target_halted: true,
     sub_commands: &[],
     args: &[],
-    handler: r#continue,
+    handler: async_fn!(continue_repl),
 };
 
 #[distributed_slice(REPL_COMMANDS)]
@@ -32,7 +29,7 @@ static RESET: ReplCommand = ReplCommand {
     requires_target_halted: false,
     sub_commands: &[],
     args: &[],
-    handler: reset,
+    handler: async_fn!(reset_repl),
 };
 
 #[distributed_slice(REPL_COMMANDS)]
@@ -42,69 +39,46 @@ static STEP: ReplCommand = ReplCommand {
     requires_target_halted: true,
     sub_commands: &[],
     args: &[],
-    handler: step,
+    handler: async_fn!(step_repl),
 };
 
-fn r#continue(
-    target_core: &mut CoreHandle<'_>,
-    _: &str,
-    _: &EvaluateArguments,
-    _: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
-    target_core.core.run()?;
-    Ok(Response {
-        command: "continue".to_string(),
-        success: true,
-        message: Some(CoreStatus::Running.short_long_status(None).1),
-        type_: "response".to_string(),
-        request_seq: 0,
-        seq: 0,
-        body: None,
-    })
+async fn continue_repl<'a>(
+    backend: &'a mut RpcBackend,
+    core_data: &'a mut CoreData,
+    _command_arguments: &'a str,
+    _evaluate_arguments: &'a EvaluateArguments,
+    adapter: &'a mut DebugAdapter,
+) -> EvalResult {
+    adapter.continue_impl_async(backend, core_data).await?;
+    Ok(EvalResponse::Message(String::new()))
 }
 
-fn reset(
-    target_core: &mut CoreHandle<'_>,
-    _: &str,
-    _: &EvaluateArguments,
-    _: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
-    let core_info = target_core.reset_and_halt()?;
-
-    Ok(Response {
-        command: "pause".to_string(),
-        success: true,
-        message: Some(
-            CoreStatus::Halted(HaltReason::Request)
-                .short_long_status(Some(core_info.pc))
-                .1,
-        ),
-        type_: "response".to_string(),
-        request_seq: 0,
-        seq: 0,
-        body: None,
-    })
+async fn reset_repl<'a>(
+    backend: &'a mut RpcBackend,
+    core_data: &'a mut CoreData,
+    _command_arguments: &'a str,
+    _evaluate_arguments: &'a EvaluateArguments,
+    adapter: &'a mut DebugAdapter,
+) -> EvalResult {
+    adapter
+        .reset_and_halt_core_async(backend, core_data)
+        .await?;
+    Ok(EvalResponse::Message(String::new()))
 }
 
-fn step(
-    target_core: &mut CoreHandle<'_>,
-    _: &str,
-    _: &EvaluateArguments,
-    _: &mut DebugAdapter<dyn ProtocolAdapter + '_>,
-) -> Result<Response, DebuggerError> {
-    let core_info = target_core.core.step()?;
-
-    Ok(Response {
-        command: "pause".to_string(),
-        success: true,
-        message: Some(
-            CoreStatus::Halted(HaltReason::Request)
-                .short_long_status(Some(core_info.pc))
-                .1,
-        ),
-        type_: "response".to_string(),
-        request_seq: 0,
-        seq: 0,
-        body: None,
-    })
+async fn step_repl<'a>(
+    backend: &'a mut RpcBackend,
+    core_data: &'a mut CoreData,
+    _command_arguments: &'a str,
+    _evaluate_arguments: &'a EvaluateArguments,
+    adapter: &'a mut DebugAdapter,
+) -> EvalResult {
+    let pc = adapter
+        .step_impl_async(SteppingMode::StepInstruction, backend, core_data)
+        .await?;
+    Ok(EvalResponse::Message(
+        CoreStatus::Halted(HaltReason::Request)
+            .short_long_status(Some(pc))
+            .1,
+    ))
 }

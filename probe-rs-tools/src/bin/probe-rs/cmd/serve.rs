@@ -14,20 +14,61 @@ use axum::{
     routing::{any, get},
 };
 use base64::{Engine, engine::general_purpose::STANDARD};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use postcard_rpc::server::WireRxErrorKind;
 use probe_rs::probe::list::Lister;
+use probe_rs_rpc::transport::{frame, websocket::WebsocketRx};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 use tokio::task::LocalSet;
 use tokio_util::bytes::Bytes;
 
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::{fmt::Write, sync::Arc};
-
-use crate::rpc::{
-    functions::{ProbeAccess, RpcApp},
-    transport::websocket::{AxumWebsocketTx, WebsocketRx},
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
 };
+
+use crate::{
+    rpc::functions::{ProbeAccess, RpcApp},
+    util::pwr,
+};
+
+// Sends length-prefixed binary messages to a websocket stream
+pub struct AxumWebsocketTx<S> {
+    writer: S,
+}
+impl<S> AxumWebsocketTx<S> {
+    pub fn new(writer: S) -> Self {
+        Self { writer }
+    }
+}
+
+impl<S> Sink<Vec<u8>> for AxumWebsocketTx<S>
+where
+    S: Sink<ws::Message> + Unpin,
+{
+    type Error = S::Error;
+
+    fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.writer.poll_ready_unpin(cx)
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, msg: Vec<u8>) -> Result<(), Self::Error> {
+        self.writer
+            .start_send_unpin(ws::Message::Binary(frame(&msg).freeze()))
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.writer.poll_flush_unpin(cx)
+    }
+
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.writer.poll_close_unpin(cx)
+    }
+}
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,6 +76,25 @@ pub(crate) struct ServerConfig {
     pub users: Vec<ServerUser>,
     pub address: Option<String>,
     pub port: Option<u16>,
+    pub cycle_power: bool,
+}
+
+impl ServerConfig {
+    #[cfg(unix)]
+    pub fn socket_path(&self) -> Option<&str> {
+        self.address
+            .as_ref()
+            .and_then(|addr| addr.strip_prefix("socket://"))
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        #[cfg(unix)]
+        if self.socket_path().is_some() && self.port.is_some() {
+            tracing::warn!("Port has no meaning for a Unix socket, it will be ignored.");
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,10 +152,25 @@ pub struct Cmd {}
 
 impl Cmd {
     pub async fn run(self, config: ServerConfig) -> anyhow::Result<()> {
+        config.validate()?;
+
         if config.users.is_empty() {
             tracing::warn!("No users configured.");
         }
 
+        if config.cycle_power {
+            pwr::power_enable().await?;
+        }
+
+        #[cfg(unix)]
+        if let Some(socket_path) = config.socket_path() {
+            return self.run_unix(&PathBuf::from(socket_path), config).await;
+        }
+
+        self.run_tcp(config).await
+    }
+
+    async fn run_tcp(self, config: ServerConfig) -> anyhow::Result<()> {
         let address = config.address.as_deref().unwrap_or("0.0.0.0");
         let port = config.port.unwrap_or(3000);
 
@@ -134,6 +209,33 @@ impl Cmd {
 
         Ok(())
     }
+
+    #[cfg(unix)]
+    async fn run_unix(self, socket_path: &PathBuf, _config: ServerConfig) -> anyhow::Result<()> {
+        use std::fs::{metadata, set_permissions};
+        use std::os::unix::fs::PermissionsExt;
+        use tokio::net::UnixListener;
+
+        if socket_path.exists() {
+            tracing::info!("removing existing unix socket for server");
+            std::fs::remove_file(socket_path)?;
+        }
+
+        let listener = UnixListener::bind(socket_path)?;
+
+        let mut perms = metadata(socket_path)?.permissions();
+        perms.set_mode(0o660);
+        set_permissions(socket_path, perms)?;
+
+        tracing::info!("listening on {}", socket_path.display());
+
+        loop {
+            let (stream, _) = listener.accept().await?;
+
+            // Spawn a new task for each connection
+            tokio::spawn(handle_unix_rpc(stream));
+        }
+    }
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, state: State<Arc<ServerState>>) -> impl IntoResponse {
@@ -161,6 +263,8 @@ async fn ws_handler(ws: WebSocketUpgrade, state: State<Arc<ServerState>>) -> imp
 
     response
 }
+
+static SERVER_DEPTH: usize = 16;
 
 /// Actual websocket state machine (one will be spawned per connection on the local set)
 async fn handle_socket(socket: WebSocket, challenge: String, state: Arc<ServerState>) {
@@ -199,7 +303,7 @@ async fn handle_socket(socket: WebSocket, challenge: String, state: Arc<ServerSt
 
     tracing::info!("User {} connected", user.name);
 
-    let (mut server, tx, mut rx) = RpcApp::create_server(16, user.access.clone());
+    let (mut server, tx, mut rx) = RpcApp::create_server(SERVER_DEPTH, user.access.clone());
 
     // Connect the server's channels to the websocket connection
     let sender = async {
@@ -216,6 +320,51 @@ async fn handle_socket(socket: WebSocket, challenge: String, state: Arc<ServerSt
             tx.send(msg.map_err(|_| WireRxErrorKind::Other))
                 .await
                 .unwrap();
+        }
+    };
+
+    tokio::select! {
+        _ = server.run() => tracing::warn!("Server stopped"),
+        _ = sender => tracing::warn!("Server sender stopped"),
+        _ = receiver => tracing::info!("Client disconnected"),
+    }
+}
+
+#[cfg(unix)]
+async fn handle_unix_rpc(stream: tokio::net::UnixStream) {
+    use probe_rs_rpc::transport::memory::{PostcardReceiver, PostcardSender};
+    use probe_rs_rpc::transport::unix::{UnixStreamRx, UnixStreamTx};
+
+    tracing::info!("Unix socket client connected");
+
+    let (reader, writer) = stream.into_split();
+    let (mut server, tx, mut rx) = RpcApp::create_server(SERVER_DEPTH, ProbeAccess::All);
+
+    // Connect the server's channels to the unix socket connection
+    let sender = async {
+        let writer = UnixStreamTx::new(writer);
+
+        // Send messages from the server to the client.
+        while let Some(msg) = rx.recv().await {
+            if writer.send(msg).await.is_err() {
+                tracing::error!("Failed to send msg to unix socket, terminating sender loop.");
+                break;
+            }
+        }
+    };
+
+    let receiver = async {
+        let mut reader = UnixStreamRx::new(reader);
+
+        // Forward messages from the client to the server.
+        loop {
+            let msg = reader.receive().await;
+            if tx.send(msg).await.is_err() {
+                tracing::error!(
+                    "Failed to forward msg from unix socket, terminating receiver loop."
+                );
+                break;
+            }
         }
     };
 

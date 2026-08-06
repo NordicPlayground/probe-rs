@@ -12,12 +12,12 @@ use crate::{
 use super::memory::ArmMemoryInterface;
 
 pub mod armv6m;
-pub mod armv7a;
+pub mod armv7ar;
 pub mod armv7m;
 pub mod armv8a;
 pub mod armv8m;
 
-pub(crate) mod armv7a_debug_regs;
+pub(crate) mod armv7ar_debug_regs;
 pub(crate) mod armv8a_debug_regs;
 pub(crate) mod cortex_m;
 pub(crate) mod instructions;
@@ -143,6 +143,13 @@ pub struct CortexMState {
 
     /// The semihosting command that was decoded at the current program counter
     semihosting_command: Option<SemihostingCommand>,
+
+    /// Set after issuing `C_STEP` until `CoreInterface::status()` reads the halt from DFSR.
+    /// Cortex-M DFSR.HALTED is set for halt requests from both `C_HALT` and `C_STEP`, but it cannot
+    /// be determined from registers alone which was the cause.
+    /// `pending_step` tracks whether we're waiting for a step so that `CoreInterface::status()`
+    /// can return `HaltReason::Step` instead of `HaltReason::Request` if a step was pending.
+    pending_step: bool,
 }
 
 impl CortexMState {
@@ -153,6 +160,30 @@ impl CortexMState {
             current_state: CoreStatus::Unknown,
             fp_present: false,
             semihosting_command: None,
+            pending_step: false,
+        }
+    }
+
+    pub(crate) fn begin_step(&mut self) {
+        self.pending_step = true;
+    }
+
+    pub(crate) fn clear_pending_step(&mut self) {
+        self.pending_step = false;
+    }
+
+    /// Apply step context to a halt reason read from DFSR.
+    pub(crate) fn resolve_halt_reason(&mut self, reason: HaltReason) -> HaltReason {
+        if !self.pending_step {
+            return reason;
+        }
+
+        self.pending_step = false;
+
+        if reason == HaltReason::Request {
+            HaltReason::Step
+        } else {
+            reason
         }
     }
 
@@ -165,11 +196,11 @@ impl CortexMState {
     }
 }
 
-/// The state cache of a Cortex-A core.
+/// The state cache of a Cortex-A/R core.
 ///
 /// This state is used internally to not having to poll the core constantly.
 #[derive(Debug)]
-pub struct CortexAState {
+pub struct CortexARState {
     initialized: bool,
 
     current_state: CoreStatus,
@@ -181,9 +212,12 @@ pub struct CortexAState {
 
     // Number of floating point registers
     fp_reg_count: usize,
+
+    // Cached semihosting command (for A/R-profile semihosting)
+    pub(crate) semihosting_command: Option<SemihostingCommand>,
 }
 
-impl CortexAState {
+impl CortexARState {
     pub(crate) fn new() -> Self {
         Self {
             initialized: false,
@@ -191,6 +225,7 @@ impl CortexAState {
             is_64_bit: false,
             register_cache: vec![],
             fp_reg_count: 0,
+            semihosting_command: None,
         }
     }
 

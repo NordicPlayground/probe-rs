@@ -2,115 +2,26 @@ use std::time::Duration;
 
 use anyhow::Context;
 use postcard_rpc::{header::VarHeader, server::Sender};
-use postcard_schema::Schema;
-use probe_rs::{BreakpointCause, Core, HaltReason, Session, semihosting::SemihostingCommand};
-use serde::{Deserialize, Serialize};
-
-use crate::{
-    rpc::{
-        Key,
-        functions::{
-            ListTestsEndpoint, RpcResult, RpcSpawnContext, RunTestEndpoint, WireTxImpl,
-            flash::BootInfo,
-            monitor::{MonitorSender, RttPoller, SemihostingEvent},
-        },
-        utils::{
-            run_loop::{ReturnReason, RunLoop},
-            semihosting::{SemihostingFileManager, SemihostingOptions},
-        },
-    },
-    util::rtt::client::RttClient,
+use probe_rs::{BreakpointCause, Core, HaltReason, semihosting::SemihostingCommand};
+use probe_rs_rpc::test::{
+    ListTestsRequest, RunTestRequest, Test, TestDefinitions, TestKickoffRequest,
+    TestKickoffResponse, TestOutcome, TestResult, Tests,
 };
 
-#[derive(Debug, Serialize, Deserialize, Schema)]
-pub struct Tests {
-    pub version: u32,
-    pub tests: Vec<Test>,
-}
-
-impl From<TestDefinitions> for Tests {
-    fn from(def: TestDefinitions) -> Self {
-        Self {
-            version: def.version,
-            tests: def.tests.into_iter().map(Test::from).collect(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct TestDefinitions {
-    pub version: u32,
-    pub tests: Vec<TestDefinition>,
-}
-
-#[derive(PartialEq, Debug, Clone, Copy, Serialize, Deserialize, Schema)]
-pub enum TestOutcome {
-    Panic,
-    Pass,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Schema, PartialEq)]
-pub struct Test {
-    pub name: String,
-    pub expected_outcome: TestOutcome,
-    pub ignored: bool,
-    pub timeout: Option<u32>,
-    pub address: Option<u32>,
-}
-
-impl From<TestDefinition> for Test {
-    fn from(def: TestDefinition) -> Self {
-        Self {
-            name: def.name,
-            expected_outcome: def.expected_outcome,
-            ignored: def.ignored,
-            timeout: def.timeout,
-            address: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct TestDefinition {
-    pub name: String,
-    #[serde(
-        rename = "should_panic",
-        deserialize_with = "outcome_from_should_panic"
-    )]
-    pub expected_outcome: TestOutcome,
-    pub ignored: bool,
-    pub timeout: Option<u32>,
-}
-
-fn outcome_from_should_panic<'de, D>(deserializer: D) -> Result<TestOutcome, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let should_panic = bool::deserialize(deserializer)?;
-    Ok(if should_panic {
-        TestOutcome::Panic
-    } else {
-        TestOutcome::Pass
-    })
-}
-
-#[derive(Serialize, Deserialize, Schema)]
-pub enum TestResult {
-    Success,
-    Failed(String),
-    Cancelled,
-}
-
-#[derive(Serialize, Deserialize, Schema)]
-pub struct ListTestsRequest {
-    pub sessid: Key<Session>,
-    pub boot_info: BootInfo,
-    /// RTT client if used.
-    pub rtt_client: Option<Key<RttClient>>,
-    pub semihosting_options: SemihostingOptions,
-}
-
-pub type ListTestsResponse = RpcResult<Tests>;
+use crate::rpc::{
+    functions::{
+        RpcContext, RpcSpawnContext, WireTxImpl,
+        convert::lift,
+        monitor::{MonitorSender, RttPoller},
+    },
+    utils::{
+        run_loop::{ReturnReason, RunLoop, VectorCatchConfig},
+        semihosting::SemihostingFileManager,
+    },
+};
+use probe_rs_rpc::monitor::SemihostingEvent;
+use probe_rs_rpc::semihosting_options::SemihostingOptions;
+use probe_rs_rpc::{ListTestsEndpoint, RunTestEndpoint};
 
 pub async fn list_tests(
     mut ctx: RpcSpawnContext,
@@ -121,7 +32,7 @@ pub async fn list_tests(
     let resp = ctx
         .run_blocking::<MonitorSender, _, _, _>(request, list_tests_impl)
         .await
-        .map_err(Into::into);
+        .map_err(crate::rpc::functions::convert::rpc_error_anyhow);
 
     sender
         .reply::<ListTestsEndpoint>(header.seq_no, &resp)
@@ -139,11 +50,10 @@ fn list_tests_impl(
         sender.send_semihosting_event(event).unwrap()
     });
 
-    let mut rtt_client = request
+    let core_id = request
         .rtt_client
-        .map(|rtt_client| ctx.object_mut_blocking(rtt_client));
-
-    let core_id = rtt_client.as_ref().map(|rtt| rtt.core_id()).unwrap_or(0);
+        .map(|rtt_client| ctx.object_mut_blocking(rtt_client).core_id())
+        .unwrap_or(0);
 
     let mut run_loop = RunLoop {
         core_id,
@@ -152,11 +62,15 @@ fn list_tests_impl(
 
     {
         let mut session = shared_session.session_blocking();
-        request.boot_info.prepare(&mut session, run_loop.core_id)?;
+        crate::rpc::functions::flash::prepare_boot_info(
+            &request.boot_info,
+            &mut session,
+            run_loop.core_id,
+        )?;
     }
 
-    let poller = rtt_client.as_deref_mut().map(|client| RttPoller {
-        rtt_client: client,
+    let poller = request.rtt_client.map(|client| RttPoller {
+        rtt_client: shared_session.object_storage().cell(client),
         clear_control_block: true,
         sender: |message| {
             sender
@@ -167,8 +81,12 @@ fn list_tests_impl(
 
     match run_loop.run_until(
         &shared_session,
-        true,
-        true,
+        VectorCatchConfig {
+            catch_hardfault: true,
+            catch_reset: true,
+            catch_svc: true,
+            catch_hlt: true,
+        },
         poller,
         Some(Duration::from_secs(5)),
         |halt_reason, core| list_handler.handle_halt(halt_reason, core),
@@ -187,17 +105,6 @@ fn list_tests_impl(
     }
 }
 
-#[derive(Serialize, Deserialize, Schema)]
-pub struct RunTestRequest {
-    pub sessid: Key<Session>,
-    pub test: Test,
-    /// RTT client if used.
-    pub rtt_client: Option<Key<RttClient>>,
-    pub semihosting_options: SemihostingOptions,
-}
-
-pub type RunTestResponse = RpcResult<TestResult>;
-
 pub async fn run_test(
     mut ctx: RpcSpawnContext,
     header: VarHeader,
@@ -207,7 +114,7 @@ pub async fn run_test(
     let resp = ctx
         .run_blocking::<MonitorSender, _, _, _>(request, run_test_impl)
         .await
-        .map_err(Into::into);
+        .map_err(crate::rpc::functions::convert::rpc_error_anyhow);
 
     sender
         .reply::<RunTestEndpoint>(header.seq_no, &resp)
@@ -227,11 +134,10 @@ fn run_test_impl(
 
     let shared_session = ctx.shared_session(request.sessid);
 
-    let mut rtt_client = request
+    let core_id = request
         .rtt_client
-        .map(|rtt_client| ctx.object_mut_blocking(rtt_client));
-
-    let core_id = rtt_client.as_ref().map(|rtt| rtt.core_id()).unwrap_or(0);
+        .map(|rtt_client| ctx.object_mut_blocking(rtt_client).core_id())
+        .unwrap_or(0);
 
     {
         let mut session = shared_session.session_blocking();
@@ -250,8 +156,8 @@ fn run_test_impl(
         cancellation_token: ctx.cancellation_token(),
     };
 
-    let poller = rtt_client.as_deref_mut().map(|client| RttPoller {
-        rtt_client: client,
+    let poller = request.rtt_client.map(|client| RttPoller {
+        rtt_client: shared_session.object_storage().cell(client),
         clear_control_block: true,
         sender: |message| {
             sender
@@ -262,8 +168,12 @@ fn run_test_impl(
 
     match run_loop.run_until(
         &shared_session,
-        true,
-        true,
+        VectorCatchConfig {
+            catch_hardfault: true,
+            catch_reset: true,
+            catch_svc: true,
+            catch_hlt: true,
+        },
         poller,
         Some(timeout),
         |halt_reason, core| run_handler.handle_halt(halt_reason, core),
@@ -280,6 +190,37 @@ fn run_test_impl(
             anyhow::bail!("The target locked up while running the test.")
         }
     }
+}
+
+// -- test kickoff (DAP REPL `test run`) --------------------------------------
+
+/// Kick off a single embedded-test case from the DAP REPL: run the core until
+/// it halts on the `GetCommandLine` semihosting call, write the test address
+/// as the command line, then resume. The subsequent test run is driven by
+/// the DAP poll loop.
+pub async fn test_kickoff(
+    ctx: &mut RpcContext,
+    _header: VarHeader,
+    request: TestKickoffRequest,
+) -> TestKickoffResponse {
+    use probe_rs::CoreStatus;
+
+    let mut session = ctx.session(request.sessid).await;
+    let mut core = lift(session.core(request.core as usize))?;
+
+    lift(core.run())?;
+    lift(core.wait_for_core_halted(Duration::from_secs(1)))?;
+
+    let CoreStatus::Halted(HaltReason::Breakpoint(BreakpointCause::Semihosting(
+        SemihostingCommand::GetCommandLine(cmd),
+    ))) = lift(core.status())?
+    else {
+        Err("Could not start test: target did not halt on GetCommandLine")?
+    };
+
+    lift(cmd.write_command_line_to_target(&mut core, &format!("run_addr {}", request.address)))?;
+    lift(core.run())?;
+    Ok(())
 }
 
 struct ListEventHandler<F: FnMut(SemihostingEvent)> {
@@ -394,7 +335,7 @@ impl<F: FnMut(SemihostingEvent)> RunEventHandler<F> {
             HaltReason::Breakpoint(BreakpointCause::Semihosting(cmd)) => cmd,
             // Exception occurred (e.g. hardfault) => Abort testing altogether
             reason => anyhow::bail!(
-                "The CPU halted unexpectedly: {reason:?}. Test should signal failure via a panic handler that calls `semihosting::proces::abort()` instead",
+                "The CPU halted unexpectedly: {reason:?}. Test should signal failure via a panic handler that calls `semihosting::process::abort()` instead",
             ),
         };
 

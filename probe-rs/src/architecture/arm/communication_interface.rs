@@ -113,6 +113,7 @@ pub fn read_chip_info_from_rom_table(
 }
 
 // TODO: Rename trait!
+/// Support for sending raw sequences via the probe.
 pub trait SwdSequence {
     /// Corresponds to the DAP_SWJ_Sequence function from the ARM Debug sequences
     fn swj_sequence(&mut self, bit_len: u8, bits: u64) -> Result<(), DebugProbeError>;
@@ -261,9 +262,8 @@ impl ArmDebugInterface for ArmCommunicationInterface {
         &mut self,
         access_port_address: &FullyQualifiedApAddress,
     ) -> Result<Box<dyn ArmMemoryInterface + '_>, ArmError> {
-        let memory_interface = match access_port_address.ap() {
-            ApAddress::V1(_) => Box::new(ADIMemoryInterface::new(self, access_port_address)?)
-                as Box<dyn ArmMemoryInterface + '_>,
+        let memory_interface: Box<dyn ArmMemoryInterface + '_> = match access_port_address.ap() {
+            ApAddress::V1(_) => Box::new(ADIMemoryInterface::new(self, access_port_address)?),
             ApAddress::V2(_) => ap::v2::new_memory_interface(self, access_port_address)?,
         };
         Ok(memory_interface)
@@ -354,11 +354,17 @@ impl ArmCommunicationInterface {
             if self.current_dp.is_none() {
                 sequence.debug_port_setup(&mut *self.probe_mut(), dp)?;
             } else {
-                // Try to switch to the new DP.
+                // Try the quick switch to the new DP first. This is expected to fail for
+                // some targets (e.g. RP2040 multidrop, which needs the dormant-state
+                // transition), so only fall back to the full setup here - if that also
+                // fails, the `?` below surfaces the real error.
                 if let Err(e) = sequence.debug_port_connect(&mut *self.probe_mut(), dp) {
-                    tracing::warn!("Failed to switch to DP {:x?}: {}", dp, e);
+                    tracing::debug!(
+                        "Quick connect to DP {:x?} failed ({e}), running full setup",
+                        dp
+                    );
 
-                    // Try the more involved debug_port_setup sequence, which also handles dormant mode.
+                    // The more involved debug_port_setup sequence also handles dormant mode.
                     sequence.debug_port_setup(&mut *self.probe_mut(), dp)?;
                 }
             }
@@ -471,9 +477,27 @@ impl ArmCommunicationInterface {
                 s.set_addr(((address >> 4) & 0xFFFF_FFFF) as u32);
                 s1.set_addr((address >> 32) as u32);
             }
-            _ => unreachable!(
-                "Did not expect to be called with {ap:x?}. This is a bug, please report it."
-            ),
+            (ApAddress::V1(port), SelectCache::DPv3(s, s1)) if *port == 0 => {
+                // Some externally generated target descriptions still model the root APv2
+                // memory interface as legacy AP index 0. Treat that as base address 0x0
+                // so DPv3/MINDP targets remain usable.
+                tracing::warn!(
+                    "DPv3 target was configured with legacy AP index 0; treating it as APv2 base 0x0"
+                );
+                let address = ap_register_address;
+                s.set_addr(((address >> 4) & 0xFFFF_FFFF) as u32);
+                s1.set_addr((address >> 32) as u32);
+            }
+            (ApAddress::V1(port), SelectCache::DPv3(_, _)) => {
+                return Err(ArmError::Other(format!(
+                    "DPv3 targets require APv2 addresses in target descriptions; got legacy AP index {port}. Use `ap: !v2 0x...`."
+                )));
+            }
+            (ApAddress::V2(_), SelectCache::DPv1(_)) => {
+                return Err(ArmError::Other(format!(
+                    "The selected target uses an APv2 address ({ap:x?}), but the connected debug port only supports the ADIv5 SELECT register. This usually means the wrong chip was selected for the attached target."
+                )));
+            }
         }
 
         if previous_select != dp_state.current_select {

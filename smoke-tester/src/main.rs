@@ -26,6 +26,8 @@ struct Opt {
 }
 
 fn main() -> Result<ExitCode> {
+    probe_rs_espressif::register_plugin();
+
     // nextest will get angry if logs are emitted outside of tests,
     // so we use a separate ENV variable here, so setting RUST_LOG doesn't affect this
     tracing_subscriber::fmt()
@@ -67,6 +69,18 @@ fn run_test(mut args: Arguments, definitions: &[DutDefinition]) -> Result<ExitCo
         //println!(" Chip:  {:?}", &definition.chip.name);
 
         let chip_name = definition.chip.name.clone();
+
+        // Verify the probe shows up when listing, and is reported as accessible.
+        {
+            let definition = definition.clone();
+            let trial = Trial::test("List probe", move || {
+                definition.assert_listed()?;
+                Ok(())
+            })
+            .with_kind(&chip_name);
+
+            trials.push(trial);
+        }
 
         for test in SESSION_TESTS {
             let session_definition = definition.clone();

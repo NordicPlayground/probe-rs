@@ -46,7 +46,7 @@ pub fn cmd_elf(
             )
         })?;
 
-        let mut family: ChipFamily = serde_yaml::from_reader(target_description)
+        let mut family: ChipFamily = yaml_serde::from_reader(target_description)
             .context("Failed to deserialize target description file")?;
 
         let Some(algorithm_to_update) = family
@@ -57,7 +57,7 @@ pub fn cmd_elf(
             bail!(
                 "Unable to update flash algorithm in target description file '{}'. Did not find an existing algorithm with name '{}'",
                 target_description_file.display(),
-                &algorithm.name
+                algorithm.name
             )
         };
 
@@ -129,6 +129,7 @@ pub fn cmd_elf(
                         range: 0x1_0000..0x2_0000,
                         cores: vec!["main".to_owned()],
                         name: None,
+                        is_alias: false,
                         access: Some(MemoryAccess {
                             boot: true,
                             ..Default::default()
@@ -280,13 +281,13 @@ fn compact_flash_algos(out: &mut ChipFamily) {
     });
 }
 
-/// Some optimizations to improve the readability of the `serde_yaml` output:
+/// Some optimizations to improve the readability of the `yaml_serde` output:
 /// - If `Option<T>` is `None`, it is serialized as `null` ... we want to omit it.
 /// - If `Vec<T>` is empty, it is serialized as `[]` ... we want to omit it.
-/// - `serde_yaml` serializes hex formatted integers as single quoted strings, e.g. '0x1234' ... we need to remove the single quotes so that it round-trips properly.
+/// - `yaml_serde` serializes hex formatted integers as single quoted strings, e.g. '0x1234' ... we need to remove the single quotes so that it round-trips properly.
 pub fn serialize_to_yaml_string(family: &ChipFamily) -> Result<String> {
     let family = compact(family);
-    let raw_yaml_string = serde_yaml::to_string(&family)?;
+    let raw_yaml_string = yaml_serde::to_string(&family)?;
 
     let mut yaml_string = String::with_capacity(raw_yaml_string.len());
     for reader_line in raw_yaml_string.lines() {
@@ -315,6 +316,7 @@ pub fn serialize_to_yaml_string(family: &ChipFamily) -> Result<String> {
                 "write: true",
                 "execute: true",
                 "stack_overflow_check: true",
+                "rtt_poll_interval: 20",
             ];
             if trim_nondefault.contains(&trimmed_line) {
                 // Skip the line
@@ -374,11 +376,13 @@ mod test {
             cores: vec!["main".to_owned()],
             name: Some(String::from("SRAM")),
             access: Some(MemoryAccess::default()),
+            is_alias: false,
         }));
         chip.memory_map.push(MemoryRegion::Ram(RamRegion {
             range: 0x20004000..0x20008000,
             cores: vec!["main".to_owned()],
             name: Some(String::from("CCMRAM")),
+            is_alias: false,
             access: Some(MemoryAccess {
                 boot: false,
                 read: true,

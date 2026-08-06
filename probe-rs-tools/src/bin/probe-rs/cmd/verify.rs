@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
-use crate::FormatOptions;
-use crate::rpc::client::RpcClient;
-use crate::rpc::functions::flash::VerifyResult;
 use crate::util::cli;
 use crate::util::common_options::ProbeOptions;
 use crate::util::flash::CliProgressBars;
+use probe_rs_rpc::flash::VerifyResult;
+use probe_rs_rpc::format::FormatOptions;
+use probe_rs_rpc_client::RpcClient;
 
 #[derive(clap::Parser)]
 pub struct Cmd {
@@ -28,7 +28,7 @@ pub struct Cmd {
 
 impl Cmd {
     pub async fn run(self, client: RpcClient) -> anyhow::Result<()> {
-        let session = cli::attach_probe(&client, self.probe_options, false).await?;
+        let session = cli::attach_probe(&client, self.probe_options, None, false).await?;
 
         let pb = if self.disable_progressbars {
             None

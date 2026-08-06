@@ -262,7 +262,7 @@ fn wait_for_stop_after_reset(memory: &mut dyn ArmMemoryInterface) -> Result<(), 
 
     thread::sleep(Duration::from_millis(10));
 
-    if memory.generic_status()?.DeviceEn {
+    if memory.generic_status()?.DeviceEn() {
         let dp = memory.fully_qualified_address().dp();
         enable_debug_mailbox(memory.get_arm_debug_interface()?, dp)?;
     }
@@ -338,7 +338,7 @@ fn enable_debug_mailbox(interface: &mut dyn DapAccess, dp: DpAddress) -> Result<
 
     let _ = interface.read_raw_ap_register(&ap, 8)?;
 
-    tracing::info!("LPC55xx connect srcipt end");
+    tracing::info!("LPC55xx connect script end");
     Ok(())
 }
 
@@ -434,14 +434,14 @@ impl MIMXRT5xxS {
         let ap = memory.fully_qualified_address();
         let dp = ap.dp();
         let start = Instant::now();
-        while !memory.generic_status()?.DeviceEn && start.elapsed() < Duration::from_millis(300) {
+        while !memory.generic_status()?.DeviceEn() && start.elapsed() < Duration::from_millis(300) {
             // Wait for either condition
         }
 
         let enabled_mailbox =
             self.enable_debug_mailbox(memory.get_arm_debug_interface()?, dp, &ap)?;
 
-        // Halt the core in case it didn't stop at a breakpiont.
+        // Halt the core in case it didn't stop at a breakpoint.
         tracing::trace!("halting MIMXRT5xxS Cortex-M33 core");
         let mut dhcsr = Dhcsr(0);
         dhcsr.set_c_halt(true);
@@ -452,7 +452,7 @@ impl MIMXRT5xxS {
 
         if enabled_mailbox {
             // We'll double-check now to make sure we're in a reasonable state.
-            if !memory.generic_status()?.DeviceEn {
+            if !memory.generic_status()?.DeviceEn() {
                 tracing::warn!(
                     "MIMXRT5xxS is still not ready to debug, even after using DebugMailbox to activate session"
                 );
@@ -720,9 +720,9 @@ impl ArmDebugSequence for MIMXRT5xxS {
 
         if can_read_pins {
             let start = Instant::now();
-            let timeout_occured = || start.elapsed() > Duration::from_secs(1);
+            let timeout_occurred = || start.elapsed() > Duration::from_secs(1);
 
-            while assert_n_reset()? & n_reset == 0 && !timeout_occured() {
+            while assert_n_reset()? & n_reset == 0 && !timeout_occurred() {
                 // Block until either condition passes
             }
         } else {

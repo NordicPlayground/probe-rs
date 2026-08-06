@@ -5,6 +5,7 @@ use nusb::{DeviceInfo, Interface, MaybeFuture};
 
 use crate::probe::{
     self, DebugProbeError, DebugProbeInfo, DebugProbeSelector, ProbeCreationError,
+    list::{ProbeListItem, usb_probe_accessibility},
     usb_util::InterfaceExt,
 };
 
@@ -50,14 +51,14 @@ impl From<Clock> for u8 {
     }
 }
 
-/// Ch347 device, whitch is a usb to gpio/i2c/spi/jtag/swd
+/// Ch347 device, which is a usb to gpio/i2c/spi/jtag/swd
 /// ch347 has different packages, ch347f and ch347t
 /// ch347t work mode depend on pin state on bool
 /// ch347f full work
 pub struct Ch347UsbJtagDevice {
     device: Interface,
     name: String,
-    comand_quene: Vec<Command>,
+    command_queue: Vec<Command>,
     response: BitVec,
     /// default 0x06
     epout: u8,
@@ -161,7 +162,7 @@ impl Ch347UsbJtagDevice {
         Ok(Self {
             device: interface,
             name: "ch347".into(),
-            comand_quene: Vec::new(),
+            command_queue: Vec::new(),
             response: BitVec::new(),
             epout: 0x06,
             epin: 0x86,
@@ -238,7 +239,7 @@ impl Ch347UsbJtagDevice {
         let mut obuf = vec![];
         let mut command = vec![0xD2];
 
-        for &i in self.comand_quene.iter() {
+        for &i in self.command_queue.iter() {
             let byte = u8::from(i);
             // the byte is clock low, bit 0 = 1 that clock high
             obuf.push(byte);
@@ -254,14 +255,14 @@ impl Ch347UsbJtagDevice {
             .read_bulk(self.epin, &mut buffer, Duration::from_millis(100))
             .map_err(ProbeCreationError::Usb)?;
 
-        for (&c, &byte) in self.comand_quene.iter().zip(&buffer[3..]) {
+        for (&c, &byte) in self.command_queue.iter().zip(&buffer[3..]) {
             let Command::Clock { capture, .. } = c;
             if capture {
                 self.response.push(byte != 0x00);
             }
         }
 
-        self.comand_quene.clear();
+        self.command_queue.clear();
         Ok(())
     }
 
@@ -272,10 +273,11 @@ impl Ch347UsbJtagDevice {
         capture: bool,
     ) -> Result<(), DebugProbeError> {
         // max clock len is 127
-        if self.comand_quene.len() >= 127 {
+        if self.command_queue.len() >= 127 {
             self.flush()?;
         }
-        self.comand_quene.push(Command::Clock { tms, tdi, capture });
+        self.command_queue
+            .push(Command::Clock { tms, tdi, capture });
         Ok(())
     }
 
@@ -285,12 +287,12 @@ impl Ch347UsbJtagDevice {
     }
 }
 
-pub(super) fn list_ch347usbjtag_devices() -> Vec<DebugProbeInfo> {
+pub(super) fn list_ch347usbjtag_devices() -> Vec<ProbeListItem> {
     match nusb::list_devices().wait() {
         Ok(devices) => devices
             .filter(is_ch34x_device)
             .map(|device| {
-                DebugProbeInfo::new(
+                let info = DebugProbeInfo::new(
                     "CH347 USB Jtag".to_string(),
                     device.vendor_id(),
                     device.product_id(),
@@ -298,7 +300,11 @@ pub(super) fn list_ch347usbjtag_devices() -> Vec<DebugProbeInfo> {
                     &Ch347UsbJtagFactory,
                     None,
                     false,
-                )
+                );
+                ProbeListItem {
+                    info,
+                    accessibility: usb_probe_accessibility(&device),
+                }
             })
             .collect(),
         Err(e) => {
